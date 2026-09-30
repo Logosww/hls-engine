@@ -110,7 +110,7 @@ impl CancelToken for TestCancelToken {
 }
 
 /// Zeros out `creation_time` and `modification_time` fields in `mvhd` and
-/// `mdhd` boxes within the `moov` box. These fields use wall-clock time
+/// `mdhd` and `tkhd` boxes within the `moov` box. These fields use wall-clock time
 /// (`SystemTime::now()` in `mp4.rs`), so they differ between outputs
 /// produced at different times. Normalizing them allows byte-level
 /// comparison of structurally identical files.
@@ -121,30 +121,85 @@ fn normalize_moov_timestamps(data: &mut [u8]) {
 fn walk_and_zero_timestamps(data: &mut [u8], start: usize, end: usize) {
     let mut offset = start;
     while offset + 8 <= end {
-        let size = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        if size < 8 || offset + size > end {
+        let size = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+        let (size, header) = if size == 1 {
+            if offset + 16 > end {
+                break;
+            }
+            let Ok(size) = usize::try_from(u64::from_be_bytes(
+                data[offset + 8..offset + 16].try_into().unwrap(),
+            )) else {
+                break;
+            };
+            (size, 16)
+        } else {
+            (size as usize, 8)
+        };
+        let Some(box_end) = offset
+            .checked_add(size)
+            .filter(|&box_end| size >= header && box_end <= end)
+        else {
             break;
-        }
+        };
+        let payload = offset + header;
         let btype = &data[offset + 4..offset + 8];
         match btype {
-            b"mvhd" | b"mdhd" => {
-                // version(1) + flags(3) + creation_time(4) + modification_time(4)
-                // For version 0, timestamps are 4 bytes each at offset 12..20.
-                if offset + 20 <= end {
-                    data[offset + 12..offset + 20].fill(0);
+            b"mvhd" | b"mdhd" | b"tkhd" => {
+                // FullBox fields precede two u32 (v0) or two u64 (v1) timestamps.
+                if payload + 4 <= box_end {
+                    let width = match data[payload] {
+                        0 => 8,
+                        1 => 16,
+                        _ => 0,
+                    };
+                    if payload + 4 + width <= box_end {
+                        data[payload + 4..payload + 4 + width].fill(0);
+                    }
                 }
             }
             b"moov" | b"trak" | b"mdia" => {
-                walk_and_zero_timestamps(data, offset + 8, offset + size);
+                walk_and_zero_timestamps(data, payload, box_end);
             }
             _ => {}
         }
-        offset += size;
+        offset = box_end;
+    }
+}
+
+#[test]
+fn timestamp_normalization_handles_tkhd_versions_and_extended_headers() {
+    fn boxed(kind: &[u8; 4], payload: &[u8], extended: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if extended {
+            out.extend_from_slice(&1u32.to_be_bytes());
+            out.extend_from_slice(kind);
+            out.extend_from_slice(&(payload.len() as u64 + 16).to_be_bytes());
+        } else {
+            out.extend_from_slice(&(payload.len() as u32 + 8).to_be_bytes());
+            out.extend_from_slice(kind);
+        }
+        out.extend_from_slice(payload);
+        out
+    }
+    for version in [0, 1] {
+        for extended in [false, true] {
+            let make_file = |clock_byte| {
+                let mut payload = vec![version, 0, 0, 7];
+                payload.extend(vec![clock_byte; if version == 0 { 8 } else { 16 }]);
+                // Non-clock fields must survive normalization.
+                payload.extend_from_slice(&[9, 8, 7, 6]);
+                let tkhd = boxed(b"tkhd", &payload, extended);
+                let trak = boxed(b"trak", &tkhd, extended);
+                boxed(b"moov", &trak, extended)
+            };
+            let mut first = make_file(42);
+            let mut second = make_file(43);
+            assert_ne!(first, second);
+            normalize_moov_timestamps(&mut first);
+            normalize_moov_timestamps(&mut second);
+            assert_eq!(first, second);
+            assert_eq!(&first[first.len() - 4..], &[9, 8, 7, 6]);
+        }
     }
 }
 
@@ -679,7 +734,7 @@ async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
     let mut actual = std::fs::read(&output).unwrap();
     normalize_moov_timestamps(&mut expected);
     normalize_moov_timestamps(&mut actual);
-    // The fragmented demux infers video durations like the batch path.
+    // This fixture has the same stored sample durations as the batch path.
     assert_eq!(actual, expected);
     // Repeated stale finalize checkpoints cannot damage the completed target.
     assert!(

@@ -113,7 +113,11 @@ impl Mp4Muxer {
         Self { tracks }
     }
 
-    pub(crate) fn write(mut self) -> Result<(Vec<u8>, Vec<TrackInfo>)> {
+    pub(crate) fn write_checked(
+        mut self,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<(Vec<u8>, Vec<TrackInfo>)> {
+        check()?;
         if self.tracks.is_empty() {
             return Err(Error::muxing("MP4 output requires at least one track"));
         }
@@ -130,6 +134,7 @@ impl Mp4Muxer {
         let mut placed: Vec<(u64, usize, usize)> = Vec::new(); // (first_dts, track_idx, chunk_idx_in_track)
         for (track_index, chunks) in chunks_per_track.iter().enumerate() {
             for (chunk_index, chunk) in chunks.iter().enumerate() {
+                check()?;
                 let first_dts = self.tracks[track_index].samples()[chunk.first_sample].dts;
                 placed.push((first_dts, track_index, chunk_index));
             }
@@ -166,6 +171,7 @@ impl Mp4Muxer {
             let samples = &self.tracks[track_index].samples()
                 [chunk.first_sample..chunk.first_sample + chunk.sample_count as usize];
             for sample in samples {
+                check()?;
                 mdat_payload.extend_from_slice(&sample.data);
                 current_mdat_offset += sample.data.len() as u64;
             }
@@ -180,6 +186,7 @@ impl Mp4Muxer {
                 sample.offset = 0;
             }
         }
+        check()?;
         let dummy_moov = moov_box(&self.tracks, &chunks_per_track)?;
         let moov_size = dummy_moov.len();
 
@@ -189,6 +196,7 @@ impl Mp4Muxer {
         for track_index in 0..self.tracks.len() {
             let chunks = &chunks_per_track[track_index];
             for (chunk_index, chunk) in chunks.iter().enumerate() {
+                check()?;
                 let file_offset = mdat_file_offset + chunk_mdat_offsets[track_index][chunk_index];
                 // Set the chunk's first sample offset; subsequent samples in
                 // the chunk get sequential offsets derived from sample sizes.
@@ -203,6 +211,7 @@ impl Mp4Muxer {
         }
 
         // --- Second moov pass with real offsets.
+        check()?;
         let moov = moov_box(&self.tracks, &chunks_per_track)?;
         debug_assert_eq!(moov.len(), moov_size);
 
@@ -213,7 +222,10 @@ impl Mp4Muxer {
         out.extend_from_slice(&ftyp);
         out.extend_from_slice(&moov);
         write_box_header(&mut out, b"mdat", 8 + mdat_payload.len())?;
-        out.extend_from_slice(&mdat_payload);
+        for chunk in mdat_payload.chunks(1024 * 1024) {
+            check()?;
+            out.extend_from_slice(chunk);
+        }
 
         let infos = self.tracks.iter().map(Mp4Track::track_info).collect();
         Ok((out, infos))

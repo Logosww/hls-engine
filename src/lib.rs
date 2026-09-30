@@ -87,8 +87,8 @@
 //! - [`FragmentedMp4`](OutputFormat::FragmentedMp4): fragmented MP4 / CMAF
 //!   (`ftyp` + `moov` + per-segment `moof` + `mdat`), streaming pipeline.
 //! - [`StreamingMp4`](OutputFormat::StreamingMp4): non-fragmented MP4 via the
-//!   streaming fragmented pipeline + finalization. Same output as `Mp4`, lower
-//!   peak memory; the temp file is a playable fMP4 if interrupted.
+//!   streaming fragmented pipeline + finalization. Downloading is streamed; Native
+//!   finalization still buffers the full media. The temp file is retained on failure.
 //!
 //! # Not yet supported
 //!
@@ -112,7 +112,9 @@ mod types;
 
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
-pub use resume::TransmuxResumeState;
+pub use resume::{
+    CHECKPOINT_SCHEMA_VERSION, CheckpointDurability, TransmuxResumeState, TransmuxStage,
+};
 #[cfg(feature = "default-source")]
 pub use source::ReqwestSource;
 pub use source::{ByteRange, HlsInput, MemorySource, Source, SourceLocation, TextResource};
@@ -121,3 +123,6 @@ pub use transmux::{
     transmux_hls_to_mp4_async, transmux_hls_to_mp4_bytes, transmux_hls_to_writer_async,
 };
 pub use types::{Codec, TrackInfo, TrackType, TransmuxReport};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use transmux::finalize_partial_mp4_async;

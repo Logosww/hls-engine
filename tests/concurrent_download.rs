@@ -100,8 +100,31 @@ async fn handle_request(
     let path = parts.next().unwrap_or("/");
     let path = path.to_string();
 
+    if let Some(number) = path
+        .strip_prefix("/media-")
+        .and_then(|s| s.strip_suffix(".m3u8"))
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        let mut body = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:10\n");
+        for index in 0..number {
+            body.push_str(&format!("#EXTINF:10,\nsegment-{index}.ts\n"));
+        }
+        body.push_str("#EXT-X-ENDLIST\n");
+        sock.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .as_bytes(),
+        )
+        .await?;
+        return Ok(());
+    }
+
     if !path.starts_with("/segment-") || !path.ends_with(".ts") {
-        let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found";
+        let resp =
+            b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 9\r\n\r\nnot found";
         sock.write_all(resp).await?;
         return Ok(());
     }
@@ -138,7 +161,7 @@ async fn handle_request(
         }
         let body = &fixture[start..start + len];
         let header = format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\n\
+            "HTTP/1.1 206 Partial Content\r\nConnection: close\r\nContent-Length: {}\r\n\
              Content-Range: bytes {}-{}/{}\r\n\r\n",
             len,
             start,
@@ -149,7 +172,7 @@ async fn handle_request(
         sock.write_all(body).await?;
     } else {
         let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
             fixture.len()
         );
         sock.write_all(header.as_bytes()).await?;
@@ -429,4 +452,101 @@ async fn sequential_still_works() {
     assert_eq!(report.segment_count, 3);
     assert!(report.bytes_written > 0);
     assert_eq!(server.request_count(), 3);
+}
+
+#[tokio::test]
+async fn shared_source_sessions_are_independent_sequentially_and_concurrently() {
+    let server = ConcurrentServer::start(0).await;
+    let source = Arc::new(ReqwestSource::with_concurrency(2));
+    let run = |count: usize| {
+        let input = HlsInput::custom(
+            source.clone(),
+            SourceLocation::Url(
+                url::Url::parse(&format!("{}/media-{count}.m3u8", server.base_url)).unwrap(),
+            ),
+        );
+        async move {
+            let mut bytes = Vec::new();
+            hls_transmux::transmux_hls_to_writer_async(
+                input,
+                &mut bytes,
+                TransmuxOptions {
+                    output_format: OutputFormat::FragmentedMp4,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .segment_count
+        }
+    };
+    assert_eq!(run(2).await, 2);
+    assert_eq!(run(3).await, 3);
+    let (left, right) = tokio::join!(run(2), run(3));
+    assert_eq!((left, right), (2, 3));
+    assert_eq!(
+        server.request_count(),
+        10,
+        "sessions must not share cached slots"
+    );
+}
+
+#[derive(Debug)]
+struct SessionCancel(tokio::sync::watch::Sender<bool>);
+impl hls_transmux::CancelToken for SessionCancel {
+    fn is_cancelled(&self) -> bool {
+        *self.0.borrow()
+    }
+    fn cancelled(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let mut rx = self.0.subscribe();
+        Box::pin(async move {
+            let _ = rx.wait_for(|value| *value).await;
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancelling_one_shared_source_session_does_not_cancel_another() {
+    let server = ConcurrentServer::start(0).await;
+    let source = Arc::new(ReqwestSource::with_concurrency(2));
+    let location =
+        SourceLocation::Url(url::Url::parse(&format!("{}/media-6.m3u8", server.base_url)).unwrap());
+    let token = Arc::new(SessionCancel(tokio::sync::watch::channel(false).0));
+    let trigger = token.clone();
+    let left = async {
+        let mut bytes = Vec::new();
+        hls_transmux::transmux_hls_to_writer_async(
+            HlsInput::custom(source.clone(), location.clone()),
+            &mut bytes,
+            TransmuxOptions {
+                output_format: OutputFormat::FragmentedMp4,
+                cancel: Some(token),
+                on_progress: Some(Arc::new(move |p| {
+                    if p.completed_segments == 1 {
+                        trigger.0.send_replace(true);
+                    }
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+    };
+    let right = async {
+        let mut bytes = Vec::new();
+        hls_transmux::transmux_hls_to_writer_async(
+            HlsInput::custom(source.clone(), location.clone()),
+            &mut bytes,
+            TransmuxOptions {
+                output_format: OutputFormat::FragmentedMp4,
+                ..Default::default()
+            },
+        )
+        .await
+    };
+    let (cancelled, complete) =
+        tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(left, right) })
+            .await
+            .unwrap();
+    assert!(matches!(cancelled, Err(hls_transmux::Error::Cancelled)));
+    assert_eq!(complete.unwrap().segment_count, 6);
 }

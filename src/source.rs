@@ -68,6 +68,18 @@ pub struct TextResource {
 /// The trait uses boxed futures (no `async-trait` dependency) so it is
 /// object-safe and can be used as `Arc<dyn Source>`.
 pub trait Source: Send + Sync + std::fmt::Debug {
+    /// Creates an isolated task session. Returning `None` uses this source
+    /// directly. Custom sources owning background work should return a session
+    /// whose Drop stops that work; sessions must not cancel other tasks.
+    fn create_session(&self) -> Option<Arc<dyn Source>> {
+        None
+    }
+
+    /// Stops background work for a task session. The pipeline calls this on
+    /// cancellation and session teardown. Custom sources overriding this method
+    /// should also implement create_session to avoid stopping unrelated tasks.
+    fn stop_session(&self) {}
+
     /// Reads the full text content at `location` (typically a `.m3u8`
     /// playlist). Implementations should follow HTTP redirects and return the
     /// final resolved location in [`TextResource::location`].
@@ -166,6 +178,7 @@ pub struct ReqwestSource {
     /// hold the only `Arc<PrefetchState>` refs forever (deadlock) since
     /// `cancel_tx` would never drop.
     cancel_tx: std::sync::OnceLock<tokio::sync::watch::Sender<bool>>,
+    tasks: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 #[cfg(feature = "default-source")]
@@ -196,6 +209,7 @@ impl Clone for ReqwestSource {
             // Clones are independent — they do not share prefetch caches.
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -211,6 +225,7 @@ impl ReqwestSource {
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -223,6 +238,7 @@ impl ReqwestSource {
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -236,6 +252,7 @@ impl ReqwestSource {
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -250,6 +267,7 @@ impl ReqwestSource {
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -270,6 +288,7 @@ impl ReqwestSource {
             headers,
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -291,6 +310,17 @@ impl ReqwestSource {
             headers,
             state: std::sync::OnceLock::new(),
             cancel_tx: std::sync::OnceLock::new(),
+            tasks: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn track_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut tasks = self.tasks.lock().unwrap();
+        tasks.retain(|task| !task.is_finished());
+        if self.cancel_tx.get().is_some_and(|signal| *signal.borrow()) {
+            task.abort();
+        } else {
+            tasks.push(task.abort_handle());
         }
     }
 
@@ -308,7 +338,27 @@ impl ReqwestSource {
 }
 
 #[cfg(feature = "default-source")]
+impl Drop for ReqwestSource {
+    fn drop(&mut self) {
+        self.stop_session();
+    }
+}
+
+#[cfg(feature = "default-source")]
 impl Source for ReqwestSource {
+    fn create_session(&self) -> Option<Arc<dyn Source>> {
+        Some(Arc::new(self.clone()))
+    }
+
+    fn stop_session(&self) {
+        if let Some(signal) = self.cancel_tx.get() {
+            signal.send_replace(true);
+        }
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }
+
     fn read_text<'a>(
         &'a self,
         location: &'a SourceLocation,
@@ -412,7 +462,7 @@ impl Source for ReqwestSource {
                                     let fetch_url = url.clone();
                                     let fetch_range = range.copied();
                                     let fetch_slot = std::sync::Arc::clone(&slot);
-                                    tokio::spawn(async move {
+                                    let task = tokio::spawn(async move {
                                         let result = fetch_bytes_with_range(
                                             &http,
                                             &headers,
@@ -432,6 +482,7 @@ impl Source for ReqwestSource {
                                         drop(s);
                                         fetch_slot.notify.notify_waiters();
                                     });
+                                    self.track_task(task);
                                     slot
                                 }
                             }
@@ -516,15 +567,55 @@ impl HlsInput {
 #[derive(Debug, Clone)]
 pub(crate) struct SourceReader {
     source: Arc<dyn Source>,
+    cancel: Option<Arc<dyn crate::CancelToken>>,
+    _session: Arc<SessionGuard>,
+}
+
+#[derive(Debug)]
+struct SessionGuard {
+    source: Arc<dyn Source>,
+    monitor: Option<tokio::task::AbortHandle>,
+}
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.source.stop_session();
+        if let Some(monitor) = &self.monitor {
+            monitor.abort();
+        }
+    }
 }
 
 impl SourceReader {
-    pub(crate) fn new(source: Arc<dyn Source>) -> Self {
-        Self { source }
+    pub(crate) fn new(
+        source: Arc<dyn Source>,
+        cancel: Option<Arc<dyn crate::CancelToken>>,
+    ) -> Self {
+        let source = source.create_session().unwrap_or(source);
+        let monitor = cancel.as_ref().map(|token| {
+            let token = token.clone();
+            let session = source.clone();
+            tokio::spawn(async move {
+                token.cancelled().await;
+                session.stop_session();
+            })
+            .abort_handle()
+        });
+        let guard = Arc::new(SessionGuard {
+            source: source.clone(),
+            monitor,
+        });
+        Self {
+            source,
+            cancel,
+            _session: guard,
+        }
     }
 
     pub(crate) async fn read_text(&self, location: &SourceLocation) -> Result<TextResource> {
-        self.source.read_text(location).await
+        crate::cancel::wait(self.cancel.as_ref(), async {
+            self.source.read_text(location).await
+        })
+        .await
     }
 
     pub(crate) async fn read_bytes(
@@ -532,7 +623,10 @@ impl SourceReader {
         location: &SourceLocation,
         range: Option<&ByteRange>,
     ) -> Result<Vec<u8>> {
-        self.source.read_bytes(location, range).await
+        crate::cancel::wait(self.cancel.as_ref(), async {
+            self.source.read_bytes(location, range).await
+        })
+        .await
     }
 }
 
@@ -758,7 +852,7 @@ impl ReqwestSource {
     /// No-op unless: concurrency > 1, the location is a URL, the content
     /// parses as a media playlist with at least one segment.
     fn try_start_prefetch(&self, resource: &TextResource) {
-        if self.concurrency <= 1 {
+        if self.concurrency <= 1 || self.state.get().is_some() {
             return;
         }
         let SourceLocation::Url(playlist_url) = &resource.location else {
@@ -821,10 +915,11 @@ impl ReqwestSource {
         // Workers stop when targets is empty OR cancel_tx is dropped
         // (i.e. ReqwestSource is dropped).
         for _ in 0..self.concurrency {
-            tokio::spawn(prefetch_worker(
+            let task = tokio::spawn(prefetch_worker(
                 std::sync::Arc::clone(state),
                 cancel_rx.clone(),
             ));
+            self.track_task(task);
         }
     }
 }
@@ -892,7 +987,11 @@ async fn prefetch_worker(
         // Fetch the bytes. Don't hold any locks across the await.
         let http = state.http.clone();
         let headers = state.headers.clone();
-        let result = fetch_bytes_with_range(&http, &headers, &url, range.as_ref()).await;
+        let result = tokio::select! {
+            biased;
+            _ = cancel_rx.changed() => return,
+            result = fetch_bytes_with_range(&http, &headers, &url, range.as_ref()) => result,
+        };
 
         // Store the result and wake any waiting consumers.
         let mut s = slot.state.lock().await;
@@ -916,14 +1015,30 @@ async fn read_from_slot(
     key: &SlotKey,
     slot: &std::sync::Arc<Slot>,
 ) -> Result<Vec<u8>> {
+    read_from_slot_with_hook(state, key, slot, || async {}).await
+}
+
+#[cfg(feature = "default-source")]
+async fn read_from_slot_with_hook<F, Fut>(
+    state: Arc<PrefetchState>,
+    key: &SlotKey,
+    slot: &Arc<Slot>,
+    mut before_wait: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = ()>,
+{
     loop {
+        let notified = slot.notify.notified();
         let s = slot.state.lock().await;
         match &*s {
             SlotState::InFlight => {
                 // Drop the lock before awaiting, so the fetch task can
                 // acquire it to store the result.
                 drop(s);
-                slot.notify.notified().await;
+                before_wait().await;
+                notified.await;
                 continue;
             }
             SlotState::Ready(bytes) => {
@@ -1019,6 +1134,8 @@ async fn fetch_bytes_with_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "default-source")]
+    use std::task::Poll;
 
     #[test]
     fn resolves_file_relative_paths() {
@@ -1050,5 +1167,172 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"3456");
+    }
+    #[cfg(feature = "default-source")]
+    #[tokio::test]
+    async fn completion_between_state_check_and_wait_never_loses_notification() {
+        for worker_slot in [false, true] {
+            for failure in [false, true] {
+                let state = Arc::new(PrefetchState {
+                    slots: std::sync::Mutex::new(HashMap::new()),
+                    targets: std::sync::Mutex::new(Default::default()),
+                    http: reqwest::Client::new(),
+                    headers: Default::default(),
+                    buffer_sem: Arc::new(tokio::sync::Semaphore::new(1)),
+                });
+                let permit = if worker_slot {
+                    Some(state.buffer_sem.clone().acquire_owned().await.unwrap())
+                } else {
+                    None
+                };
+                let slot = Arc::new(Slot {
+                    state: tokio::sync::Mutex::new(SlotState::InFlight),
+                    notify: tokio::sync::Notify::new(),
+                    _buffer_permit: permit,
+                });
+                let key = (Url::parse("https://example.test/segment.ts").unwrap(), None);
+                state
+                    .slots
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone(), slot.clone());
+                let checked = Arc::new(tokio::sync::Notify::new());
+                let finished = Arc::new(tokio::sync::Notify::new());
+                let producer_slot = slot.clone();
+                let begin = checked.clone();
+                let done = finished.clone();
+                let producer = tokio::spawn(async move {
+                    begin.notified().await;
+                    *producer_slot.state.lock().await = if failure {
+                        SlotState::Failed("controlled failure".into())
+                    } else {
+                        SlotState::Ready(Arc::new(vec![1, 2, 3]))
+                    };
+                    producer_slot.notify.notify_waiters();
+                    done.notify_one();
+                });
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    read_from_slot_with_hook(state.clone(), &key, &slot, || {
+                        let begin = checked.clone();
+                        let done = finished.clone();
+                        async move {
+                            begin.notify_one();
+                            done.notified().await;
+                        }
+                    }),
+                )
+                .await
+                .expect("lost wakeup");
+                assert_eq!(result.is_err(), failure);
+                assert!(state.slots.lock().unwrap().is_empty());
+                producer.await.unwrap();
+                drop(slot);
+                assert_eq!(state.buffer_sem.available_permits(), 1);
+            }
+        }
+    }
+
+    #[cfg(feature = "default-source")]
+    #[tokio::test]
+    async fn dropping_session_aborts_worker_and_consumer_tasks() {
+        let original = Arc::new(ReqwestSource::with_concurrency(2));
+        // A cloned session has its own lifecycle even while the original Arc lives.
+        let session = original.as_ref().clone();
+        session.try_start_prefetch(&TextResource {
+            content: "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nworker.ts\n#EXT-X-ENDLIST\n"
+                .into(),
+            location: SourceLocation::Url(Url::parse("http://127.0.0.1:9/media.m3u8").unwrap()),
+        });
+        // Poll a consumer-created slot without giving its fetch time to finish.
+        let location = SourceLocation::Url(Url::parse("http://127.0.0.1:9/consumer.ts").unwrap());
+        let mut read = session.read_bytes(&location, None);
+        assert!(std::future::poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx).is_pending())).await);
+        drop(read);
+        let handles = session.tasks.lock().unwrap().clone();
+        assert_eq!(
+            handles.len(),
+            3,
+            "two workers and one consumer-created fetch"
+        );
+        drop(session);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handles.iter().any(|h| !h.is_finished()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session background work outlived task");
+        assert!(original.state.get().is_none());
+        assert!(original.tasks.lock().unwrap().is_empty());
+    }
+    #[derive(Debug, Clone)]
+    struct SessionSource {
+        stopped: Arc<std::sync::atomic::AtomicUsize>,
+        signal: Arc<tokio::sync::Notify>,
+        once: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Source for SessionSource {
+        fn create_session(&self) -> Option<Arc<dyn Source>> {
+            Some(Arc::new(Self {
+                once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ..self.clone()
+            }))
+        }
+        fn stop_session(&self) {
+            if !self.once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.stopped
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.signal.notify_one();
+            }
+        }
+        fn read_text<'a>(
+            &'a self,
+            _: &'a SourceLocation,
+        ) -> Pin<Box<dyn Future<Output = Result<TextResource>> + Send + 'a>> {
+            Box::pin(std::future::pending())
+        }
+        fn read_bytes<'a>(
+            &'a self,
+            _: &'a SourceLocation,
+            _: Option<&'a ByteRange>,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    #[derive(Debug)]
+    struct WatchCancel(tokio::sync::watch::Sender<bool>);
+    impl crate::CancelToken for WatchCancel {
+        fn is_cancelled(&self) -> bool {
+            *self.0.borrow()
+        }
+        fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            let mut receiver = self.0.subscribe();
+            Box::pin(async move {
+                let _ = receiver.wait_for(|value| *value).await;
+            })
+        }
+    }
+    #[tokio::test]
+    async fn cancel_stops_session_before_reader_is_dropped() {
+        let stopped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let signal = Arc::new(tokio::sync::Notify::new());
+        let original = Arc::new(SessionSource {
+            stopped: stopped.clone(),
+            signal: signal.clone(),
+            once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let token = Arc::new(WatchCancel(tokio::sync::watch::channel(false).0));
+        let first = SourceReader::new(original.clone(), Some(token.clone()));
+        let second = SourceReader::new(original.clone(), None);
+        token.0.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), signal.notified())
+            .await
+            .unwrap();
+        assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!original.once.load(std::sync::atomic::Ordering::SeqCst));
+        drop(first);
+        drop(second);
+        assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

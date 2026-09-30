@@ -1,6 +1,6 @@
 [package]
 name = "hls-transmux"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "A small, dependency-light HLS → MP4 transmuxer for Rust (TS/fMP4 in, MP4/CMAF out)."
 license = "MIT"
@@ -25,10 +25,11 @@ default-source = ["dep:reqwest"]
 ffmpeg-finalize = ["dep:ffmpeg-next"]
 # Derive `Serialize`/`Deserialize` for `TransmuxResumeState` so callers can
 # persist the resume checkpoint directly via e.g. `serde_json`. Off by default;
-# callers may also serialize the 4 plain fields themselves without this feature.
+# callers may also serialize the versioned checkpoint fields without this feature.
 serde = ["dep:serde"]
 
 [dependencies]
+sha2 = "0.10"
 ffmpeg-next = { version = "9.0", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -40,3 +41,7 @@ url = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", default-features = false, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["time"] }
+serde_json = "1"

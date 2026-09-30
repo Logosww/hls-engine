@@ -404,6 +404,7 @@ async fn writer_rejects_resume() {
                 bytes_written: 1000,
                 next_sequence: 2,
                 global_base_dts_90k: 0,
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -433,7 +434,9 @@ async fn writer_progress_reports_bytes_written() {
         TransmuxOptions {
             output_format: OutputFormat::FragmentedMp4,
             on_progress: Some(Arc::new(move |p: TransmuxProgress| {
-                events_cb.lock().unwrap().push(p);
+                if p.stage != hls_transmux::TransmuxStage::Completed {
+                    events_cb.lock().unwrap().push(p);
+                }
             })),
             ..Default::default()
         },

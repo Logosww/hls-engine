@@ -163,7 +163,9 @@ async fn progress_fires_per_segment() {
     let opts = TransmuxOptions {
         output_format: OutputFormat::FragmentedMp4,
         on_progress: Some(Arc::new(move |p: TransmuxProgress| {
-            events_cb.lock().unwrap().push(p);
+            if p.stage != hls_transmux::TransmuxStage::Completed {
+                events_cb.lock().unwrap().push(p);
+            }
         })),
         ..Default::default()
     };
@@ -302,7 +304,9 @@ async fn resume_produces_identical_output() {
         output_format: OutputFormat::FragmentedMp4,
         resume: Some(r),
         on_progress: Some(Arc::new(move |p: TransmuxProgress| {
-            re_cb.lock().unwrap().push(p);
+            if p.stage != hls_transmux::TransmuxStage::Completed {
+                re_cb.lock().unwrap().push(p);
+            }
         })),
         ..Default::default()
     };
@@ -362,6 +366,7 @@ async fn resume_boundary_already_complete() {
             bytes_written: 1000,
             next_sequence: 4,
             global_base_dts_90k: 0,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -391,6 +396,7 @@ async fn mp4_with_resume_rejected() {
             bytes_written: 1000,
             next_sequence: 2,
             global_base_dts_90k: 0,
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -422,4 +428,454 @@ async fn default_path_unchanged() {
         bytes.len() >= 8 && &bytes[4..8] == b"ftyp",
         "output should start with ftyp box"
     );
+}
+
+// v0.3 failure injection: committed prefixes survive crashes and failed finalize.
+async fn paused_file(
+    name: &str,
+    format: OutputFormat,
+    after: usize,
+) -> (PathBuf, TransmuxResumeState) {
+    paused_file_with_count(name, format, after, 3).await
+}
+
+async fn paused_file_with_count(
+    name: &str,
+    format: OutputFormat,
+    after: usize,
+    count: usize,
+) -> (PathBuf, TransmuxResumeState) {
+    let output = temp_dir(name).join("output.mp4");
+    let token = Arc::new(TestCancelToken::default());
+    let cancel = token.clone();
+    let saved = Arc::new(Mutex::new(None));
+    let snapshot = saved.clone();
+    let result = transmux_hls_to_mp4_async(
+        mock_input(count),
+        &output,
+        TransmuxOptions {
+            output_format: format,
+            cancel: Some(token),
+            checkpoint_durability: hls_transmux::CheckpointDurability::SyncAll,
+            on_progress: Some(Arc::new(move |p| {
+                *snapshot.lock().unwrap() = Some(p.resume);
+                if p.completed_segments == after {
+                    cancel.flag.store(true, Ordering::SeqCst);
+                }
+            })),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Cancelled)));
+    let state = saved.lock().unwrap().clone().unwrap();
+    (output, state)
+}
+
+#[tokio::test]
+async fn recovery_truncates_half_and_complete_uncommitted_fragments() {
+    for complete in [false, true] {
+        let (output, checkpoint) = paused_file(
+            if complete { "tail-full" } else { "tail-half" },
+            OutputFormat::FragmentedMp4,
+            1,
+        )
+        .await;
+        let committed = std::fs::read(&output).unwrap();
+        let full = output.with_extension("reference.mp4");
+        transmux_hls_to_mp4_async(
+            mock_input(3),
+            &full,
+            TransmuxOptions {
+                output_format: OutputFormat::FragmentedMp4,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let reference = std::fs::read(&full).unwrap();
+        let tail = &reference[checkpoint.bytes_written as usize..];
+        let end = if complete { tail.len() } else { tail.len() / 2 };
+        let mut crashed = committed;
+        crashed.extend_from_slice(&tail[..end]);
+        std::fs::write(&output, crashed).unwrap();
+        transmux_hls_to_mp4_async(
+            mock_input(3),
+            &output,
+            TransmuxOptions {
+                output_format: OutputFormat::FragmentedMp4,
+                resume: Some(checkpoint),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut actual = std::fs::read(&output).unwrap();
+        let mut expected = reference;
+        normalize_moov_timestamps(&mut actual);
+        normalize_moov_timestamps(&mut expected);
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn invalid_recovery_never_changes_file() {
+    let (output, checkpoint) =
+        paused_file("invalid-recovery", OutputFormat::FragmentedMp4, 1).await;
+    let original = std::fs::read(&output).unwrap();
+    for case in 0..8 {
+        let mut r = checkpoint.clone();
+        let mut bytes = original.clone();
+        match case {
+            0 => {
+                bytes.pop();
+            }
+            1 => {
+                r.bytes_written -= 1;
+            }
+            2 => {
+                r.next_sequence += 1;
+            }
+            3 => {
+                r.input_digest[0] ^= 1;
+            }
+            4 => {
+                r.init_digest[0] ^= 1;
+            }
+            5 => {
+                r.write_mfra = false;
+            }
+            6 => {
+                r.schema_version = 99;
+            }
+            _ => {
+                let at = bytes.windows(4).position(|b| b == b"mfhd").unwrap();
+                bytes[at + 8..at + 12].copy_from_slice(&2u32.to_be_bytes());
+            }
+        }
+        std::fs::write(&output, &bytes).unwrap();
+        let result = transmux_hls_to_mp4_async(
+            mock_input(3),
+            &output,
+            TransmuxOptions {
+                output_format: OutputFormat::FragmentedMp4,
+                resume: Some(r),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(result.is_err(), "case {case}");
+        assert_eq!(std::fs::read(&output).unwrap(), bytes, "case {case}");
+    }
+    std::fs::write(&output, &original).unwrap();
+    assert!(
+        transmux_hls_to_mp4_async(
+            mock_input(4),
+            &output,
+            TransmuxOptions {
+                output_format: OutputFormat::FragmentedMp4,
+                resume: Some(checkpoint),
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(output).unwrap(), original);
+}
+
+#[derive(Debug)]
+struct NoNetwork;
+impl Source for NoNetwork {
+    fn read_text<'a>(
+        &'a self,
+        _: &'a SourceLocation,
+    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+        panic!("finalize must not read playlist")
+    }
+    fn read_bytes<'a>(
+        &'a self,
+        _: &'a SourceLocation,
+        _: Option<&'a ByteRange>,
+    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+        panic!("finalize must not read media")
+    }
+}
+
+#[tokio::test]
+async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
+    let (output, checkpoint) =
+        paused_file_with_count("finalize-retry", OutputFormat::StreamingMp4, 1, 1).await;
+    assert_eq!(checkpoint.stage, hls_transmux::TransmuxStage::Finalizing);
+    let partial = output.with_file_name("output.partial.mp4");
+    let original = std::fs::read(&partial).unwrap();
+    // An existing complete target remains unchanged on validation failure.
+    std::fs::write(&output, b"previous complete target").unwrap();
+    let mut invalid = checkpoint.clone();
+    invalid.init_digest[0] ^= 1;
+    assert!(
+        hls_transmux::finalize_partial_mp4_async(
+            &partial,
+            &output,
+            invalid,
+            TransmuxOptions {
+                output_format: OutputFormat::StreamingMp4,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&output).unwrap(), b"previous complete target");
+    assert_eq!(std::fs::read(&partial).unwrap(), original);
+    // Real replacement failure: rename cannot replace a directory.
+    let blocked = output.with_extension("directory");
+    std::fs::create_dir_all(&blocked).unwrap();
+    assert!(
+        hls_transmux::finalize_partial_mp4_async(
+            &partial,
+            &blocked,
+            checkpoint.clone(),
+            TransmuxOptions {
+                output_format: OutputFormat::StreamingMp4,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(std::fs::read(&partial).unwrap(), original);
+    let mut with_tail = original.clone();
+    with_tail.extend_from_slice(b"uncommitted garbage");
+    std::fs::write(&partial, &with_tail).unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let saved = events.clone();
+    let report = transmux_hls_to_mp4_async(
+        HlsInput::custom(
+            Arc::new(NoNetwork),
+            SourceLocation::File("unavailable.m3u8".into()),
+        ),
+        &output,
+        TransmuxOptions {
+            output_format: OutputFormat::StreamingMp4,
+            resume: Some(checkpoint.clone()),
+            on_progress: Some(Arc::new(move |p| saved.lock().unwrap().push(p))),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.segment_count, 1);
+    assert!(!partial.exists());
+    assert_eq!(
+        events.lock().unwrap().last().unwrap().stage,
+        hls_transmux::TransmuxStage::Completed
+    );
+    let reference = output.with_extension("reference.mp4");
+    transmux_hls_to_mp4_async(mock_input(1), &reference, TransmuxOptions::default())
+        .await
+        .unwrap();
+    let mut expected = std::fs::read(reference).unwrap();
+    let mut actual = std::fs::read(&output).unwrap();
+    normalize_moov_timestamps(&mut expected);
+    normalize_moov_timestamps(&mut actual);
+    // The fragmented demux infers video durations like the batch path.
+    assert_eq!(actual, expected);
+    // Repeated stale finalize checkpoints cannot damage the completed target.
+    assert!(
+        hls_transmux::finalize_partial_mp4_async(
+            &partial,
+            &output,
+            checkpoint,
+            TransmuxOptions {
+                output_format: OutputFormat::StreamingMp4,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    let mut untouched = std::fs::read(output).unwrap();
+    normalize_moov_timestamps(&mut untouched);
+    assert_eq!(untouched, actual);
+}
+
+#[tokio::test]
+async fn all_segments_downloaded_fragmented_checkpoint_can_finish_index() {
+    let (output, checkpoint) = paused_file("index-retry", OutputFormat::FragmentedMp4, 3).await;
+    let options = TransmuxOptions {
+        output_format: OutputFormat::FragmentedMp4,
+        resume: Some(checkpoint.clone()),
+        ..Default::default()
+    };
+    transmux_hls_to_mp4_async(mock_input(3), &output, options.clone())
+        .await
+        .unwrap();
+    let once = std::fs::read(&output).unwrap();
+    transmux_hls_to_mp4_async(mock_input(3), &output, options)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(output).unwrap(),
+        once,
+        "index must not be duplicated"
+    );
+}
+
+#[cfg(feature = "serde")]
+#[tokio::test]
+async fn checkpoint_serde_roundtrip_and_legacy_rejection() {
+    let (output, checkpoint) =
+        paused_file("serde-checkpoint", OutputFormat::FragmentedMp4, 1).await;
+    let json = serde_json::to_string(&checkpoint).unwrap();
+    assert_eq!(
+        serde_json::from_str::<TransmuxResumeState>(&json).unwrap(),
+        checkpoint
+    );
+    let legacy: TransmuxResumeState = serde_json::from_str(r#"{"completed_segments":1,"bytes_written":1000,"next_sequence":2,"global_base_dts_90k":0}"#).unwrap();
+    let bytes = std::fs::read(&output).unwrap();
+    let err = transmux_hls_to_mp4_async(
+        mock_input(3),
+        &output,
+        TransmuxOptions {
+            output_format: OutputFormat::FragmentedMp4,
+            resume: Some(legacy),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("schema"));
+    assert_eq!(std::fs::read(output).unwrap(), bytes);
+}
+
+#[derive(Debug)]
+struct CancelDuringFinalize(std::sync::atomic::AtomicUsize);
+impl CancelToken for CancelDuringFinalize {
+    fn is_cancelled(&self) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst) >= 50
+    }
+    fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn finalize_cpu_cancellation_waits_for_worker_and_preserves_target() {
+    let (output, checkpoint) =
+        paused_file_with_count("finalize-cancel", OutputFormat::StreamingMp4, 1, 1).await;
+    let partial = output.with_file_name("output.partial.mp4");
+    let original = std::fs::read(&partial).unwrap();
+    std::fs::write(&output, b"complete target").unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        hls_transmux::finalize_partial_mp4_async(
+            &partial,
+            &output,
+            checkpoint,
+            TransmuxOptions {
+                output_format: OutputFormat::StreamingMp4,
+                cancel: Some(Arc::new(CancelDuringFinalize(
+                    std::sync::atomic::AtomicUsize::new(0),
+                ))),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert_eq!(std::fs::read(output).unwrap(), b"complete target");
+    assert_eq!(std::fs::read(partial).unwrap(), original);
+}
+
+#[derive(Debug)]
+struct FailSecond {
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl Source for FailSecond {
+    fn read_text<'a>(
+        &'a self,
+        location: &'a SourceLocation,
+    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+        Box::pin(async move {
+            Ok(TextResource {
+                content: playlist_with(3),
+                location: location.clone(),
+            })
+        })
+    }
+    fn read_bytes<'a>(
+        &'a self,
+        _: &'a SourceLocation,
+        _: Option<&'a ByteRange>,
+    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(async move {
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                Err(Error::Http("injected network failure".into()))
+            } else {
+                Ok(fixture_bytes())
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn network_failure_preserves_streaming_partial_for_resume() {
+    let output = temp_dir("network-failure").join("output.mp4");
+    std::fs::write(&output, b"complete target").unwrap();
+    let saved = Arc::new(Mutex::new(None));
+    let snapshot = saved.clone();
+    let result = transmux_hls_to_mp4_async(
+        HlsInput::custom(
+            Arc::new(FailSecond {
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            SourceLocation::File("playlist.m3u8".into()),
+        ),
+        &output,
+        TransmuxOptions {
+            output_format: OutputFormat::StreamingMp4,
+            on_progress: Some(Arc::new(move |p| {
+                *snapshot.lock().unwrap() = Some(p.resume)
+            })),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Http(_))));
+    assert_eq!(
+        std::fs::read(output.with_file_name("output.partial.mp4"))
+            .unwrap()
+            .len() as u64,
+        saved.lock().unwrap().as_ref().unwrap().bytes_written
+    );
+    assert_eq!(std::fs::read(output).unwrap(), b"complete target");
+}
+
+#[tokio::test]
+async fn streaming_completed_progress_matches_final_output() {
+    let output = temp_dir("completed-progress").join("output.mp4");
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let saved = events.clone();
+    let report = transmux_hls_to_mp4_async(
+        mock_input(1),
+        &output,
+        TransmuxOptions {
+            output_format: OutputFormat::StreamingMp4,
+            on_progress: Some(Arc::new(move |p| saved.lock().unwrap().push(p))),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].stage, hls_transmux::TransmuxStage::Finalizing);
+    let completed = &events[1];
+    assert_eq!(completed.stage, hls_transmux::TransmuxStage::Completed);
+    assert_eq!(completed.bytes_written, report.bytes_written);
+    assert_eq!(completed.resume.bytes_written, report.bytes_written);
+    assert_eq!(completed.resume.duration_ms, report.duration);
+    assert_eq!(completed.downloaded_bytes, events[0].downloaded_bytes);
 }

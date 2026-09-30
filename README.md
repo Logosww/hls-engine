@@ -27,18 +27,18 @@ HTTP dependencies are required.
 | --------------- | -------------------------------------------- | ------------------------------------- | ----------- | ----------------------- |
 | `Mp4` (default) | `ftyp` + `moov` + `mdat`                     | batch (demux all to memory, then mux) | high        | no                      |
 | `FragmentedMp4` | `ftyp` + `moov` + `moof` + `mdat` per segment | streaming (write per segment)         | low         | yes (fMP4)              |
-| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag               | low         | yes (temp file is fMP4) |
+| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag               | high at Native finalize | yes (temp file is fMP4) |
 
 `StreamingMp4` produces the same layout as `Mp4`, but uses a streaming fMP4
-pipeline (writes a temporary fMP4 file) plus end-of-stream defrag for lower peak
-memory on long inputs. The temp file `<output>.partial.<ext>` is a valid,
+pipeline (writes a temporary fMP4 file) plus end-of-stream defrag. Download-stage
+memory is bounded; Native finalize still buffers the full media payload. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
 ## Installation
 
 ```toml
 [dependencies]
-hls-transmux = "0.2"
+hls-transmux = "0.3"
 ```
 
 The `default-source` feature is enabled by default (built-in reqwest-backed HTTP
@@ -46,7 +46,7 @@ client). To drop reqwest entirely and supply your own HTTP reader:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", default-features = false }
+hls-transmux = { version = "0.3", default-features = false }
 ```
 
 Optionally enable `ffmpeg-finalize` to remux via ffmpeg (through `ffmpeg-next`)
@@ -55,7 +55,7 @@ FFmpeg 9 shared libraries and pkg-config on the system:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.3", features = ["ffmpeg-finalize"] }
 ```
 
 Optionally enable `serde` to derive `Serialize`/`Deserialize` for
@@ -63,7 +63,7 @@ Optionally enable `serde` to derive `Serialize`/`Deserialize` for
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", features = ["serde"] }
+hls-transmux = { version = "0.3", features = ["serde"] }
 ```
 
 ## Custom Source
@@ -336,16 +336,71 @@ let report = transmux_hls_to_mp4_async(
 | `bytes_written`       | `u64`   | Current output file size; append continues from this offset         |
 | `next_sequence`       | `u32`   | Next fragment `mfhd` sequence number                                |
 | `global_base_dts_90k` | `u64`   | First-packet DTS (90 kHz); baseline for zeroing all sample timelines |
+| `schema_version` | `u32` | Required wire schema version (currently 1) |
+| `stage` | `TransmuxStage` | Downloading, Finalizing, Completed |
+| `total_segments` | `usize` | Bound manifest segment count |
+| `input_digest` / `init_digest` | `[u8; 32]` | SHA-256 identity of resolved manifest / codec configuration |
+| `output_format` / `write_mfra` | enum / `bool` | Bound output configuration |
+| `duration_ms` | `u64` | Duration accumulated at the committed boundary |
 
 **Constraints:**
 
 - Resume only on `StreamingMp4` / `FragmentedMp4`; `Mp4` + `resume` returns
   `Error::InvalidInput`
-- On resume, the crate re-demuxes `segments[0]` to rebuild codec config (tracks
-  are not in the checkpoint, for cross-version stability)
+- On download resume, the crate re-demuxes `segments[0]` to verify codec config
+  and the original timestamp base before modifying the file
 - On resume completion, the crate scans existing `.partial.mp4` moof boxes to
   rebuild historical `tfra` entries and emit a full `mfra` box (output bytes match
   a fresh run; only wall-clock timestamps may differ)
+
+### v0.3 reliability and finalize recovery
+
+Each call creates an isolated built-in Source session. Cancellation races all
+playlist/init/media reads and writer waits; dropping the entry future stops its
+prefetch workers and consumer fetches. Custom sources with background work can
+implement `Source::create_session` and `stop_session`; default implementations preserve existing
+custom sources. A cancelled non-seekable sink may contain partial output and
+cannot be resumed. File calls settle outstanding file writes before returning
+from ordinary cancellation/error; native CPU finalization checks cancellation
+between parsing/copy operations and waits for its worker to stop.
+
+File checkpoints are emitted after a complete fragment and `flush`. Set
+`checkpoint_durability: CheckpointDurability::SyncAll` to also sync the file before
+the callback. Persist the checkpoint atomically yourself (write a sibling temp,
+sync as required, replace, and sync its parent directory where supported).
+Default flush supports process-crash recovery; power-loss persistence also depends
+on checkpoint persistence, directory metadata and filesystem guarantees. SyncAll
+is rejected for generic writer sinks, whose filesystem guarantees are unknown.
+
+v0.2 checkpoints and unknown schemas are explicitly rejected; start a new v0.3
+job. Changed manifest locations (including changed signed URL parameters), byte
+ranges, codec initialization or output configuration reject download recovery.
+Short files and invalid fragment boundaries/sequences fail without mutation;
+validated extra bytes are truncated to the checkpoint before appending.
+
+StreamingMp4 keeps `<stem>.partial.<ext>` on network/finalize errors and cancel.
+Retain it together with the last checkpoint. A fresh call without `resume`
+starts over and replaces an existing partial file. Delete abandoned partial files
+explicitly with your application's filesystem cleanup. Successful finalization
+writes an independent sibling `.hls-transmux-finalize-*.mp4`, closes/syncs it as
+configured, then atomically renames it over the target. Failure leaves the old
+target intact; platforms refusing replacement return an error without deleting
+that target. Successful completion removes the partial on a best-effort basis.
+
+The final segment emits `Finalizing` before the trailing index is written, so
+interruption while writing that index is recoverable. Pass that checkpoint to
+`finalize_partial_mp4_async(partial, output, checkpoint, options)` with
+`output_format: OutputFormat::StreamingMp4`, or use the existing file entry with
+`options.resume`. Both Finalizing paths use local validated media only, ignoring
+the supplied HLS input. You may select a different finalize backend on retry.
+`Completed` is emitted only after the target replacement; it is a terminal state
+and cannot be resumed. Fragmented output also emits a terminal Completed event
+in addition to its per-segment callbacks. Batch callbacks are informational and
+do not provide resumable checkpoints.
+
+Native finalize still buffers the full media payload; all-stage bounded memory
+is scheduled for roadmap B1. Finalization uses cooperative CPU cancellation;
+filesystem commit and FFmpeg header/trailer operations finish before returning.
 
 ### `serde` feature
 
@@ -353,7 +408,7 @@ Enable `serde` to derive `Serialize`/`Deserialize` on `TransmuxResumeState`:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", features = ["serde"] }
+hls-transmux = { version = "0.3", features = ["serde"] }
 ```
 
 ```rust
@@ -422,7 +477,7 @@ async fn run() -> hls_transmux::Result<()> {
 
 On ties (same bandwidth), Rust `max_by_key` / `min_by_key` returns the last match.
 
-### HTTP master playlist → streaming standard MP4 (low memory)
+### HTTP master playlist → streaming standard MP4
 
 ```rust
 use hls_transmux::{
@@ -592,7 +647,7 @@ in-browser HLS → MP4 transmuxing without file system or network dependencies.
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", default-features = false }
+hls-transmux = { version = "0.3", default-features = false }
 ```
 
 `default-features = false` drops `reqwest` (which requires `tokio/net` and is
@@ -733,17 +788,17 @@ MP4，**不解码、不编码、不转码**。
 | --------------- | -------------------------------------------- | -------------------------------- | -------- | ---------------------- |
 | `Mp4`（默认）   | `ftyp` + `moov` + `mdat`                     | batch（全部 demux 到内存再 mux） | 高       | 否                     |
 | `FragmentedMp4` | `ftyp` + `moov` + 每 segment `moof` + `mdat` | streaming（逐 segment 写盘）     | 低       | 是（fMP4）             |
-| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag          | 低       | 是（temp 文件为 fMP4） |
+| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag          | Native 收尾高 | 是（temp 文件为 fMP4） |
 
 `StreamingMp4` 输出与 `Mp4` 完全一致，但用流式 fMP4 pipeline（写临时 fMP4
-文件）+ 末端 defrag，峰值内存更低，长输入更友好。临时文件
+文件）+ 末端 defrag。下载阶段逐片写盘，Native 收尾仍全量缓冲媒体。临时文件
 `<output>.partial.<ext>` 是合法可播放的 fMP4，中断后可直接播放已下载部分。
 
 ### 安装
 
 ```toml
 [dependencies]
-hls-transmux = "0.2"
+hls-transmux = "0.3"
 ```
 
 默认启用 `default-source` feature（内置 reqwest-backed HTTP
@@ -751,7 +806,7 @@ hls-transmux = "0.2"
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", default-features = false }
+hls-transmux = { version = "0.3", default-features = false }
 ```
 
 可选启用 `ffmpeg-finalize` feature，在 `StreamingMp4` finalization 阶段用
@@ -760,7 +815,7 @@ ffmpeg（via `ffmpeg-next`）做 remux，替代自研 defrag 路径。需要系�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.3", features = ["ffmpeg-finalize"] }
 ```
 
 可选启用 `serde` feature，为 `TransmuxResumeState` 派生
@@ -768,7 +823,7 @@ hls-transmux = { version = "0.2", features = ["ffmpeg-finalize"] }
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", features = ["serde"] }
+hls-transmux = { version = "0.3", features = ["serde"] }
 ```
 
 ### 自定义 Source
@@ -1034,7 +1089,7 @@ let report = transmux_hls_to_mp4_async(
 # fn load_from_db() -> hls_transmux::Result<TransmuxResumeState> { unimplemented!() }
 ```
 
-`TransmuxResumeState` 4 字段：
+`TransmuxResumeState`（schema v1）字段：
 
 | 字段                  | 类型    | 说明                                                           |
 | --------------------- | ------- | -------------------------------------------------------------- |
@@ -1042,16 +1097,58 @@ let report = transmux_hls_to_mp4_async(
 | `bytes_written`       | `u64`   | 输出文件当前字节偏移；crate 以 append 模式打开后从此偏移继续写 |
 | `next_sequence`       | `u32`   | 下一个 fragment 的 mfhd sequence number                        |
 | `global_base_dts_90k` | `u64`   | 首包 DTS（90k 时钟域），所有 sample 时间线归零基准             |
+| `schema_version` | `u32` | 必需的 schema 版本，当前为 1 |
+| `stage` | `TransmuxStage` | Downloading、Finalizing、Completed |
+| `total_segments` | `usize` | 绑定清单的分片总数 |
+| `input_digest` / `init_digest` | `[u8; 32]` | 解析后清单与编码配置的 SHA-256 摘要 |
+| `output_format` / `write_mfra` | enum / `bool` | 绑定输出配置 |
+| `duration_ms` | `u64` | 已提交边界处的累计时长 |
 
 **约束**：
 
 - 仅 `StreamingMp4` / `FragmentedMp4` 支持续传；`Mp4` + `resume` 返回
   `Error::InvalidInput`
-- 续传时 crate 重新 demux `segments[0]` 重建 codec config（tracks 不进
-  checkpoint，跨版本更稳定）
+- 下载续传先重新 demux `segments[0]` 校验 codec config 和时间戳基准，
+  完成文件与输入校验后才截断未提交尾部并追加
 - 续传完成时 crate 扫描已有 `.partial.mp4` 的 moof 重建历史 `tfra`
   entries，输出完整 `mfra` box（与首次完成的输出字节一致，仅 wall-clock
   时间戳差异）
+
+#### v0.3 可靠性与收尾恢复
+
+内置 Source 每次调用创建独立任务会话，读取 playlist/init/media 和 writer
+等待均可取消；丢弃入口 future 会停止该会话的 worker 与自建 fetch。
+自定义后台 Source 可实现 `Source::create_session` 与 `stop_session`；默认实现保持兼容。
+非 seekable sink 取消后可能保留部分字节，不支持恢复。文件入口正常取消或
+错误返回前等待在途文件写入结束；Native CPU 收尾在解析/复制边界检查取消，
+等待 worker 停止后返回。
+
+文件 checkpoint 在完整分片写入和 flush 后发布；设置
+`checkpoint_durability: CheckpointDurability::SyncAll` 可在回调前额外同步文件。
+调用方需自行原子保存 checkpoint：写同目录临时文件、按需 sync、替换并在支持
+的平台同步父目录。默认支持进程崩溃恢复；断电保证还取决于 checkpoint 持久化、
+目录元数据及文件系统。通用 writer 不支持 SyncAll。
+
+v0.2 checkpoint 和未知 schema 明确拒绝，需重新开始 v0.3 任务。下载恢复时
+校验解析后的清单位置（含签名 URL 参数）、byte range、编码配置和输出配置。
+短文件、非法 fragment 边界/sequence 在修改前报错；校验成功后截断未提交尾部。
+
+StreamingMp4 在网络错误、取消和收尾失败后保留 `<stem>.partial.<ext>`。
+同时保存最后 checkpoint；不传 resume 的新任务会重写旧 partial，放弃的成果
+由应用显式删除。收尾先写同目录 `.hls-transmux-finalize-*.mp4`，完成并关闭后
+原子替换目标；失败不删除原目标。平台不支持替换时返回错误。成功后尽力删除
+partial；清理失败不改变已成功提交的输出。
+
+最后一个分片在尾部索引写入前发布 Finalizing checkpoint，因此索引写入中断
+也可恢复。通过 `finalize_partial_mp4_async(partial, output, checkpoint, options)`
+并设置 `output_format: OutputFormat::StreamingMp4` 单独重试，或传给原文件入口的
+`options.resume`。两条 Finalizing 路径都只读取本地校验后的数据，忽略传入的
+HLS 输入；重试可切换 finalize backend。目标替换成功后才发布 Completed；
+该状态不可续传。Fragmented 输出也在每片回调之外增加 Completed 回调。
+Batch 回调只提供信息，不产生可续传 checkpoint。
+
+Native 收尾仍全量缓冲媒体，低内存改造留在 B1。取消为协作式；文件提交以及
+FFmpeg 的 header/trailer 操作完成后才返回。
 
 #### `serde` feature
 
@@ -1060,7 +1157,7 @@ let report = transmux_hls_to_mp4_async(
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", features = ["serde"] }
+hls-transmux = { version = "0.3", features = ["serde"] }
 ```
 
 ```rust
@@ -1130,7 +1227,7 @@ async fn run() -> hls_transmux::Result<()> {
 并列时（多个 variant 带宽相同）按 Rust `max_by_key` / `min_by_key`
 语义返回最后一个匹配元素。
 
-#### HTTP master playlist → 流式标准 MP4（低内存）
+#### HTTP master playlist → 流式标准 MP4
 
 ```rust
 use hls_transmux::{
@@ -1299,7 +1396,7 @@ pump.await.ok();
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.2", default-features = false }
+hls-transmux = { version = "0.3", default-features = false }
 ```
 
 `default-features = false` 移除 `reqwest`（需要 `tokio/net`，与 `wasm32-unknown-unknown`

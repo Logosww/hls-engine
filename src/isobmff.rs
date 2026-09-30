@@ -476,6 +476,15 @@ struct Trun {
 }
 
 pub(crate) fn demux_isobmff(init: &[u8], segment: &[u8]) -> Result<DemuxOutput> {
+    demux_isobmff_checked(init, segment, &|| Ok(()))
+}
+
+pub(crate) fn demux_isobmff_checked(
+    init: &[u8],
+    segment: &[u8],
+    check: &dyn Fn() -> Result<()>,
+) -> Result<DemuxOutput> {
+    check()?;
     let tracks = parse_init_segment(init)?;
     let mut output = DemuxOutput::default();
 
@@ -506,7 +515,7 @@ pub(crate) fn demux_isobmff(init: &[u8], segment: &[u8]) -> Result<DemuxOutput> 
         }
     }
 
-    parse_media_segment(segment, &tracks, &mut output)?;
+    parse_media_segment(segment, &tracks, &mut output, check)?;
     Ok(output)
 }
 
@@ -597,16 +606,18 @@ fn parse_media_segment(
     segment: &[u8],
     tracks: &[InitTrack],
     output: &mut DemuxOutput,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let mut offset = 0;
     while offset + 8 <= segment.len() {
+        check()?;
         let header = read_box_header(&segment[offset..])?;
         if offset + header.total_size > segment.len() {
             return Err(Error::bitstream("ISOBMFF box extends past segment"));
         }
         if &header.box_type == b"moof" {
             let moof_payload = &segment[offset + header.header_size..offset + header.total_size];
-            parse_moof(moof_payload, offset, segment, tracks, output)?;
+            parse_moof(moof_payload, offset, segment, tracks, output, check)?;
         }
         offset += header.total_size;
     }
@@ -619,6 +630,7 @@ fn parse_moof(
     segment: &[u8],
     tracks: &[InitTrack],
     output: &mut DemuxOutput,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     // A moof may contain multiple traf boxes (one per track). Iterate all
     // top-level children of moof and process each traf. Using find_box here
@@ -626,6 +638,7 @@ fn parse_moof(
     let mut offset = 0;
     let mut saw_traf = false;
     while offset + 8 <= moof_payload.len() {
+        check()?;
         let header = read_box_header(&moof_payload[offset..])?;
         if offset + header.total_size > moof_payload.len() {
             return Err(Error::bitstream("ISOBMFF box extends past moof"));
@@ -634,7 +647,7 @@ fn parse_moof(
             saw_traf = true;
             let traf_payload =
                 &moof_payload[offset + header.header_size..offset + header.total_size];
-            parse_traf(traf_payload, moof_offset, segment, tracks, output)?;
+            parse_traf(traf_payload, moof_offset, segment, tracks, output, check)?;
         }
         offset += header.total_size;
     }
@@ -650,6 +663,7 @@ fn parse_traf(
     segment: &[u8],
     tracks: &[InitTrack],
     output: &mut DemuxOutput,
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let tfhd_data = find_box(traf, b"tfhd")?
         .ok_or_else(|| Error::bitstream("traf does not contain a tfhd box"))?;
@@ -676,6 +690,7 @@ fn parse_traf(
     let mut cumulative_duration: u64 = 0;
 
     for sample in &trun.samples {
+        check()?;
         if sample_data_offset < 0
             || sample_data_offset as usize + sample.size as usize > segment.len()
         {

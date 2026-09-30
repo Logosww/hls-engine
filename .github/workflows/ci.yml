@@ -10,7 +10,10 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,8 +26,37 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Test serde checkpoints
+        run: cargo test --features serde
+
+      - name: Test without default source
+        run: cargo test --no-default-features
+
+      - name: Test serde without default source
+        run: cargo test --no-default-features --features serde
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features serde -- -D warnings
+
       - name: Check wasm32 compilation
         run: cargo check --target wasm32-unknown-unknown --no-default-features
 
       - name: Verify publish package
+        if: matrix.os == 'ubuntu-latest'
         run: cargo publish --dry-run
+
+  ffmpeg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FFmpeg libraries
+        run: brew install ffmpeg pkg-config
+      - name: Test FFmpeg backend
+        run: cargo test --all-features
+      - name: Clippy with FFmpeg backend
+        run: cargo clippy --all-targets --all-features -- -D warnings

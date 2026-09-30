@@ -1,6 +1,6 @@
 //! Optional ffmpeg-backed finalization for `StreamingMp4`.
 //!
-//! When the `ffmpeg-finalize` cargo feature is enabled, [`remux_to_mp4`] uses
+//! When the `ffmpeg-finalize` cargo feature is enabled, [`remux_blocking`] uses
 //! ffmpeg (via `ffmpeg-next`) to convert the stage-1 fragmented MP4 temp file
 //! into a standard non-fragmented MP4 (`ftyp` + `moov` + `mdat`, faststart).
 //! This is a packet-copy remux — no decoding or encoding — and serves as an
@@ -14,7 +14,7 @@
 //! ffmpeg runs synchronously, so the work is moved to a blocking task via
 //! [`tokio::task::spawn_blocking`].
 //!
-//! [`remux_to_mp4`]: remux_to_mp4
+//! [`remux_blocking`]: remux_to_mp4
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,43 +22,18 @@ use std::path::{Path, PathBuf};
 use ffmpeg_next as ffmpeg;
 
 use crate::error::{Error, Result};
-use crate::types::TransmuxReport;
 
 /// Remuxes the stage-1 fragmented MP4 (`temp_path`) into a standard MP4 at
 /// `output` using ffmpeg. Packet-copy only (no transcode).
 ///
 /// `segment_count` is forwarded into the returned [`TransmuxReport`] (ffmpeg
 /// does not know the original HLS segment count).
-pub(crate) async fn remux_to_mp4(
-    temp_path: &Path,
-    output: &Path,
-    segment_count: usize,
-) -> Result<TransmuxReport> {
-    let temp = temp_path.to_path_buf();
-    let out = output.to_path_buf();
-
-    let duration_us = tokio::task::spawn_blocking(move || remux_blocking(&temp, &out))
-        .await
-        .map_err(|join_err| {
-            Error::muxing(format!("ffmpeg finalize task panicked: {join_err}"))
-        })??;
-
-    let bytes_written = tokio::fs::metadata(output).await?.len();
-    let duration_ms = duration_us.max(0) as u64 / 1000;
-
-    Ok(TransmuxReport {
-        segment_count,
-        tracks: Vec::new(),
-        duration: duration_ms,
-        duration_timescale: 1000,
-        bytes_written,
-    })
-}
-
-/// Synchronous ffmpeg remux. Returns the input container duration in
-/// microseconds (so the async caller can fold it into the report after the
-/// file is closed).
-fn remux_blocking(input: &Path, output: &PathBuf) -> Result<i64> {
+pub(crate) fn remux_blocking(
+    input: &Path,
+    output: &PathBuf,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<i64> {
+    check()?;
     ffmpeg::init().map_err(|e| Error::muxing(format!("ffmpeg init: {e}")))?;
 
     let mut ictx = ffmpeg::format::input(input)
@@ -71,6 +46,7 @@ fn remux_blocking(input: &Path, output: &PathBuf) -> Result<i64> {
     // (stream copy / remux, no decode/encode). This preserves all tracks.
     let mut stream_map: HashMap<usize, usize> = HashMap::new();
     for stream in ictx.streams() {
+        check()?;
         let codec = ffmpeg::encoder::find(ffmpeg::codec::Id::None);
         let mut ostream = octx
             .add_stream(codec)
@@ -97,6 +73,7 @@ fn remux_blocking(input: &Path, output: &PathBuf) -> Result<i64> {
     // output stream's timebase, and write interleaved. Position/keyframe flags
     // are preserved by ffmpeg's packet infrastructure.
     for (stream, mut packet) in ictx.packets() {
+        check()?;
         let Some(&osti) = stream_map.get(&stream.index()) else {
             // Unmapped stream (e.g. data/closed-caption) — skip.
             continue;
@@ -110,6 +87,7 @@ fn remux_blocking(input: &Path, output: &PathBuf) -> Result<i64> {
             .map_err(|e| Error::muxing(format!("ffmpeg write_packet: {e}")))?;
     }
 
+    check()?;
     octx.write_trailer()
         .map_err(|e| Error::muxing(format!("ffmpeg write_trailer: {e}")))?;
 

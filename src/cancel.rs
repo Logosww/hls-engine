@@ -21,3 +21,22 @@ pub trait CancelToken: Send + Sync + std::fmt::Debug {
     /// cancellation response.
     fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
+
+/// Race cancellable asynchronous work without starting it after cancellation.
+pub(crate) async fn wait<T>(
+    cancel: Option<&std::sync::Arc<dyn CancelToken>>,
+    future: impl Future<Output = crate::Result<T>>,
+) -> crate::Result<T> {
+    if let Some(token) = cancel {
+        if token.is_cancelled() {
+            return Err(crate::Error::Cancelled);
+        }
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(crate::Error::Cancelled),
+            result = future => result,
+        }
+    } else {
+        future.await
+    }
+}

@@ -375,9 +375,7 @@ impl Source for ReqwestSource {
                         let key = (url.clone(), range.copied());
                         // Try the cache first — MutexGuard is dropped before
                         // the await boundary (MutexGuard is !Send).
-                        let cached_slot = {
-                            state.slots.lock().unwrap().get(&key).cloned()
-                        };
+                        let cached_slot = { state.slots.lock().unwrap().get(&key).cloned() };
                         if let Some(slot) = cached_slot {
                             return read_from_slot(state, &key, &slot).await;
                         }
@@ -425,9 +423,7 @@ impl Source for ReqwestSource {
                                         let mut s = fetch_slot.state.lock().await;
                                         match result {
                                             Ok(bytes) => {
-                                                *s = SlotState::Ready(
-                                                    std::sync::Arc::new(bytes),
-                                                );
+                                                *s = SlotState::Ready(std::sync::Arc::new(bytes));
                                             }
                                             Err(e) => {
                                                 *s = SlotState::Failed(e.to_string());
@@ -624,10 +620,7 @@ impl MemorySource {
     /// Creates a `MemorySource` from pre-fetched playlist texts and segment
     /// bytes. Both maps are keyed by absolute URL string (or filesystem path
     /// string for `SourceLocation::File`).
-    pub fn with_data(
-        texts: HashMap<String, String>,
-        bytes: HashMap<String, Vec<u8>>,
-    ) -> Self {
+    pub fn with_data(texts: HashMap<String, String>, bytes: HashMap<String, Vec<u8>>) -> Self {
         Self { texts, bytes }
     }
 
@@ -651,9 +644,10 @@ impl Source for MemorySource {
     ) -> Pin<Box<dyn Future<Output = Result<TextResource>> + Send + 'a>> {
         Box::pin(async move {
             let key = location_key(location);
-            let content = self.texts.get(&key).ok_or_else(|| {
-                Error::invalid(format!("MemorySource: no text found for {key}"))
-            })?;
+            let content = self
+                .texts
+                .get(&key)
+                .ok_or_else(|| Error::invalid(format!("MemorySource: no text found for {key}")))?;
             Ok(TextResource {
                 content: content.clone(),
                 location: location.clone(),
@@ -668,9 +662,10 @@ impl Source for MemorySource {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
         Box::pin(async move {
             let key = location_key(location);
-            let bytes = self.bytes.get(&key).ok_or_else(|| {
-                Error::invalid(format!("MemorySource: no bytes found for {key}"))
-            })?;
+            let bytes = self
+                .bytes
+                .get(&key)
+                .ok_or_else(|| Error::invalid(format!("MemorySource: no bytes found for {key}")))?;
             apply_range(bytes.clone(), range)
         })
     }
@@ -807,7 +802,9 @@ impl ReqwestSource {
         // inside `PrefetchState`, workers would hold the only `Arc` refs
         // forever (deadlock: PrefetchState won't drop until workers exit,
         // but workers won't exit until cancel_tx drops).
-        let cancel_tx = self.cancel_tx.get_or_init(|| tokio::sync::watch::channel(false).0);
+        let cancel_tx = self
+            .cancel_tx
+            .get_or_init(|| tokio::sync::watch::channel(false).0);
         let cancel_rx = cancel_tx.subscribe();
         let state = self.state.get_or_init(|| {
             std::sync::Arc::new(PrefetchState {
@@ -815,9 +812,7 @@ impl ReqwestSource {
                 targets: std::sync::Mutex::new(targets),
                 http: self.http.clone(),
                 headers: self.headers.clone(),
-                buffer_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                    self.concurrency * 3,
-                )),
+                buffer_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(self.concurrency * 3)),
             })
         });
 

@@ -31,10 +31,8 @@ fn fixture_bytes() -> Vec<u8> {
 }
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "hls-transmux-writer-{name}-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("hls-transmux-writer-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -283,7 +281,10 @@ async fn writer_produces_classic_mp4() {
         "classic MP4 should not contain moof boxes"
     );
     assert!(report.duration > 0, "duration should be non-zero");
-    assert!(!report.tracks.is_empty(), "Mp4 report should have track info");
+    assert!(
+        !report.tracks.is_empty(),
+        "Mp4 report should have track info"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -292,12 +293,9 @@ async fn writer_produces_classic_mp4() {
 
 #[tokio::test]
 async fn mp4_bytes_returns_valid_mp4() {
-    let (bytes, report) = transmux_hls_to_mp4_bytes(
-        mock_input(1),
-        TransmuxOptions::default(),
-    )
-    .await
-    .expect("mp4_bytes transmux should succeed");
+    let (bytes, report) = transmux_hls_to_mp4_bytes(mock_input(1), TransmuxOptions::default())
+        .await
+        .expect("mp4_bytes transmux should succeed");
 
     assert!(!bytes.is_empty(), "output bytes should be non-empty");
     assert_eq!(&bytes[4..8], b"ftyp", "first box should be ftyp");
@@ -559,7 +557,8 @@ async fn writer_first_byte_before_all_segments_done() {
     // been replaced.
     let first_completed = completed_at_first_byte.load(Ordering::SeqCst);
     assert_ne!(
-        first_completed, usize::MAX,
+        first_completed,
+        usize::MAX,
         "progress callback should have fired at least once"
     );
     assert_eq!(

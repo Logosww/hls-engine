@@ -180,7 +180,10 @@ impl std::fmt::Debug for TransmuxOptions {
             .field("variant", &self.variant)
             .field("output_format", &self.output_format)
             .field("finalize_backend", &self.finalize_backend)
-            .field("on_progress", &self.on_progress.as_ref().map(|_| "<callback>"))
+            .field(
+                "on_progress",
+                &self.on_progress.as_ref().map(|_| "<callback>"),
+            )
             .field("cancel", &self.cancel.as_ref().map(|_| "<cancel token>"))
             .field("resume", &self.resume)
             .field("write_mfra", &self.write_mfra)
@@ -346,7 +349,8 @@ pub async fn transmux_hls_to_mp4_async(
                         defragment_fmp4_to_mp4(&temp_path, output, segment_count).await
                     }
                     FinalizeBackend::Ffmpeg => {
-                        crate::ffmpeg_finalize::remux_to_mp4(&temp_path, output, segment_count).await
+                        crate::ffmpeg_finalize::remux_to_mp4(&temp_path, output, segment_count)
+                            .await
                     }
                 };
                 #[cfg(not(feature = "ffmpeg-finalize"))]
@@ -594,7 +598,14 @@ async fn mux_to_mp4_bytes(
     hooks: &Hooks<'_>,
 ) -> Result<(Vec<u8>, TransmuxReport)> {
     let mut collector = PacketCollector::default();
-    read_media_segments(reader, media_location, media_playlist, &mut collector, hooks).await?;
+    read_media_segments(
+        reader,
+        media_location,
+        media_playlist,
+        &mut collector,
+        hooks,
+    )
+    .await?;
     let (mp4, report) = mux_collected_packets(collector, media_playlist.segments.len())?;
     Ok((mp4, report))
 }
@@ -609,8 +620,7 @@ async fn mux_to_mp4(
     output: &Path,
     hooks: &Hooks<'_>,
 ) -> Result<TransmuxReport> {
-    let (mp4, mut report) =
-        mux_to_mp4_bytes(reader, media_location, media_playlist, hooks).await?;
+    let (mp4, mut report) = mux_to_mp4_bytes(reader, media_location, media_playlist, hooks).await?;
     tokio::fs::write(output, &mp4).await?;
     report.bytes_written = mp4.len() as u64;
     Ok(report)
@@ -832,8 +842,7 @@ where
     // (`resume_existing`), so resumed runs emit a complete mfra box matching
     // a fresh run's output byte-for-byte.
     let mut bytes_written: u64 = resume.as_ref().map(|r| r.bytes_written).unwrap_or(0);
-    let mut global_base_dts_90k: Option<u64> =
-        resume.as_ref().map(|r| r.global_base_dts_90k);
+    let mut global_base_dts_90k: Option<u64> = resume.as_ref().map(|r| r.global_base_dts_90k);
 
     if let Some(r) = &resume {
         // Re-demux segments[0] to rebuild codec config (tracks). The bytes
@@ -1067,9 +1076,8 @@ async fn demux_segment(
     let segment_bytes = data.len() as u64;
 
     let demuxed = if let Some(init_spec) = &segment.init_segment {
-        let init_bytes = if let Some((_, cached_bytes)) = init_cache
-            .as_ref()
-            .filter(|(uri, _)| uri == &init_spec.uri)
+        let init_bytes = if let Some((_, cached_bytes)) =
+            init_cache.as_ref().filter(|(uri, _)| uri == &init_spec.uri)
         {
             cached_bytes.clone()
         } else {
@@ -1306,11 +1314,7 @@ impl PacketCollector {
     }
 }
 
-fn update_param(
-    slot: &mut Option<Vec<u8>>,
-    new_value: Vec<u8>,
-    conflict_msg: &str,
-) -> Result<()> {
+fn update_param(slot: &mut Option<Vec<u8>>, new_value: Vec<u8>, conflict_msg: &str) -> Result<()> {
     if let Some(existing) = slot {
         if existing != &new_value {
             return Err(Error::unsupported(conflict_msg));
@@ -1346,8 +1350,8 @@ fn mux_collected_packets(
         .map(|packet| packet.dts_90k)
         .min()
         .ok_or_else(|| Error::invalid("HLS playlist did not produce any encoded packets"))?;
-    let sample_rate =
-        sample_rate.ok_or_else(|| Error::unsupported("AAC audio is required for non-fragmented MP4"))?;
+    let sample_rate = sample_rate
+        .ok_or_else(|| Error::unsupported("AAC audio is required for non-fragmented MP4"))?;
     let channel_count = channel_count
         .ok_or_else(|| Error::unsupported("AAC audio is required for non-fragmented MP4"))?;
 
@@ -1472,7 +1476,10 @@ mod tests {
 
     #[test]
     fn variant_selection_index_returns_specified() {
-        let m = master(vec![variant("a.m3u8", Some(100)), variant("b.m3u8", Some(200))]);
+        let m = master(vec![
+            variant("a.m3u8", Some(100)),
+            variant("b.m3u8", Some(200)),
+        ]);
         assert_eq!(VariantSelection::Index(0).select_index(&m).unwrap(), 0);
         assert_eq!(VariantSelection::Index(1).select_index(&m).unwrap(), 1);
     }
@@ -1529,7 +1536,9 @@ mod tests {
             variant("c.m3u8", None),
         ]);
         assert_eq!(
-            VariantSelection::HighestBandwidth.select_index(&mixed).unwrap(),
+            VariantSelection::HighestBandwidth
+                .select_index(&mixed)
+                .unwrap(),
             1
         );
     }

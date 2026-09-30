@@ -3,9 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hls_transmux::{
-    HlsInput, TrackType, TransmuxOptions, transmux_hls_to_mp4_async,
-};
+use hls_transmux::{HlsInput, TrackType, TransmuxOptions, transmux_hls_to_mp4_async};
 
 /// In-repo H.264 + AAC-LC transport stream fixture (single segment, ~10s).
 fn fixture_path() -> PathBuf {
@@ -16,10 +14,7 @@ fn fixture_path() -> PathBuf {
 }
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "hls-transmux-{name}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("hls-transmux-{name}-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -67,4 +62,3 @@ async fn remuxes_h264_aac_ts_fixture_to_mp4() {
     let output_bytes = fs::read(&output).unwrap();
     assert_eq!(&output_bytes[4..8], b"ftyp");
 }
-

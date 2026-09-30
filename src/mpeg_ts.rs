@@ -28,7 +28,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
             "MPEG-TS segment must start with a 188-byte sync packet",
         ));
     }
-    if data.len() % TS_PACKET_SIZE != 0 {
+    if !data.len().is_multiple_of(TS_PACKET_SIZE) {
         return Err(Error::unsupported(
             "only plain 188-byte MPEG-TS packets are supported in Phase 1",
         ));
@@ -39,7 +39,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
     let mut accumulators: HashMap<u16, PesAccumulator> = HashMap::new();
     let mut result = DemuxOutput::default();
 
-    for packet in data.chunks_exact(TS_PACKET_SIZE) {
+    for packet in data.as_chunks::<TS_PACKET_SIZE>().0 {
         if packet[0] != 0x47 {
             return Err(Error::bitstream("MPEG-TS sync byte mismatch"));
         }

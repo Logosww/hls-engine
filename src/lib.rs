@@ -98,9 +98,9 @@
 
 mod cancel;
 mod codecs;
+mod error;
 #[cfg(feature = "ffmpeg-finalize")]
 mod ffmpeg_finalize;
-mod error;
 mod hls;
 mod isobmff;
 mod mp4;
@@ -113,9 +113,9 @@ mod types;
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
 pub use resume::TransmuxResumeState;
-pub use source::{ByteRange, HlsInput, MemorySource, Source, SourceLocation, TextResource};
 #[cfg(feature = "default-source")]
 pub use source::ReqwestSource;
+pub use source::{ByteRange, HlsInput, MemorySource, Source, SourceLocation, TextResource};
 pub use transmux::{
     FinalizeBackend, OutputFormat, TransmuxOptions, TransmuxProgress, VariantSelection,
     transmux_hls_to_mp4_async, transmux_hls_to_mp4_bytes, transmux_hls_to_writer_async,

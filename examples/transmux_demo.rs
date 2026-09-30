@@ -26,8 +26,8 @@ use hls_transmux::{
 };
 #[cfg(feature = "default-source")]
 use {
-    std::sync::Arc,
     hls_transmux::{ReqwestSource, SourceLocation},
+    std::sync::Arc,
 };
 
 #[tokio::main]
@@ -46,16 +46,14 @@ async fn main() -> hls_transmux::Result<()> {
             let n = iter
                 .next()
                 .ok_or_else(|| hls_transmux::Error::invalid("--concurrency requires a value"))?;
-            concurrency = n
-                .parse()
-                .map_err(|_| hls_transmux::Error::invalid("--concurrency value must be a number"))?;
+            concurrency = n.parse().map_err(|_| {
+                hls_transmux::Error::invalid("--concurrency value must be a number")
+            })?;
         } else if arg == "--variant" {
             let v = iter
                 .next()
                 .ok_or_else(|| hls_transmux::Error::invalid("--variant requires a value"))?;
             variant_flag = Some(v.clone());
-        } else if arg == "--fragmented" || arg == "--streaming" || arg == "--ffmpeg-finalize" {
-            remaining.push(arg);
         } else {
             remaining.push(arg);
         }
@@ -69,9 +67,7 @@ async fn main() -> hls_transmux::Result<()> {
     let ffmpeg_finalize_flag = remaining.iter().any(|a| **a == "--ffmpeg-finalize");
     let positional: Vec<&String> = remaining
         .iter()
-        .filter(|a| {
-            **a != "--fragmented" && **a != "--streaming" && **a != "--ffmpeg-finalize"
-        })
+        .filter(|a| **a != "--fragmented" && **a != "--streaming" && **a != "--ffmpeg-finalize")
         .copied()
         .collect();
 
@@ -85,23 +81,24 @@ async fn main() -> hls_transmux::Result<()> {
         eprintln!("<playlist-url-or-path> can be an http(s) URL or a local file path.");
         eprintln!("Examples:");
         eprintln!("    cargo run --example transmux_demo -- playlist.m3u8 out.mp4");
-        eprintln!("    cargo run --example transmux_demo -- https://example.com/master.m3u8 out.mp4 0");
-        eprintln!("    cargo run --example transmux_demo -- https://example.com/master.m3u8 out.mp4 --variant highest --concurrency 8");
+        eprintln!(
+            "    cargo run --example transmux_demo -- https://example.com/master.m3u8 out.mp4 0"
+        );
+        eprintln!(
+            "    cargo run --example transmux_demo -- https://example.com/master.m3u8 out.mp4 --variant highest --concurrency 8"
+        );
         return Err(hls_transmux::Error::unsupported(
             "missing required <playlist-url-or-path> argument",
         ));
     };
     let url = url.to_string();
-    let output = positional
-        .get(1)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            if fragmented {
-                "output.fmp4".to_string()
-            } else {
-                "output.mp4".to_string()
-            }
-        });
+    let output = positional.get(1).map(|s| s.to_string()).unwrap_or_else(|| {
+        if fragmented {
+            "output.fmp4".to_string()
+        } else {
+            "output.mp4".to_string()
+        }
+    });
 
     // Resolve variant selection: `--variant` flag takes precedence over the
     // positional `<variant-index>` (3rd arg, backward compat). When neither
@@ -111,16 +108,14 @@ async fn main() -> hls_transmux::Result<()> {
         match v.as_str() {
             "highest" => VariantSelection::HighestBandwidth,
             "lowest" => VariantSelection::LowestBandwidth,
-            s => VariantSelection::Index(
-                s.parse()
-                    .map_err(|_| hls_transmux::Error::invalid("--variant must be `highest`, `lowest`, or a numeric index"))?,
-            ),
+            s => VariantSelection::Index(s.parse().map_err(|_| {
+                hls_transmux::Error::invalid(
+                    "--variant must be `highest`, `lowest`, or a numeric index",
+                )
+            })?),
         }
     } else if let Some(idx) = positional.get(2) {
-        VariantSelection::Index(
-            idx.parse()
-                .expect("variant-index must be a number"),
-        )
+        VariantSelection::Index(idx.parse().expect("variant-index must be a number"))
     } else {
         VariantSelection::HighestBandwidth
     };
@@ -161,9 +156,10 @@ async fn main() -> hls_transmux::Result<()> {
     #[cfg(feature = "default-source")]
     let input = if is_http && concurrency > 1 {
         let source = ReqwestSource::with_concurrency(concurrency);
-        let location = SourceLocation::Url(url::Url::parse(&url).map_err(|e| {
-            hls_transmux::Error::invalid(format!("invalid URL: {e}"))
-        })?);
+        let location = SourceLocation::Url(
+            url::Url::parse(&url)
+                .map_err(|e| hls_transmux::Error::invalid(format!("invalid URL: {e}")))?,
+        );
         HlsInput::custom(Arc::new(source), location)
     } else if is_http {
         HlsInput::Url(url.clone())

@@ -19,10 +19,8 @@ fn fixture_path() -> PathBuf {
 async fn streaming_mp4_ffmpeg_finalize_remuxes_ts_fixture() {
     let fixture = fixture_path();
 
-    let temp_dir = std::env::temp_dir().join(format!(
-        "hls-transmux-ffmpeg-test-{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("hls-transmux-ffmpeg-test-{}", std::process::id()));
     fs::create_dir_all(&temp_dir).unwrap();
     let segment = temp_dir.join("segment.ts");
     let playlist = temp_dir.join("playlist.m3u8");
@@ -89,10 +87,7 @@ async fn streaming_mp4_ffmpeg_finalize_remuxes_ts_fixture() {
             assert!(stdout.contains("codec_type=video"));
             assert!(stdout.contains("codec_type=audio"));
         } else {
-            eprintln!(
-                "ffprobe failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            eprintln!("ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
         }
     }
 
@@ -106,4 +101,3 @@ fn window_find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn window_contains(haystack: &[u8], needle: &[u8]) -> bool {
     window_find(haystack, needle).is_some()
 }
-

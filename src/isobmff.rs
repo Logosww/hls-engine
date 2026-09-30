@@ -49,7 +49,9 @@ fn find_box<'a>(data: &'a [u8], box_type: &[u8; 4]) -> Result<Option<&'a [u8]>> 
             return Err(Error::bitstream("ISOBMFF box extends past data"));
         }
         if &header.box_type == box_type {
-            return Ok(Some(&data[offset + header.header_size..offset + header.total_size]));
+            return Ok(Some(
+                &data[offset + header.header_size..offset + header.total_size],
+            ));
         }
         offset += header.total_size;
     }
@@ -120,7 +122,9 @@ fn parse_init_segment(init: &[u8]) -> Result<Vec<InitTrack>> {
     })?;
 
     if tracks.is_empty() {
-        return Err(Error::bitstream("init segment does not contain any trak boxes"));
+        return Err(Error::bitstream(
+            "init segment does not contain any trak boxes",
+        ));
     }
     Ok(tracks)
 }
@@ -163,10 +167,7 @@ fn parse_trex(payload: &[u8]) -> Result<(u32, u32, u32, u32)> {
     ))
 }
 
-fn parse_trak(
-    trak: &[u8],
-    trex_defaults: &HashMap<u32, (u32, u32, u32)>,
-) -> Result<InitTrack> {
+fn parse_trak(trak: &[u8], trex_defaults: &HashMap<u32, (u32, u32, u32)>) -> Result<InitTrack> {
     let tkhd = find_box(trak, b"tkhd")?
         .ok_or_else(|| Error::bitstream("trak does not contain a tkhd box"))?;
     let track_id = parse_tkhd_track_id(tkhd)?;
@@ -232,11 +233,7 @@ fn parse_tkhd_track_id(tkhd: &[u8]) -> Result<u32> {
         return Err(Error::bitstream("tkhd box is too short"));
     }
     let version = tkhd[0];
-    let pos = if version == 0 {
-        4 + 8
-    } else {
-        4 + 16
-    };
+    let pos = if version == 0 { 4 + 8 } else { 4 + 16 };
     if tkhd.len() < pos + 4 {
         return Err(Error::bitstream("tkhd box is too short for track_id"));
     }
@@ -253,11 +250,7 @@ fn parse_mdhd_timescale(mdhd: &[u8]) -> Result<u32> {
         return Err(Error::bitstream("mdhd box is too short"));
     }
     let version = mdhd[0];
-    let pos = if version == 0 {
-        4 + 8
-    } else {
-        4 + 16
-    };
+    let pos = if version == 0 { 4 + 8 } else { 4 + 16 };
     if mdhd.len() < pos + 8 {
         return Err(Error::bitstream("mdhd box is too short for timescale"));
     }
@@ -354,10 +347,8 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let esds_data = find_box(&entry_payload[28..], b"esds")?
                 .ok_or_else(|| Error::bitstream("mp4a entry missing esds box"))?;
             let asc = parse_esds_audio_specific_config(esds_data)?;
-            let channel_count =
-                u16::from_be_bytes([entry_payload[16], entry_payload[17]]) as u8;
-            let sample_rate =
-                u16::from_be_bytes([entry_payload[24], entry_payload[25]]) as u32;
+            let channel_count = u16::from_be_bytes([entry_payload[16], entry_payload[17]]) as u8;
+            let sample_rate = u16::from_be_bytes([entry_payload[24], entry_payload[25]]) as u32;
             Ok(SampleEntryInfo {
                 kind: StreamKind::Aac,
                 sps: None,
@@ -423,7 +414,9 @@ fn parse_esds_audio_specific_config(esds_payload: &[u8]) -> Result<Vec<u8>> {
 
     // DecoderConfigDescriptor (tag 0x04)
     if pos >= esds_payload.len() || esds_payload[pos] != 0x04 {
-        return Err(Error::bitstream("expected DecoderConfigDescriptor tag 0x04"));
+        return Err(Error::bitstream(
+            "expected DecoderConfigDescriptor tag 0x04",
+        ));
     }
     pos += 1;
     let _dc_len = read_esds_length(esds_payload, &mut pos)?;
@@ -556,8 +549,7 @@ pub(crate) fn extract_tfra_entries(data: &[u8]) -> Result<Vec<ScannedTfraEntry>>
             return Err(Error::bitstream("ISOBMFF box extends past data"));
         }
         if &header.box_type == b"moof" {
-            let moof_payload =
-                &data[offset + header.header_size..offset + header.total_size];
+            let moof_payload = &data[offset + header.header_size..offset + header.total_size];
             let moof_offset = offset as u64;
             extract_tfra_from_moof(moof_payload, moof_offset, &mut entries)?;
         }
@@ -613,8 +605,7 @@ fn parse_media_segment(
             return Err(Error::bitstream("ISOBMFF box extends past segment"));
         }
         if &header.box_type == b"moof" {
-            let moof_payload =
-                &segment[offset + header.header_size..offset + header.total_size];
+            let moof_payload = &segment[offset + header.header_size..offset + header.total_size];
             parse_moof(moof_payload, offset, segment, tracks, output)?;
         }
         offset += header.total_size;
@@ -928,7 +919,10 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
         });
     }
 
-    Ok(Trun { data_offset, samples })
+    Ok(Trun {
+        data_offset,
+        samples,
+    })
 }
 
 // === Keyframe detection ===
@@ -998,10 +992,12 @@ fn read_nal_length(data: &[u8], offset: usize, length_size: usize) -> usize {
     match length_size {
         1 => data[offset] as usize,
         2 => u16::from_be_bytes([data[offset], data[offset + 1]]) as usize,
-        4 => {
-            u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                as usize
-        }
+        4 => u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize,
         _ => 0,
     }
 }

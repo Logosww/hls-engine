@@ -23,10 +23,8 @@ fn fixture_bytes() -> Vec<u8> {
 }
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "hls-transmux-phase4-{name}-{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("hls-transmux-phase4-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -338,8 +336,14 @@ async fn resume_produces_identical_output() {
         1,
         "resumed run processes 1 segment, should emit 1 progress event"
     );
-    assert_eq!(re[0].current_segment_index, 2, "first resumed segment index");
-    assert_eq!(re[0].completed_segments, 3, "completed_segments after resume");
+    assert_eq!(
+        re[0].current_segment_index, 2,
+        "first resumed segment index"
+    );
+    assert_eq!(
+        re[0].completed_segments, 3,
+        "completed_segments after resume"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -409,13 +413,9 @@ async fn default_path_unchanged() {
     let dir = temp_dir("default");
     let output = dir.join("output.mp4");
 
-    transmux_hls_to_mp4_async(
-        mock_input(1),
-        &output,
-        TransmuxOptions::default(),
-    )
-    .await
-    .expect("default path should succeed");
+    transmux_hls_to_mp4_async(mock_input(1), &output, TransmuxOptions::default())
+        .await
+        .expect("default path should succeed");
 
     let bytes = std::fs::read(&output).expect("output should exist");
     assert!(

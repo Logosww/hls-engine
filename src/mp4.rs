@@ -123,11 +123,7 @@ impl Mp4Muxer {
         // --- Per-track chunking: group each track's samples into ~0.5s chunks.
         // mdat layout is chunk-major (one chunk's samples are contiguous), so
         // stsc/stco can use one entry per chunk instead of one per sample.
-        let chunks_per_track: Vec<Vec<ChunkMeta>> = self
-            .tracks
-            .iter()
-            .map(split_chunks)
-            .collect();
+        let chunks_per_track: Vec<Vec<ChunkMeta>> = self.tracks.iter().map(split_chunks).collect();
 
         // --- Order chunks across tracks by (first_dts, track_index) so the
         // mdat interleaves tracks in presentation order.
@@ -159,8 +155,10 @@ impl Mp4Muxer {
 
         let mut mdat_payload = Vec::with_capacity(mdat_payload_size as usize);
         // mdat_offset of each chunk (relative to mdat payload start).
-        let mut chunk_mdat_offsets: Vec<Vec<u64>> =
-            chunks_per_track.iter().map(|c| vec![0u64; c.len()]).collect();
+        let mut chunk_mdat_offsets: Vec<Vec<u64>> = chunks_per_track
+            .iter()
+            .map(|c| vec![0u64; c.len()])
+            .collect();
         let mut current_mdat_offset: u64 = 0;
         for &(_, track_index, chunk_index) in &placed {
             let chunk = chunks_per_track[track_index][chunk_index];
@@ -195,8 +193,8 @@ impl Mp4Muxer {
                 // Set the chunk's first sample offset; subsequent samples in
                 // the chunk get sequential offsets derived from sample sizes.
                 let mut offset = file_offset;
-                for sample_index in chunk.first_sample
-                    ..chunk.first_sample + chunk.sample_count as usize
+                for sample_index in
+                    chunk.first_sample..chunk.first_sample + chunk.sample_count as usize
                 {
                     self.tracks[track_index].samples_mut()[sample_index].offset = offset;
                     offset += self.tracks[track_index].samples()[sample_index].data.len() as u64;
@@ -343,12 +341,24 @@ fn ftyp_box(tracks: &[Mp4Track]) -> Vec<u8> {
     // Compatible brands are emitted conditionally based on the codecs that
     // actually appear in the file — writing `avc1`/`hvc1` for an audio-only
     // file is technically valid but misleading.
-    let has_avc = tracks
-        .iter()
-        .any(|t| matches!(t, Mp4Track::Video { codec: VideoCodec::Avc { .. }, .. }));
-    let has_hevc = tracks
-        .iter()
-        .any(|t| matches!(t, Mp4Track::Video { codec: VideoCodec::Hevc { .. }, .. }));
+    let has_avc = tracks.iter().any(|t| {
+        matches!(
+            t,
+            Mp4Track::Video {
+                codec: VideoCodec::Avc { .. },
+                ..
+            }
+        )
+    });
+    let has_hevc = tracks.iter().any(|t| {
+        matches!(
+            t,
+            Mp4Track::Video {
+                codec: VideoCodec::Hevc { .. },
+                ..
+            }
+        )
+    });
     boxed(b"ftyp", |out| {
         out.extend_from_slice(b"isom");
         be_u32(out, 0x200);
@@ -749,13 +759,11 @@ fn esds_box(asc: &[u8]) -> Result<Vec<u8>> {
         // it to read AudioSpecificConfig from the wrong offset.
         let decoder_specific_len = asc.len();
         // DSI total = tag(1) + len_bytes + content
-        let dsi_total =
-            1 + descriptor_len_size(decoder_specific_len) + decoder_specific_len;
+        let dsi_total = 1 + descriptor_len_size(decoder_specific_len) + decoder_specific_len;
         // DCD content = 13 fixed fields + full DSI
         let decoder_config_len = 13 + dsi_total;
         // DCD total = tag(1) + len_bytes + content
-        let dcd_total =
-            1 + descriptor_len_size(decoder_config_len) + decoder_config_len;
+        let dcd_total = 1 + descriptor_len_size(decoder_config_len) + decoder_config_len;
         // SLC total = tag(1) + len_bytes + content(1)
         let slc_total = 1 + descriptor_len_size(1) + 1;
         // ES content = 3 (ES_ID + flags) + full DCD + full SLC
@@ -831,7 +839,7 @@ fn ctts_box(samples: &[Mp4Sample]) -> Result<Vec<u8>> {
                     .map_err(|_| Error::muxing("composition offset exceeds i32 range"))
             })
             .collect::<Result<_>>()?;
-        let entries = grouped_counts(offsets.into_iter());
+        let entries = grouped_counts(offsets);
         be_u32(out, entries.len() as u32);
         for (count, offset) in entries {
             be_u32(out, count);
@@ -846,7 +854,10 @@ fn ctts_box(samples: &[Mp4Sample]) -> Result<Vec<u8>> {
 /// version 0 uses i32 fields.
 fn cslg_box(samples: &[Mp4Sample]) -> Vec<u8> {
     full_box(b"cslg", 0, 0, |out| {
-        let cts_offsets: Vec<i64> = samples.iter().map(|s| s.pts as i64 - s.dts as i64).collect();
+        let cts_offsets: Vec<i64> = samples
+            .iter()
+            .map(|s| s.pts as i64 - s.dts as i64)
+            .collect();
         let min_offset = *cts_offsets.iter().min().unwrap_or(&0);
         let max_offset = *cts_offsets.iter().max().unwrap_or(&0);
         // compositionToDtsShift: shift needed to keep all DTS non-negative
@@ -858,7 +869,10 @@ fn cslg_box(samples: &[Mp4Sample]) -> Vec<u8> {
             .map(|s| s.pts as i64 + s.duration as i64)
             .max()
             .unwrap_or(0);
-        be_i32(out, i32::try_from(composition_to_dts_shift).unwrap_or(i32::MAX));
+        be_i32(
+            out,
+            i32::try_from(composition_to_dts_shift).unwrap_or(i32::MAX),
+        );
         be_i32(out, i32::try_from(min_offset).unwrap_or(i32::MIN));
         be_i32(out, i32::try_from(max_offset).unwrap_or(i32::MAX));
         be_i32(out, i32::try_from(composition_start).unwrap_or(i32::MIN));
@@ -1170,10 +1184,7 @@ impl FragmentedMp4Muxer {
     /// Resumes a fragmented muxer at a specific sequence number. Used by
     /// the resume path to continue appending fragments with the correct
     /// `mfhd` sequence after an interrupted run.
-    pub(crate) fn new_with_sequence(
-        tracks: Vec<FragmentedTrack>,
-        next_sequence: u32,
-    ) -> Self {
+    pub(crate) fn new_with_sequence(tracks: Vec<FragmentedTrack>, next_sequence: u32) -> Self {
         Self {
             tracks,
             next_sequence,
@@ -1228,8 +1239,7 @@ impl FragmentedMp4Muxer {
             ));
         }
 
-        let mut out =
-            Vec::with_capacity(styp.len() + moof.len() + 8 + mdat_payload_size as usize);
+        let mut out = Vec::with_capacity(styp.len() + moof.len() + 8 + mdat_payload_size as usize);
         out.extend_from_slice(&styp);
         out.extend_from_slice(&moof);
         write_box_header(&mut out, b"mdat", 8 + mdat_payload_size as usize)?;
@@ -1271,10 +1281,7 @@ impl FragmentedMp4Muxer {
                     continue;
                 }
                 out.extend_from_slice(&traf_box(track, samples, data_offset as u32)?);
-                data_offset += samples
-                    .iter()
-                    .map(|s| s.data.len())
-                    .sum::<usize>();
+                data_offset += samples.iter().map(|s| s.data.len()).sum::<usize>();
             }
             Ok(())
         })?;
@@ -1523,11 +1530,7 @@ fn mfhd_box(sequence_number: u32) -> Result<Vec<u8>> {
     })
 }
 
-fn traf_box(
-    track: &FragmentedTrack,
-    samples: &[Mp4Sample],
-    data_offset: u32,
-) -> Result<Vec<u8>> {
+fn traf_box(track: &FragmentedTrack, samples: &[Mp4Sample], data_offset: u32) -> Result<Vec<u8>> {
     let base_decode_time = samples.first().map(|s| s.dts).unwrap_or(0);
     boxed_result(b"traf", |out| {
         out.extend_from_slice(&tfhd_box(track)?);
@@ -1562,13 +1565,20 @@ fn trun_box(samples: &[Mp4Sample], data_offset: u32) -> Result<Vec<u8>> {
         be_u32(out, data_offset);
         for sample in samples {
             be_u32(out, sample.duration);
-            be_u32(out, fit_u32(sample.data.len() as u64, "fragment sample size")?);
+            be_u32(
+                out,
+                fit_u32(sample.data.len() as u64, "fragment sample size")?,
+            );
             // Per ISO/IEC 14496-12 sample_flags bit layout:
             //   bits 25-24: sample_depends_on (2=independent/I-frame, 1=depends/P-B)
             //   bit 16: sample_is_non_sync_sample (0 for SAP, 1 for non-sync)
             // Key frame: 0x02000000 (independent + sync)
             // Delta frame: 0x01010000 (depends + non-sync)
-            let sample_flags = if sample.is_key { 0x0200_0000 } else { 0x0101_0000 };
+            let sample_flags = if sample.is_key {
+                0x0200_0000
+            } else {
+                0x0101_0000
+            };
             be_u32(out, sample_flags);
             // composition offset (signed, i32 reinterpreted as u32 for wire format)
             let cts = sample.pts as i64 - sample.dts as i64;

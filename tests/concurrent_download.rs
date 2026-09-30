@@ -7,8 +7,8 @@
 //! for any `/segment-*.ts` path, with optional artificial delay to exercise
 //! the prefetch backpressure and consumer-races-ahead paths.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use hls_transmux::{
@@ -181,10 +181,7 @@ async fn concurrency_basic_multi_segment() {
     std::fs::write(&playlist_path, playlist(&server.base_url, 4)).unwrap();
 
     let source = ReqwestSource::with_concurrency(3);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(playlist_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(playlist_path));
 
     // Use FragmentedMp4 since each segment is the same fixture — fragments
     // carry their own tfdt/trun, so DTS can restart per fragment. Non-
@@ -229,19 +226,12 @@ async fn concurrency_with_byterange_segments() {
     std::fs::write(&playlist_path, playlist).unwrap();
 
     let source = ReqwestSource::with_concurrency(2);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(playlist_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(playlist_path));
 
     let output = dir.join("output.mp4");
-    let report = transmux_hls_to_mp4_async(
-        input,
-        &output,
-        TransmuxOptions::default(),
-    )
-    .await
-    .unwrap();
+    let report = transmux_hls_to_mp4_async(input, &output, TransmuxOptions::default())
+        .await
+        .unwrap();
 
     assert_eq!(report.segment_count, 1);
     assert!(report.bytes_written > 0);
@@ -264,10 +254,7 @@ async fn consumer_races_ahead_self_builds_slot() {
     std::fs::write(&playlist_path, playlist(&server.base_url, 6)).unwrap();
 
     let source = ReqwestSource::with_concurrency(2);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(playlist_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(playlist_path));
 
     // FragmentedMp4 — each segment is an independent fragment, so the
     // same fixture bytes can be used per segment without DTS conflicts.
@@ -309,10 +296,7 @@ async fn backpressure_bounds_outstanding_requests() {
     std::fs::write(&playlist_path, playlist(&server.base_url, 12)).unwrap();
 
     let source = ReqwestSource::with_concurrency(2);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(playlist_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(playlist_path));
 
     let output = dir.join("output.fmp4");
     let report = transmux_hls_to_mp4_async(
@@ -347,10 +331,7 @@ async fn streaming_mp4_native_with_concurrency() {
     std::fs::write(&playlist_path, playlist(&server.base_url, 1)).unwrap();
 
     let source = ReqwestSource::with_concurrency(3);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(playlist_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(playlist_path));
 
     let output = dir.join("output.mp4");
     let report = transmux_hls_to_mp4_async(
@@ -389,20 +370,15 @@ async fn master_playlist_concurrent_variant() {
 
     std::fs::write(
         &master_path,
-        format!(
-            "#EXTM3U\n\
+        "#EXTM3U\n\
              #EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=640x360,CODECS=\"avc1.42e01e,mp4a.40.2\"\n\
-             media.m3u8\n"
-        ),
+             media.m3u8\n",
     )
     .unwrap();
     std::fs::write(&media_path, playlist(&server.base_url, 3)).unwrap();
 
     let source = ReqwestSource::with_concurrency(2);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(master_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(master_path));
 
     let output = dir.join("output.fmp4");
     let report = transmux_hls_to_mp4_async(
@@ -436,10 +412,7 @@ async fn sequential_still_works() {
     // concurrency=1 → no prefetch, direct fetch per segment.
     let source = ReqwestSource::new();
     assert_eq!(source.concurrency(), 1);
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::File(playlist_path),
-    );
+    let input = HlsInput::custom(Arc::new(source), SourceLocation::File(playlist_path));
 
     let output = dir.join("output.fmp4");
     let report = transmux_hls_to_mp4_async(

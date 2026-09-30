@@ -213,9 +213,9 @@ pub(crate) fn parse_hls_playlist_content(
         } else if line == "#EXT-X-ENDLIST" {
             ensure_kind(&mut kind, PlaylistKind::Media, line_number)?;
             saw_endlist = true;
-        } else if line.starts_with("#EXT-X-PLAYLIST-TYPE:") {
+        } else if let Some(value) = line.strip_prefix("#EXT-X-PLAYLIST-TYPE:") {
             ensure_kind(&mut kind, PlaylistKind::Media, line_number)?;
-            let playlist_type = line["#EXT-X-PLAYLIST-TYPE:".len()..].trim();
+            let playlist_type = value.trim();
             if playlist_type.eq_ignore_ascii_case("VOD") {
                 saw_vod_type = true;
             } else {

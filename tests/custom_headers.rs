@@ -10,14 +10,14 @@
 //! missing the expected `Authorization` header. With headers set, transmux
 //! succeeds; without, it fails with `Error::Http` mentioning 401.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hls_transmux::{
     HlsInput, OutputFormat, ReqwestSource, SourceLocation, TransmuxOptions,
     transmux_hls_to_mp4_async,
 };
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -45,10 +45,7 @@ const EXPECTED_AUTH: &str = "Bearer test-token-123";
 /// Builds a `HeaderMap` containing only the `Authorization` header.
 fn auth_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_static(EXPECTED_AUTH),
-    );
+    headers.insert(AUTHORIZATION, HeaderValue::from_static(EXPECTED_AUTH));
     headers
 }
 
@@ -217,9 +214,7 @@ async fn sequential_headers_reach_server_on_playlist_and_segments() {
     let source = ReqwestSource::with_headers(auth_headers());
     let input = HlsInput::custom(
         Arc::new(source),
-        SourceLocation::Url(
-            url::Url::parse(&playlist_url).unwrap(),
-        ),
+        SourceLocation::Url(url::Url::parse(&playlist_url).unwrap()),
     );
 
     let report = transmux_hls_to_mp4_async(
@@ -274,10 +269,7 @@ async fn sequential_without_headers_returns_401() {
     .expect_err("should fail without auth headers");
 
     let msg = format!("{err}");
-    assert!(
-        msg.contains("401"),
-        "error should mention 401, got: {msg}"
-    );
+    assert!(msg.contains("401"), "error should mention 401, got: {msg}");
     assert!(server.request_count() >= 1);
 }
 
@@ -353,10 +345,7 @@ async fn concurrent_without_headers_returns_401() {
     .expect_err("should fail without auth headers");
 
     let msg = format!("{err}");
-    assert!(
-        msg.contains("401"),
-        "error should mention 401, got: {msg}"
-    );
+    assert!(msg.contains("401"), "error should mention 401, got: {msg}");
 }
 
 // ---------------------------------------------------------------------------

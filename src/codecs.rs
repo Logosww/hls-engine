@@ -138,7 +138,7 @@ pub(crate) mod aac {
             0xf1,
             0x50,
             0x80 | (((frame_len >> 11) as u8) & 0x03),
-            ((frame_len >> 3) as u8) & 0xff,
+            (frame_len >> 3) as u8,
             (((frame_len & 0x07) as u8) << 5) | 0x1f,
             0xfc,
         ]
@@ -522,9 +522,9 @@ pub(crate) mod hevc {
         }
     }
 
-    pub(crate) fn extract_vps_sps_pps(
-        data: &[u8],
-    ) -> (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) {
+    type ParameterSets = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+    pub(crate) fn extract_vps_sps_pps(data: &[u8]) -> ParameterSets {
         let mut vps = None;
         let mut sps = None;
         let mut pps = None;
@@ -603,8 +603,7 @@ pub(crate) mod hevc {
             2 => (2, 1),
             _ => (1, 1),
         };
-        let width =
-            pic_width as i64 - (crop_left as i64 + crop_right as i64) * sub_width_c as i64;
+        let width = pic_width as i64 - (crop_left as i64 + crop_right as i64) * sub_width_c as i64;
         let height =
             pic_height as i64 - (crop_top as i64 + crop_bottom as i64) * sub_height_c as i64;
         if width <= 0 || height <= 0 || width > u16::MAX as i64 || height > u16::MAX as i64 {
@@ -739,7 +738,7 @@ pub(crate) mod hevc {
             w.bit(false); // conformance_window_flag
             w.ue(0); // bit_depth_luma_minus8
             w.ue(0); // bit_depth_chroma_minus8
-            w.to_bytes()
+            w.into_bytes()
         }
 
         struct BitWriter {
@@ -787,7 +786,7 @@ pub(crate) mod hevc {
                 }
                 let _ = &mut value;
             }
-            fn to_bytes(mut self) -> Vec<u8> {
+            fn into_bytes(mut self) -> Vec<u8> {
                 if self.pos > 0 {
                     self.bytes.push(self.current);
                 }

@@ -1108,12 +1108,15 @@ async fn transmux_fragmented_async(
     };
     hooks.check_cancel()?;
     let mut file = if let Some(r) = &resume {
-        let file = tokio::fs::OpenOptions::new()
+        // Append-only handles on Windows cannot truncate with SetEndOfFile.
+        // Open for writing and position explicitly after the validated prefix.
+        use tokio::io::AsyncSeekExt;
+        let mut file = tokio::fs::OpenOptions::new()
             .write(true)
-            .append(true)
             .open(output)
             .await?;
         file.set_len(r.bytes_written).await?;
+        file.seek(std::io::SeekFrom::Start(r.bytes_written)).await?;
         file
     } else {
         tokio::fs::File::create(output).await?

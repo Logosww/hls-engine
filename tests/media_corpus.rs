@@ -33,7 +33,8 @@ async fn retained_media_matches_external_reference_and_support_boundaries() {
             let bytes = fs::read(&path).unwrap();
             assert_eq!(
                 format!("{:x}", Sha256::digest(&bytes)),
-                digest.as_str().unwrap()
+                digest.as_str().unwrap(),
+                "{name}/{file}: fixture bytes differ from the external manifest"
             );
             if file != "input.m3u8" {
                 source = source.segment(path.to_str().unwrap(), bytes);

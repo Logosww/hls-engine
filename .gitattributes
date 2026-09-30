@@ -1,0 +1,5 @@
+# Preserve the exact bytes recorded in the media corpus SHA-256 manifest.
+tests/fixtures/media/**/*.m3u8 text eol=lf
+tests/fixtures/media/**/*.ts -text
+tests/fixtures/media/**/*.m4s -text
+tests/fixtures/media/**/*.fmp4 -text

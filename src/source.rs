@@ -1031,8 +1031,8 @@ where
 {
     loop {
         let notified = slot.notify.notified();
-        let s = slot.state.lock().await;
-        match &*s {
+        let mut s = slot.state.lock().await;
+        match &mut *s {
             SlotState::InFlight => {
                 // Drop the lock before awaiting, so the fetch task can
                 // acquire it to store the result.
@@ -1042,7 +1042,13 @@ where
                 continue;
             }
             SlotState::Ready(bytes) => {
-                let bytes = (**bytes).clone();
+                state.slots.lock().unwrap().remove(key);
+                // Other consumers already holding this slot must still see the data.
+                let bytes = if Arc::strong_count(slot) == 1 {
+                    Arc::unwrap_or_clone(std::mem::replace(bytes, Arc::new(Vec::new())))
+                } else {
+                    (**bytes).clone()
+                };
                 drop(s);
                 // Evict the slot. The Arc<Slot> returned by `remove` will
                 // drop at end of scope, releasing the buffer_permit (if

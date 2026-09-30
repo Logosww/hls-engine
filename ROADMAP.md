@@ -2,7 +2,7 @@
 
 > 更新日期：2026-09-30
 > 研究基线：v0.2.1，commit `11188ae`
-> 状态：阶段 A 已在 v0.3.0 工作区实现并验证，尚未发布；阶段 B/C 与持续建设待办保留。历史研究基线与风险判断保留供追溯。
+> 状态：阶段 A 已随 v0.3.0 发布；阶段 B 已在 v0.4.0 工作区实现并验证，尚未发布。阶段 C 与持续建设待办保留。历史研究基线与风险判断保留供追溯。
 
 下一阶段按 **可靠性修复 → 全流程低内存 → 媒体正确性与输入兼容性** 推进。
 项目已具备 TS/fMP4 输入、并发预取、流式 writer、取消接口和断点续传，优先补齐这些能力在慢网络、崩溃恢复和长视频场景下的边界。
@@ -24,7 +24,7 @@
 
 ## 2. 优先级与依赖
 
-工作量为相对规模，不代表工期承诺。**阶段 A 全部纳入下一个 minor：v0.3.0**。阶段 B/C 暂不绑定发布版本；跨阶段的独立任务可提前实施。
+工作量为相对规模，不代表工期承诺。**阶段 A 已随 v0.3.0 发布；阶段 B 全部纳入下一个 minor：v0.4.0**。C1/C2 仅纳入 B 所需的正确性修复与验证，其余阶段 C 暂不绑定发布版本。
 
 | 阶段 | 方向 | 收益 | 相对工作量 | 依赖 |
 | --- | --- | --- | --- | --- |
@@ -38,7 +38,7 @@
 
 ## 3. 阶段 A：可靠性优先（v0.3.0）
 
-**实现记录（2026-09-30，v0.3.0 本地实现，待发布）：**
+**实现记录（2026-09-30，v0.3.0，已发布）：**
 
 - A1：在检查 slot 状态前创建通知 future；屏障控制检查后、等待前的完成时机，覆盖 worker/consumer slot 的成功与失败。
 - A2：playlist/init/media、write/flush 取消竞争；Source 新增默认 `create_session`/`stop_session` 接口，内置 Source 每任务隔离，取消监视器主动停止后台任务；退出与丢弃 future 时清理任务。Native/FFmpeg 收尾在 blocking worker 内协作检查取消。
@@ -63,7 +63,7 @@
 
 格式/lint 清理独立提交：`93349b7`。行为实现提交标题：`feat: deliver v0.3.0 reliability and crash recovery`。
 
-**保证范围与剩余限制：** 进程崩溃恢复依赖调用方保留最后 checkpoint；断电保护依赖文件同步、checkpoint/目录持久化和文件系统。通用 writer 不支持恢复或 SyncAll。文件提交及 FFmpeg header/trailer 的取消为协作式，完成当前操作后返回。Native finalize 和续传扫描仍全量读取，B1 未实现。平台替换行为由新增 Linux/macOS/Windows CI 覆盖，本轮本地运行环境为 macOS。
+**保证范围与剩余限制：** 进程崩溃恢复依赖调用方保留最后 checkpoint；断电保护依赖文件同步、checkpoint/目录持久化和文件系统。通用 writer 不支持恢复或 SyncAll。文件提交及 FFmpeg header/trailer 的取消为协作式，完成当前操作后返回。v0.3.0 的 Native finalize 和续传扫描仍全量读取；已在下述 v0.4.0 阶段 B 中替换。平台替换行为由新增 Linux/macOS/Windows CI 覆盖，本轮本地运行环境为 macOS。
 
 
 ### A1. 消除并发消费的丢失唤醒窗口
@@ -121,31 +121,40 @@
 
 **验收：** 网络失败和 finalize 失败后临时成果仍可恢复；finalize 重试不读取网络分片；失败不覆盖已有完整目标文件。
 
-## 4. 阶段 B：全流程低内存与大文件
+## 4. 阶段 B：全流程低内存与大文件（v0.4.0）
+
+**实现记录（2026-09-30，本地实现，待发布）：**
+
+- B1：checkpoint 范围内的 `Read + Seek` 扫描跳过 mdat payload；续传只保留 tracks/tfra，Native finalize 保留源偏移、大小和时间信息，再以固定 1 MiB 缓冲复制。共享 mux 布局用于 bytes 与文件路径；不同 timescale 的 chunk 按实际时间排序，保留 partial 中的 duration/config。init 缓存借用、预取结果尽可能转移所有权、streaming sample 构建消费 packet 缓冲。
+- B2：按 track 自动选择 stco/co64，迭代处理 moov 增大后的偏移；支持 64 位 mdat header、长 duration 的 mvhd/tkhd/mdhd/elst，以及必要的 cslg version 1。尺寸、偏移和时间换算增加溢出校验。
+- 兼容性：公开入口及 checkpoint schema v1 不变，实际 v0.3.0 checkpoint/partial fixture 验证下载续传与零网络收尾。保留取消、失败成果与原子目标替换约定。修正 streaming 和历史 tfra 的 traf/sync sample 指向。
+- 验证：连续三分片 TS 与外部生成 fMP4 B 帧样本通过 FFprobe 的 DTS/PTS/duration/payload hash 对照与 FFmpeg 解码/seek；4.40 GB 稀疏输出由 FFprobe seek 到 32 位边界之外。RSS、耗时、吞吐和磁盘测量见 [BENCHMARKS.md](BENCHMARKS.md)。小型独立媒体验证已接入 FFmpeg CI job。
+- 本地检查：默认、serde、无默认 feature、无默认 feature + serde、all-features（FFmpeg 9）测试，以及 wasm check、fmt、Clippy、publish dry-run。跨平台结果由已有 CI matrix 验证，本地环境为 macOS arm64。
+
+**剩余限制：** 内存随 sample/fragment 索引增长，下载仍受当前分片及预取结果体积影响；bytes API/batch Mp4 保持内存输出。稀疏大文件验证只覆盖结构和 seek，真实媒体解码使用小型连续样本。完整 C1/C2、字节预算和新增输入兼容性留待阶段 C。
 
 ### B1. 将 Native finalize 改为分块处理
 
-**已确认：** [`defragment_fmp4_to_mp4`](src/transmux.rs) 整文件读取临时 fMP4，完整 demux 后重新 mux；[`Mp4Muxer::write`](src/mp4.rs) 构建完整 `mdat` 缓冲。
-目前 `StreamingMp4` 只有下载阶段逐片写盘，Native 收尾阶段内存仍随媒体体积增长。
-续传重建历史索引同样使用整文件读取。
+**v0.3.0 实现边界：** Native finalize 整文件读取临时 fMP4，完整 demux 后重新 mux；经典 MP4 mux 构建完整 `mdat` 缓冲。
+v0.3.0 的 `StreamingMp4` 只有下载阶段逐片写盘，Native 收尾阶段内存随媒体体积增长，续传重建历史索引也使用整文件读取。上述路径已由 v0.4.0 流式扫描与文件 mux 替换。
 
-- [ ] 建立 sample 元数据索引，保存源文件偏移、大小、track、时间戳和 duration，避免保存全部 sample payload。
-- [ ] 第一遍扫描 fragment 构建索引，第二遍生成 `moov` 并分块复制媒体数据。
-- [ ] 明确多 track 交错布局与 faststart 偏移计算。
-- [ ] 续传重建 `tfra` 使用流式 box 扫描，不读取全部媒体 payload。
-- [ ] 保留 bytes API 的内存输出语义，新增或重构文件路径的流式 mux 能力。
-- [ ] 减少 init 缓存、预取结果和 sample 构建过程中的不必要复制。
-- [ ] 修正文档中的全流程低内存描述，直到基准验证完成。
+- [x] 建立 sample 元数据索引，保存源文件偏移、大小、track、时间戳和 duration，避免保存全部 sample payload。
+- [x] 第一遍扫描 fragment 构建索引，第二遍生成 `moov` 并分块复制媒体数据。
+- [x] 明确多 track 交错布局与 faststart 偏移计算。
+- [x] 续传重建 `tfra` 使用流式 box 扫描，不读取全部媒体 payload。
+- [x] 保留 bytes API 的内存输出语义，新增或重构文件路径的流式 mux 能力。
+- [x] 减少 init 缓存、预取结果和 sample 构建过程中的不必要复制。
+- [x] 修正文档中的全流程低内存描述，直到基准验证完成。
 
 **验收：** 对递增体积的长视频记录峰值 RSS；增长主要来自 sample 索引而非媒体 payload。
 记录 finalize 耗时、复制吞吐和临时磁盘占用，并验证输出媒体内容、时间戳及 faststart 布局。
 
 ### B2. 支持超过 4 GiB 的经典 MP4
 
-- [ ] 支持 `co64` chunk offsets 和大尺寸 `mdat` box。
-- [ ] 核查 box size、sample size、偏移转换及所有溢出边界。
-- [ ] 核查长时长情况下 `mvhd`、`tkhd`、`mdhd` 的版本选择。
-- [ ] 增加稀疏文件或元数据级边界测试，避免每次 CI 都生成巨量媒体数据。
+- [x] 支持 `co64` chunk offsets 和大尺寸 `mdat` box。
+- [x] 核查 box size、sample size、偏移转换及所有溢出边界。
+- [x] 核查长时长情况下 `mvhd`、`tkhd`、`mdhd` 的版本选择。
+- [x] 增加稀疏文件或元数据级边界测试，避免每次 CI 都生成巨量媒体数据。
 
 **验收：** 覆盖 32 位边界上下的偏移、box size 和时长；大文件由独立工具读取并完成 seek 验证。
 
@@ -224,7 +233,7 @@ v0.3.0 已实现阶段 A，交付顺序如下：
 3. checkpoint 文件长度、边界校验与尾部截断。
 4. finalize 失败保留临时文件，以及仅重试收尾的入口。
 
-下一轮推进 B1，并同时补齐其依赖的 C1/C2 媒体样本与正确性断言。
+v0.4.0 已在工作区完成 B1/B2，并补齐所需的 C1/C2 媒体验证与必要修复；待发布。下一轮按真实输入需求推进阶段 C。
 格式和 lint 清理单独提交，便于审阅行为变更。
 
 ## 8. 维护约定

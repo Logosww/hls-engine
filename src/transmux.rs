@@ -85,7 +85,7 @@ pub enum OutputFormat {
     /// Each segment is demuxed and written to a temp fMP4 file, then
     /// defragged into a single `ftyp` + `moov` + `mdat`. Output uses the same
     /// classic MP4 muxer as [`Mp4`](Self::Mp4). Downloading is streamed, but
-    /// Native finalization currently buffers the full media in memory. The
+    /// Native finalization retains a sample index and copies media in fixed-size blocks. The
     /// temp file (`<output>.partial.<ext>`) is a playable fMP4 if the
     /// process is interrupted before finalization.
     StreamingMp4,
@@ -437,7 +437,9 @@ pub async fn finalize_partial_mp4_async(
     checkpoint: TransmuxResumeState,
     options: TransmuxOptions,
 ) -> Result<TransmuxReport> {
-    use std::io::{Read, Write};
+    use std::io::Write;
+    #[cfg(feature = "ffmpeg-finalize")]
+    use std::io::{Read, Seek};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     checkpoint.validate()?;
     if checkpoint.stage != TransmuxStage::Finalizing
@@ -457,12 +459,6 @@ pub async fn finalize_partial_mp4_async(
     {
         return Err(Error::invalid("partial and target paths must differ"));
     }
-    struct WorkGuard(Arc<AtomicBool>);
-    impl Drop for WorkGuard {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
     struct TempOutput(PathBuf);
     impl Drop for TempOutput {
         fn drop(&mut self) {
@@ -471,7 +467,7 @@ pub async fn finalize_partial_mp4_async(
     }
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let stopped = Arc::new(AtomicBool::new(false));
-    let _work_guard = WorkGuard(stopped.clone());
+    let _work_guard = BlockingStopGuard(stopped.clone());
     let cancel = options.cancel.clone();
     let state = checkpoint.clone();
     let target = output.clone();
@@ -495,17 +491,12 @@ pub async fn finalize_partial_mp4_async(
         if input.metadata()?.len() < state.bytes_written {
             return Err(Error::invalid("file shorter than checkpoint bytes_written"));
         }
-        let size = usize::try_from(state.bytes_written)
-            .map_err(|_| Error::invalid("checkpoint too large"))?;
-        let mut data = Vec::with_capacity(size);
-        let mut buffer = vec![0u8; 1024 * 1024];
-        while data.len() < size {
-            check()?;
-            let n = (size - data.len()).min(buffer.len());
-            input.read_exact(&mut buffer[..n])?;
-            data.extend_from_slice(&buffer[..n]);
-        }
-        validate_prefix_checked(&data, &state, &check)?;
+        let (index, tracks) = scan_checkpoint(
+            &mut input,
+            &state,
+            matches!(backend, FinalizeBackend::Native),
+            &check,
+        )?;
         check()?;
         let parent = target
             .parent()
@@ -529,22 +520,30 @@ pub async fn finalize_partial_mp4_async(
         };
         let report = match backend {
             FinalizeBackend::Native => {
-                let init_end = split_fmp4_init(&data)?;
-                let demuxed = crate::isobmff::demux_isobmff_checked(
-                    &data[..init_end],
-                    &data[init_end..],
-                    &check,
-                )?;
-                let mut collector = PacketCollector::default();
-                collector.push_demuxed(demuxed)?;
-                let (mp4, mut report) =
-                    mux_collected_packets_checked(collector, state.total_segments, &check)?;
-                for chunk in mp4.chunks(1024 * 1024) {
-                    check()?;
-                    file.write_all(chunk)?;
+                let classic = tracks
+                    .into_iter()
+                    .zip(index.samples)
+                    .map(|(track, samples)| track.into_classic(samples))
+                    .collect();
+                let (bytes_written, infos) =
+                    Mp4Muxer::new(classic).write_file(&mut input, &mut file, &check)?;
+                let duration = infos
+                    .iter()
+                    .map(|t| {
+                        u64::try_from(u128::from(t.duration) * 1000 / u128::from(t.timescale))
+                            .map_err(|_| Error::muxing("report duration overflow"))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .max()
+                    .unwrap_or(0);
+                TransmuxReport {
+                    segment_count: state.total_segments,
+                    tracks: infos,
+                    duration,
+                    duration_timescale: 1000,
+                    bytes_written,
                 }
-                report.bytes_written = mp4.len() as u64;
-                report
             }
             #[cfg(feature = "ffmpeg-finalize")]
             FinalizeBackend::Ffmpeg => {
@@ -556,9 +555,15 @@ pub async fn finalize_partial_mp4_async(
                     .create_new(true)
                     .open(&prefix_path)?;
                 let prefix_guard = TempOutput(prefix_path.clone());
-                for chunk in data.chunks(1024 * 1024) {
+                input.rewind()?;
+                let mut remaining = state.bytes_written;
+                let mut buffer = vec![0; 1024 * 1024];
+                while remaining > 0 {
                     check()?;
-                    prefix_file.write_all(chunk)?;
+                    let n = remaining.min(buffer.len() as u64) as usize;
+                    input.read_exact(&mut buffer[..n])?;
+                    prefix_file.write_all(&buffer[..n])?;
+                    remaining -= n as u64;
                 }
                 drop(prefix_file);
                 let duration =
@@ -941,99 +946,37 @@ fn config_digest(tracks: &[FragmentedTrack]) -> [u8; 32] {
     crate::resume::digest(&bytes)
 }
 
-fn tracks_from_file(data: &[u8]) -> Result<Vec<FragmentedTrack>> {
-    let end = split_fmp4_init(data)?;
-    let mut init = demux_isobmff(&data[..end], &[])?;
-    init.saw_video = init.sps.is_some();
-    init.saw_audio = init.audio_specific_config.is_some();
-    build_fragmented_tracks(&init)
+#[cfg(not(target_arch = "wasm32"))]
+struct BlockingStopGuard(Arc<std::sync::atomic::AtomicBool>);
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for BlockingStopGuard {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+struct RecoveryIndex {
+    tracks: Vec<FragmentedTrack>,
+    entries: Vec<Vec<TfraEntry>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn validate_prefix(data: &[u8], r: &TransmuxResumeState) -> Result<()> {
-    validate_prefix_checked(data, r, &|| Ok(()))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn validate_prefix_checked(
-    data: &[u8],
-    r: &TransmuxResumeState,
+fn scan_checkpoint<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    state: &TransmuxResumeState,
+    samples: bool,
     check: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    check()?;
-    r.validate()?;
-    let end = usize::try_from(r.bytes_written)
-        .map_err(|_| Error::invalid("checkpoint offset too large"))?;
-    let prefix = data
-        .get(..end)
-        .ok_or_else(|| Error::invalid("file shorter than checkpoint bytes_written"))?;
-    let boxes = crate::resume::boxes(prefix)?;
-    if boxes.len() < 5 || boxes[0].0 != *b"ftyp" || boxes[1].0 != *b"moov" {
-        return Err(Error::invalid(
-            "checkpoint missing initialization or fragments",
-        ));
-    }
-    let mut count = 0u32;
-    let mut pos = 2;
-    while pos < boxes.len() {
-        check()?;
-        if boxes[pos].0 == *b"mfra" && pos + 1 == boxes.len() && r.stage == TransmuxStage::Completed
-        {
-            break;
-        }
-        if pos + 2 >= boxes.len()
-            || boxes[pos].0 != *b"styp"
-            || boxes[pos + 1].0 != *b"moof"
-            || boxes[pos + 2].0 != *b"mdat"
-        {
-            return Err(Error::invalid(
-                "checkpoint is not at a complete fragment boundary",
-            ));
-        }
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| Error::invalid("fragment sequence overflow"))?;
-        let children = crate::resume::boxes(boxes[pos + 1].2)?;
-        let mfhd = children
-            .iter()
-            .find(|b| b.0 == *b"mfhd")
-            .ok_or_else(|| Error::invalid("missing fragment sequence"))?
-            .2;
-        if mfhd.len() != 8 || u32::from_be_bytes(mfhd[4..8].try_into().unwrap()) != count {
-            return Err(Error::invalid("checkpoint fragment sequence mismatch"));
-        }
-        pos += 3;
-    }
-    if count as usize != r.completed_segments {
+) -> Result<(crate::isobmff::FileIndex, Vec<FragmentedTrack>)> {
+    state.validate()?;
+    let index = crate::isobmff::scan_file(reader, state.bytes_written, samples, check)?;
+    if index.fragments != state.completed_segments {
         return Err(Error::invalid("checkpoint fragment count mismatch"));
     }
-    let tracks = tracks_from_file(prefix)?;
-    if config_digest(&tracks) != r.init_digest {
+    let tracks = crate::isobmff::file_tracks(&index.init)?;
+    if config_digest(&tracks) != state.init_digest {
         return Err(Error::invalid("checkpoint initialization mismatch"));
     }
-    let init_end = split_fmp4_init(prefix)?;
-    crate::isobmff::demux_isobmff_checked(&prefix[..init_end], &prefix[init_end..], check)?;
-    Ok(())
-}
-
-/// Splits a fragmented MP4 file into init (`ftyp` + `moov`) and media (the
-/// rest). Returns the byte offset where the media portion begins.
-fn split_fmp4_init(data: &[u8]) -> Result<usize> {
-    let mut offset = 0;
-    for expected in [*b"ftyp", *b"moov"] {
-        let header = data
-            .get(offset..offset + 8)
-            .ok_or_else(|| Error::invalid("truncated fMP4 initialization"))?;
-        let size = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
-        if header[4..8] != expected || size < 8 {
-            return Err(Error::invalid("invalid fMP4 initialization layout"));
-        }
-        offset = offset
-            .checked_add(size)
-            .filter(|&v| v <= data.len())
-            .ok_or_else(|| Error::invalid("truncated initialization box"))?;
-    }
-    Ok(offset)
+    Ok((index, tracks))
 }
 
 /// Temp file path for stage 1 of the finalized-fragmented path. Uses `.mp4`
@@ -1080,8 +1023,30 @@ async fn transmux_fragmented_async(
                 "checkpoint input, output configuration or stage mismatch",
             ));
         }
-        let data = tokio::fs::read(output).await?;
-        validate_prefix(&data, r)?;
+        let path = output.to_path_buf();
+        let state = r.clone();
+        let cancel = hooks.options.cancel.clone();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _guard = BlockingStopGuard(stopped.clone());
+        let recovered = tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::File::open(path)?;
+            let check = || {
+                if stopped.load(std::sync::atomic::Ordering::Acquire)
+                    || cancel.as_ref().is_some_and(|c| c.is_cancelled())
+                {
+                    Err(Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            };
+            let (index, tracks) = scan_checkpoint(&mut file, &state, false, &check)?;
+            Ok::<_, Error>(RecoveryIndex {
+                tracks,
+                entries: index.entries,
+            })
+        })
+        .await
+        .map_err(|e| Error::muxing(format!("recovery worker failed: {e}")))??;
         // Recheck the source codec config and normalization base before modifying
         // the file. Finalize-only recovery instead uses exclusively local data.
         let (first, _) = demux_segment(
@@ -1098,11 +1063,7 @@ async fn transmux_fragmented_async(
                 "checkpoint initialization or timestamp base mismatch",
             ));
         }
-        Some(
-            data[..usize::try_from(r.bytes_written)
-                .map_err(|_| Error::invalid("checkpoint offset too large"))?]
-                .to_vec(),
-        )
+        Some(recovered)
     } else {
         None
     };
@@ -1143,7 +1104,7 @@ async fn transmux_fragmented_async(
         &mut file,
         hooks,
         resume,
-        resume_existing.as_deref(),
+        resume_existing,
     )
     .await;
     // Tokio filesystem writes may already be running in the blocking pool.
@@ -1167,9 +1128,8 @@ async fn transmux_fragmented_async(
 /// `styp` + `moof` + `mdat` per segment directly to `writer`, and optionally
 /// a trailing `mfra` box at EOF.
 ///
-/// `resume_existing` carries the already-written output bytes for the
-/// file-path resume case (so tfra entries can be rebuilt by scanning moof
-/// boxes). The writer entry point always passes `None` (it rejects resume
+/// `resume_existing` carries validated tracks and historical tfra entries
+/// rebuilt by scanning only metadata in the committed file prefix. The writer entry point always passes `None` (it rejects resume
 /// upfront). `write_mfra` controls the trailing mfra box.
 async fn transmux_fragmented_to_writer<W>(
     reader: &SourceReader,
@@ -1178,7 +1138,7 @@ async fn transmux_fragmented_to_writer<W>(
     writer: &mut W,
     hooks: &Hooks<'_>,
     resume: Option<TransmuxResumeState>,
-    resume_existing: Option<&[u8]>,
+    resume_existing: Option<RecoveryIndex>,
 ) -> Result<TransmuxReport>
 where
     W: tokio::io::AsyncWrite + Send + Unpin,
@@ -1212,44 +1172,14 @@ where
     let mut global_base_dts_90k: Option<u64> = resume.as_ref().map(|r| r.global_base_dts_90k);
 
     if let Some(r) = &resume {
-        let existing = resume_existing.ok_or_else(|| Error::invalid("missing recovery prefix"))?;
-        let tracks = tracks_from_file(existing)?;
-        layout = TrackLayout::from_tracks(&tracks);
-        let m = FragmentedMp4Muxer::new_with_sequence(tracks.clone(), r.next_sequence);
-        saved_tracks = Some(tracks);
-        muxer = Some(m);
-
-        // Rebuild historical tfra entries by scanning the existing output
-        // bytes (passed in by the file-path wrapper). The moof boxes are
-        // walked to recover each fragment's track ID, base decode time, and
-        // absolute moof offset. These are mapped to track indices via the
-        // rebuilt tracks and pushed into tfra_entries_per_track, so the
-        // resumed run emits a complete mfra box at EOF (matching a fresh
-        // run's output byte-for-byte). The writer entry point never reaches
-        // here (it rejects resume upfront).
-        let existing = resume_existing.unwrap_or(&[]);
-        // Scan only up to the checkpoint's bytes_written — guards against
-        // any accidental truncation or padding beyond the checkpoint.
-        let scan_end = (r.bytes_written as usize).min(existing.len());
-        let scanned = crate::isobmff::extract_tfra_entries(&existing[..scan_end])?;
-        let tracks_ref = saved_tracks.as_ref().expect("tracks were just saved");
-        let track_id_to_index: std::collections::HashMap<u32, usize> = tracks_ref
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (t.track_id, i))
-            .collect();
-        tfra_entries_per_track = (0..tracks_ref.len()).map(|_| Vec::new()).collect();
-        for entry in scanned {
-            if let Some(&track_index) = track_id_to_index.get(&entry.track_id) {
-                tfra_entries_per_track[track_index].push(TfraEntry {
-                    time: entry.base_decode_time,
-                    moof_offset: entry.moof_offset,
-                    traf_number: 1,
-                    trun_number: 1,
-                    sample_number: 1,
-                });
-            }
-        }
+        let recovered = resume_existing.ok_or_else(|| Error::invalid("missing recovery index"))?;
+        layout = TrackLayout::from_tracks(&recovered.tracks);
+        muxer = Some(FragmentedMp4Muxer::new_with_sequence(
+            recovered.tracks.clone(),
+            r.next_sequence,
+        ));
+        saved_tracks = Some(recovered.tracks);
+        tfra_entries_per_track = recovered.entries;
     }
 
     let start_index = resume.as_ref().map(|r| r.completed_segments).unwrap_or(0);
@@ -1298,25 +1228,33 @@ where
         }
 
         let muxer = muxer.as_mut().expect("muxer was just initialized");
-        let samples_per_track = group_samples_per_track(&demuxed.packets, &layout, base)?;
+        let last_dts = demuxed.packets.last().map(|p| p.dts_90k);
+        let samples_per_track = group_samples_per_track(demuxed.packets, &layout, base)?;
 
         // Record per-track tfra entries before writing the fragment, using the
         // current writer offset (pointing at the styp that starts this fragment).
         // Each fragment begins with an styp box; its size (first 4 bytes) is
         // the offset of the moof within the fragment.
         let pre_write_offset = bytes_written;
+        let mut traf_number = 0;
+        let mut new_entries = vec![false; samples_per_track.len()];
         for (track_index, samples) in samples_per_track.iter().enumerate() {
-            if let Some(first) = samples.first() {
-                // moof_offset is filled after we know the styp size below;
-                // for now record the fragment start and update afterwards.
-                // We'll fix this by computing styp size from the fragment bytes.
+            if samples.is_empty() {
+                continue;
+            }
+            traf_number += 1;
+            if let Some((sample_index, first)) =
+                samples.iter().enumerate().find(|(_, sample)| sample.is_key)
+            {
                 tfra_entries_per_track[track_index].push(TfraEntry {
                     time: first.dts,
-                    moof_offset: 0, // placeholder, fixed after write_fragment
-                    traf_number: 1,
+                    moof_offset: 0,
+                    traf_number,
                     trun_number: 1,
-                    sample_number: 1,
+                    sample_number: u32::try_from(sample_index + 1)
+                        .map_err(|_| Error::muxing("sync sample index overflow"))?,
                 });
+                new_entries[track_index] = true;
             }
         }
 
@@ -1328,7 +1266,7 @@ where
 
         // Fix up the moof_offset for the entries we just pushed.
         for track_index in 0..samples_per_track.len() {
-            if !samples_per_track[track_index].is_empty() {
+            if new_entries[track_index] {
                 let entry = tfra_entries_per_track[track_index]
                     .last_mut()
                     .expect("entry was just pushed");
@@ -1342,8 +1280,8 @@ where
         .await?;
         bytes_written += fragment_bytes.len() as u64;
 
-        if let Some(last) = demuxed.packets.last() {
-            let ms = last.dts_90k.saturating_sub(base).saturating_mul(1000) / 90_000;
+        if let Some(last_dts) = last_dts {
+            let ms = last_dts.saturating_sub(base).saturating_mul(1000) / 90_000;
             if ms > max_duration_ms {
                 max_duration_ms = ms;
             }
@@ -1494,16 +1432,16 @@ async fn demux_segment(
         let init_bytes = if let Some((_, cached_bytes)) =
             init_cache.as_ref().filter(|(uri, _)| uri == &init_spec.uri)
         {
-            cached_bytes.clone()
+            cached_bytes.as_slice()
         } else {
             let init_location = playlist_location.resolve(&init_spec.uri)?;
             let bytes = reader
                 .read_bytes(&init_location, init_spec.byte_range.as_ref())
                 .await?;
-            *init_cache = Some((init_spec.uri.clone(), bytes.clone()));
-            bytes
+            *init_cache = Some((init_spec.uri.clone(), bytes));
+            init_cache.as_ref().unwrap().1.as_slice()
         };
-        demux_isobmff(&init_bytes, &data)?
+        demux_isobmff(init_bytes, &data)?
     } else {
         demux_ts(&data)?
     };
@@ -1572,7 +1510,7 @@ fn build_fragmented_tracks(first: &DemuxOutput) -> Result<Vec<FragmentedTrack>> 
 /// at 0, later fragments at their cumulative offset) without inflating the
 /// track duration with a non-zero TS encoder initial timestamp.
 fn group_samples_per_track(
-    packets: &[EncodedPacket],
+    packets: Vec<EncodedPacket>,
     layout: &TrackLayout,
     base_dts_90k: u64,
 ) -> Result<Vec<Vec<Mp4Sample>>> {
@@ -1583,7 +1521,7 @@ fn group_samples_per_track(
         match packet.kind {
             StreamKind::Avc | StreamKind::Hevc => {
                 let data = if packet.is_length_prefixed {
-                    packet.data.clone()
+                    packet.data
                 } else {
                     avc::annex_b_to_length_prefixed(&packet.data)?
                 };
@@ -1591,6 +1529,7 @@ fn group_samples_per_track(
                 // starts at 0 and the track duration is not inflated by the
                 // TS encoder's initial timestamp offset.
                 video_samples.push(Mp4Sample {
+                    source: None,
                     data,
                     dts: packet.dts_90k.saturating_sub(base_dts_90k),
                     pts: packet.pts_90k.saturating_sub(base_dts_90k),
@@ -1608,7 +1547,8 @@ fn group_samples_per_track(
                 let dts = rescale_90k(packet.dts_90k.saturating_sub(base_dts_90k), audio_ts);
                 let pts = rescale_90k(packet.pts_90k.saturating_sub(base_dts_90k), audio_ts);
                 audio_samples.push(Mp4Sample {
-                    data: packet.data.clone(),
+                    source: None,
+                    data: packet.data,
                     dts,
                     pts,
                     duration: 1024,
@@ -1801,6 +1741,7 @@ fn mux_collected_packets_checked(
                     avc::annex_b_to_length_prefixed(&packet.data)?
                 };
                 video_samples.push(Mp4Sample {
+                    source: None,
                     data,
                     dts: packet.dts_90k - base_dts,
                     pts: packet.pts_90k - base_dts,
@@ -1813,6 +1754,7 @@ fn mux_collected_packets_checked(
                 let dts = rescale_90k(packet.dts_90k - base_dts, sample_rate);
                 let pts = rescale_90k(packet.pts_90k - base_dts, sample_rate);
                 audio_samples.push(Mp4Sample {
+                    source: None,
                     data: packet.data,
                     dts,
                     pts,

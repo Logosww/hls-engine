@@ -24,9 +24,10 @@ fn read_box_header(data: &[u8]) -> Result<BoxHeader> {
         if data.len() < 16 {
             return Err(Error::bitstream("64-bit ISOBMFF box header is too short"));
         }
-        let large = u64::from_be_bytes([
+        let large = usize::try_from(u64::from_be_bytes([
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-        ]) as usize;
+        ]))
+        .map_err(|_| Error::bitstream("box size exceeds address space"))?;
         (16, large)
     } else {
         (8, size)
@@ -43,9 +44,12 @@ fn read_box_header(data: &[u8]) -> Result<BoxHeader> {
 
 fn find_box<'a>(data: &'a [u8], box_type: &[u8; 4]) -> Result<Option<&'a [u8]>> {
     let mut offset = 0;
-    while offset + 8 <= data.len() {
+    while offset < data.len() {
         let header = read_box_header(&data[offset..])?;
-        if offset + header.total_size > data.len() {
+        if offset
+            .checked_add(header.total_size)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(Error::bitstream("ISOBMFF box extends past data"));
         }
         if &header.box_type == box_type {
@@ -63,9 +67,12 @@ where
     F: FnMut(&[u8; 4], &[u8]) -> Result<()>,
 {
     let mut offset = 0;
-    while offset + 8 <= data.len() {
+    while offset < data.len() {
         let header = read_box_header(&data[offset..])?;
-        if offset + header.total_size > data.len() {
+        if offset
+            .checked_add(header.total_size)
+            .is_none_or(|end| end > data.len())
+        {
             return Err(Error::bitstream("ISOBMFF box extends past data"));
         }
         f(
@@ -95,6 +102,8 @@ struct InitTrack {
     default_sample_size: u32,
     default_sample_flags: u32,
     length_size: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    video_codec: Option<crate::mp4::VideoCodec>,
 }
 
 fn parse_init_segment(init: &[u8]) -> Result<Vec<InitTrack>> {
@@ -225,6 +234,8 @@ fn parse_trak(trak: &[u8], trex_defaults: &HashMap<u32, (u32, u32, u32)>) -> Res
         default_sample_size,
         default_sample_flags,
         length_size: entry.length_size,
+        #[cfg(not(target_arch = "wasm32"))]
+        video_codec: entry.video_codec,
     })
 }
 
@@ -273,6 +284,8 @@ struct SampleEntryInfo {
     sample_rate: Option<u32>,
     channel_count: Option<u8>,
     length_size: usize,
+    #[cfg(not(target_arch = "wasm32"))]
+    video_codec: Option<crate::mp4::VideoCodec>,
 }
 
 fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
@@ -315,6 +328,10 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
                 sample_rate: None,
                 channel_count: None,
                 length_size: config.length_size_minus_one as usize + 1,
+                #[cfg(not(target_arch = "wasm32"))]
+                video_codec: Some(crate::mp4::VideoCodec::Avc {
+                    avcc: avcc_data.to_vec(),
+                }),
             })
         }
         b"hvc1" | b"hev1" => {
@@ -336,6 +353,10 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
                 sample_rate: None,
                 channel_count: None,
                 length_size: config.length_size_minus_one as usize + 1,
+                #[cfg(not(target_arch = "wasm32"))]
+                video_codec: Some(crate::mp4::VideoCodec::Hevc {
+                    hvcc: hvcc_data.to_vec(),
+                }),
             })
         }
         b"mp4a" => {
@@ -360,6 +381,8 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
                 sample_rate: Some(sample_rate),
                 channel_count: Some(channel_count),
                 length_size: 0,
+                #[cfg(not(target_arch = "wasm32"))]
+                video_codec: None,
             })
         }
         _ => Err(Error::unsupported(format!(
@@ -519,89 +542,6 @@ pub(crate) fn demux_isobmff_checked(
     Ok(output)
 }
 
-/// One fragment's random-access info extracted by scanning a complete fMP4
-/// file. Used to rebuild `tfra` entries on resume (plan §5.5 enhancement):
-/// the resumed run scans the existing `.partial.mp4` to recover historical
-/// fragment offsets/times, then appends new entries as fresh fragments are
-/// written, producing a complete `mfra` box at EOF.
-#[derive(Debug, Clone)]
-pub(crate) struct ScannedTfraEntry {
-    /// Track ID from the fragment's `tfhd`. Mapped to a track index by the
-    /// caller using the rebuilt `FragmentedTrack` list.
-    pub track_id: u32,
-    /// `base_decode_time` from the fragment's `tfdt` (track timescale). This
-    /// equals the first sample's DTS and is exactly what `TfraEntry.time`
-    /// stores in the fresh-run accumulation path.
-    pub base_decode_time: u64,
-    /// Absolute byte offset of the `moof` box from the start of the file.
-    pub moof_offset: u64,
-}
-
-/// Walks a complete fMP4 file (`ftyp` + `moov` + `[styp` + `moof` + `mdat]*`)
-/// and extracts one [`ScannedTfraEntry`] per `(moof, traf)` pair. Each entry
-/// records the `moof`'s absolute offset, the track ID (from `tfhd`), and the
-/// fragment's base decode time (from `tfdt`).
-///
-/// Used by the resume path to rebuild historical `tfra` entries so the
-/// resumed output includes a complete `mfra` box (matching a fresh run's
-/// output byte-for-byte).
-///
-/// `data` should cover exactly the previously-written portion of the file
-/// (up to the resume checkpoint's `bytes_written`); anything beyond is being
-/// written by the current resumed run and will be accumulated normally.
-pub(crate) fn extract_tfra_entries(data: &[u8]) -> Result<Vec<ScannedTfraEntry>> {
-    let mut entries = Vec::new();
-    let mut offset = 0_usize;
-    while offset + 8 <= data.len() {
-        let header = read_box_header(&data[offset..])?;
-        if offset + header.total_size > data.len() {
-            return Err(Error::bitstream("ISOBMFF box extends past data"));
-        }
-        if &header.box_type == b"moof" {
-            let moof_payload = &data[offset + header.header_size..offset + header.total_size];
-            let moof_offset = offset as u64;
-            extract_tfra_from_moof(moof_payload, moof_offset, &mut entries)?;
-        }
-        offset += header.total_size;
-    }
-    Ok(entries)
-}
-
-/// Iterates `traf` children of a single `moof` and pushes one entry per traf.
-fn extract_tfra_from_moof(
-    moof_payload: &[u8],
-    moof_offset: u64,
-    entries: &mut Vec<ScannedTfraEntry>,
-) -> Result<()> {
-    let mut offset = 0;
-    while offset + 8 <= moof_payload.len() {
-        let header = read_box_header(&moof_payload[offset..])?;
-        if offset + header.total_size > moof_payload.len() {
-            return Err(Error::bitstream("ISOBMFF box extends past moof"));
-        }
-        if &header.box_type == b"traf" {
-            let traf_payload =
-                &moof_payload[offset + header.header_size..offset + header.total_size];
-            let tfhd_data = find_box(traf_payload, b"tfhd")?
-                .ok_or_else(|| Error::bitstream("traf does not contain a tfhd box"))?;
-            let tfhd = parse_tfhd(tfhd_data)?;
-            // tfdt is optional in theory but our muxer always writes it
-            // (version 1, 64-bit). Missing tfdt means base_decode_time = 0.
-            let base_decode_time = match find_box(traf_payload, b"tfdt")? {
-                Some(tfdt_data) => parse_tfdt(tfdt_data)?,
-                None => 0,
-            };
-            entries.push(ScannedTfraEntry {
-                track_id: tfhd.track_id,
-                base_decode_time,
-                moof_offset,
-            });
-        }
-        offset += header.total_size;
-    }
-    Ok(())
-}
-
 fn parse_media_segment(
     segment: &[u8],
     tracks: &[InitTrack],
@@ -612,7 +552,10 @@ fn parse_media_segment(
     while offset + 8 <= segment.len() {
         check()?;
         let header = read_box_header(&segment[offset..])?;
-        if offset + header.total_size > segment.len() {
+        if offset
+            .checked_add(header.total_size)
+            .is_none_or(|end| end > segment.len())
+        {
             return Err(Error::bitstream("ISOBMFF box extends past segment"));
         }
         if &header.box_type == b"moof" {
@@ -640,7 +583,10 @@ fn parse_moof(
     while offset + 8 <= moof_payload.len() {
         check()?;
         let header = read_box_header(&moof_payload[offset..])?;
-        if offset + header.total_size > moof_payload.len() {
+        if offset
+            .checked_add(header.total_size)
+            .is_none_or(|end| end > moof_payload.len())
+        {
             return Err(Error::bitstream("ISOBMFF box extends past moof"));
         }
         if &header.box_type == b"traf" {
@@ -686,23 +632,25 @@ fn parse_traf(
         .ok_or_else(|| Error::bitstream("traf does not contain a trun box"))?;
     let trun = parse_trun(trun_data, &tfhd, track)?;
 
-    let mut sample_data_offset = base_data_offset as i64 + trun.data_offset as i64;
+    let mut sample_data_offset = base_data_offset
+        .checked_add_signed(i64::from(trun.data_offset))
+        .ok_or_else(|| Error::bitstream("sample offset overflow"))?;
     let mut cumulative_duration: u64 = 0;
 
     for sample in &trun.samples {
         check()?;
-        if sample_data_offset < 0
-            || sample_data_offset as usize + sample.size as usize > segment.len()
-        {
-            return Err(Error::bitstream("sample data extends past segment"));
-        }
-        let data = segment
-            [sample_data_offset as usize..sample_data_offset as usize + sample.size as usize]
-            .to_vec();
+        let end = sample_data_offset
+            .checked_add(u64::from(sample.size))
+            .filter(|&end| end <= segment.len() as u64)
+            .ok_or_else(|| Error::bitstream("sample data extends past segment"))?;
+        let data = segment[sample_data_offset as usize..end as usize].to_vec();
 
-        let dts = base_decode_time + cumulative_duration;
+        let dts = base_decode_time
+            .checked_add(cumulative_duration)
+            .ok_or_else(|| Error::bitstream("decode timestamp overflow"))?;
         let pts = if let Some(cts) = sample.composition_offset {
-            (dts as i64 + cts as i64).max(0) as u64
+            dts.checked_add_signed(i64::from(cts))
+                .ok_or_else(|| Error::bitstream("composition timestamp overflow"))?
         } else {
             dts
         };
@@ -737,8 +685,10 @@ fn parse_traf(
             is_length_prefixed: matches!(track.kind, StreamKind::Avc | StreamKind::Hevc),
         });
 
-        cumulative_duration += sample.duration as u64;
-        sample_data_offset += sample.size as i64;
+        cumulative_duration = cumulative_duration
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| Error::bitstream("duration overflow"))?;
+        sample_data_offset = end;
     }
 
     Ok(())
@@ -880,7 +830,18 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
         .default_sample_flags
         .unwrap_or(track.default_sample_flags);
 
-    let mut samples = Vec::with_capacity(sample_count);
+    let fields =
+        u32::from(has_duration) + u32::from(has_size) + u32::from(has_flags) + u32::from(has_cts);
+    let needed = sample_count
+        .checked_mul(fields as usize * 4)
+        .ok_or_else(|| Error::bitstream("trun count overflow"))?;
+    if pos > data.len() || needed > data.len() - pos || sample_count > 16_777_216 {
+        return Err(Error::bitstream("invalid trun sample count"));
+    }
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(sample_count)
+        .map_err(|_| Error::bitstream("trun allocation failed"))?;
     for _ in 0..sample_count {
         let duration = if has_duration {
             if pos + 4 > data.len() {
@@ -1059,4 +1020,45 @@ mod tests {
         out.extend_from_slice(&payload);
         out
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "file_scan.rs"]
+mod file_scan;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use file_scan::{FileIndex, scan as scan_file};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn file_tracks(init: &[u8]) -> Result<Vec<crate::mp4::FragmentedTrack>> {
+    use crate::mp4::{FragmentedTrack, FragmentedTrackKind};
+    parse_init_segment(init)?
+        .into_iter()
+        .map(|t| {
+            let kind = match t.kind {
+                StreamKind::Avc | StreamKind::Hevc => FragmentedTrackKind::Video {
+                    width: t.width.ok_or_else(|| Error::invalid("missing width"))?,
+                    height: t.height.ok_or_else(|| Error::invalid("missing height"))?,
+                    codec: t
+                        .video_codec
+                        .ok_or_else(|| Error::invalid("missing codec config"))?,
+                },
+                StreamKind::Aac => FragmentedTrackKind::Audio {
+                    sample_rate: t
+                        .sample_rate
+                        .ok_or_else(|| Error::invalid("missing sample rate"))?,
+                    channel_count: t
+                        .channel_count
+                        .ok_or_else(|| Error::invalid("missing channels"))?,
+                    audio_specific_config: t
+                        .audio_specific_config
+                        .ok_or_else(|| Error::invalid("missing AAC config"))?,
+                },
+            };
+            Ok(FragmentedTrack {
+                track_id: t.track_id,
+                timescale: t.timescale,
+                kind,
+            })
+        })
+        .collect()
 }

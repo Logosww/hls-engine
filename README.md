@@ -27,18 +27,20 @@ HTTP dependencies are required.
 | --------------- | -------------------------------------------- | ------------------------------------- | ----------- | ----------------------- |
 | `Mp4` (default) | `ftyp` + `moov` + `mdat`                     | batch (demux all to memory, then mux) | high        | no                      |
 | `FragmentedMp4` | `ftyp` + `moov` + `moof` + `mdat` per segment | streaming (write per segment)         | low         | yes (fMP4)              |
-| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag               | high at Native finalize | yes (temp file is fMP4) |
+| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag               | sample index + bounded payload buffers | yes (temp file is fMP4) |
 
 `StreamingMp4` produces the same layout as `Mp4`, but uses a streaming fMP4
-pipeline (writes a temporary fMP4 file) plus end-of-stream defrag. Download-stage
-memory is bounded; Native finalize still buffers the full media payload. The temp file `<output>.partial.<ext>` is a valid,
+pipeline (writes a temporary fMP4 file) plus end-of-stream defrag. Native finalize
+scans sample metadata and copies payload with a fixed 1 MiB buffer. Memory consists
+of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
+with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
 ## Installation
 
 ```toml
 [dependencies]
-hls-transmux = "0.3"
+hls-transmux = "0.4"
 ```
 
 The `default-source` feature is enabled by default (built-in reqwest-backed HTTP
@@ -46,7 +48,7 @@ client). To drop reqwest entirely and supply your own HTTP reader:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", default-features = false }
+hls-transmux = { version = "0.4", default-features = false }
 ```
 
 Optionally enable `ffmpeg-finalize` to remux via ffmpeg (through `ffmpeg-next`)
@@ -55,7 +57,7 @@ FFmpeg 9 shared libraries and pkg-config on the system:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.4", features = ["ffmpeg-finalize"] }
 ```
 
 Optionally enable `serde` to derive `Serialize`/`Deserialize` for
@@ -63,7 +65,7 @@ Optionally enable `serde` to derive `Serialize`/`Deserialize` for
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", features = ["serde"] }
+hls-transmux = { version = "0.4", features = ["serde"] }
 ```
 
 ## Custom Source
@@ -398,8 +400,11 @@ and cannot be resumed. Fragmented output also emits a terminal Completed event
 in addition to its per-segment callbacks. Batch callbacks are informational and
 do not provide resumable checkpoints.
 
-Native finalize still buffers the full media payload; all-stage bounded memory
-is scheduled for roadmap B1. Finalization uses cooperative CPU cancellation;
+Since v0.4, Native finalize and resume validation skip media payload during scans.
+Classic MP4 supports `co64`, extended-size `mdat`, and 64-bit duration headers.
+The bytes API and batch `Mp4` remain in-memory. Schema v1 checkpoints from v0.3
+remain compatible. See [BENCHMARKS.md](BENCHMARKS.md) for measurements and limits.
+Finalization uses cooperative CPU cancellation;
 filesystem commit and FFmpeg header/trailer operations finish before returning.
 
 ### `serde` feature
@@ -408,7 +413,7 @@ Enable `serde` to derive `Serialize`/`Deserialize` on `TransmuxResumeState`:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", features = ["serde"] }
+hls-transmux = { version = "0.4", features = ["serde"] }
 ```
 
 ```rust
@@ -647,7 +652,7 @@ in-browser HLS → MP4 transmuxing without file system or network dependencies.
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", default-features = false }
+hls-transmux = { version = "0.4", default-features = false }
 ```
 
 `default-features = false` drops `reqwest` (which requires `tokio/net` and is
@@ -788,17 +793,18 @@ MP4，**不解码、不编码、不转码**。
 | --------------- | -------------------------------------------- | -------------------------------- | -------- | ---------------------- |
 | `Mp4`（默认）   | `ftyp` + `moov` + `mdat`                     | batch（全部 demux 到内存再 mux） | 高       | 否                     |
 | `FragmentedMp4` | `ftyp` + `moov` + 每 segment `moof` + `mdat` | streaming（逐 segment 写盘）     | 低       | 是（fMP4）             |
-| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag          | Native 收尾高 | 是（temp 文件为 fMP4） |
+| `StreamingMp4`  | `ftyp` + `moov` + `mdat`                     | streaming fMP4 → defrag          | sample 索引 + 有界 payload 缓冲 | 是（temp 文件为 fMP4） |
 
 `StreamingMp4` 输出与 `Mp4` 完全一致，但用流式 fMP4 pipeline（写临时 fMP4
-文件）+ 末端 defrag。下载阶段逐片写盘，Native 收尾仍全量缓冲媒体。临时文件
+文件）+ 末端 defrag。Native 收尾扫描 sample 元数据，以固定 1 MiB 缓冲复制 payload。
+内存由分片/预取缓冲、sample 索引和固定复制缓冲组成，仍随 sample 数量增长。临时文件
 `<output>.partial.<ext>` 是合法可播放的 fMP4，中断后可直接播放已下载部分。
 
 ### 安装
 
 ```toml
 [dependencies]
-hls-transmux = "0.3"
+hls-transmux = "0.4"
 ```
 
 默认启用 `default-source` feature（内置 reqwest-backed HTTP
@@ -806,7 +812,7 @@ hls-transmux = "0.3"
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", default-features = false }
+hls-transmux = { version = "0.4", default-features = false }
 ```
 
 可选启用 `ffmpeg-finalize` feature，在 `StreamingMp4` finalization 阶段用
@@ -815,7 +821,7 @@ ffmpeg（via `ffmpeg-next`）做 remux，替代自研 defrag 路径。需要系�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.4", features = ["ffmpeg-finalize"] }
 ```
 
 可选启用 `serde` feature，为 `TransmuxResumeState` 派生
@@ -823,7 +829,7 @@ hls-transmux = { version = "0.3", features = ["ffmpeg-finalize"] }
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", features = ["serde"] }
+hls-transmux = { version = "0.4", features = ["serde"] }
 ```
 
 ### 自定义 Source
@@ -1147,7 +1153,10 @@ HLS 输入；重试可切换 finalize backend。目标替换成功后才发布 C
 该状态不可续传。Fragmented 输出也在每片回调之外增加 Completed 回调。
 Batch 回调只提供信息，不产生可续传 checkpoint。
 
-Native 收尾仍全量缓冲媒体，低内存改造留在 B1。取消为协作式；文件提交以及
+v0.4 的 Native 收尾及续传校验扫描跳过媒体 payload；经典 MP4 支持 `co64`、
+大尺寸 `mdat` 和 64 位 duration header。bytes API 和 batch `Mp4` 仍在内存中输出，
+v0.3 的 schema v1 checkpoint 保持兼容。测量与限制见 [BENCHMARKS.md](BENCHMARKS.md)。
+取消为协作式；文件提交以及
 FFmpeg 的 header/trailer 操作完成后才返回。
 
 #### `serde` feature
@@ -1157,7 +1166,7 @@ FFmpeg 的 header/trailer 操作完成后才返回。
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", features = ["serde"] }
+hls-transmux = { version = "0.4", features = ["serde"] }
 ```
 
 ```rust
@@ -1396,7 +1405,7 @@ pump.await.ok();
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.3", default-features = false }
+hls-transmux = { version = "0.4", default-features = false }
 ```
 
 `default-features = false` 移除 `reqwest`（需要 `tokio/net`，与 `wasm32-unknown-unknown`

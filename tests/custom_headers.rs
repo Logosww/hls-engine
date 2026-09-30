@@ -10,6 +10,8 @@
 //! missing the expected `Authorization` header. With headers set, transmux
 //! succeeds; without, it fails with `Error::Http` mentioning 401.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -155,6 +157,13 @@ async fn handle_request(
         );
         sock.write_all(resp.as_bytes()).await?;
     } else if path.starts_with("/segment-") && path.ends_with(".ts") {
+        let fixture = common::continuous_ts(
+            fixture.to_vec(),
+            path.strip_prefix("/segment-")
+                .and_then(|v| v.strip_suffix(".ts"))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0),
+        );
         if let Some(range) = range_header.as_deref() {
             // Parse "Range: bytes=start-end"
             let spec = range
@@ -189,7 +198,7 @@ async fn handle_request(
                 fixture.len()
             );
             sock.write_all(header.as_bytes()).await?;
-            sock.write_all(fixture).await?;
+            sock.write_all(&fixture).await?;
         }
     } else {
         let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nnot found";

@@ -7,6 +7,8 @@
 //! for any `/segment-*.ts` path, with optional artificial delay to exercise
 //! the prefetch backpressure and consumer-races-ahead paths.
 
+mod common;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -140,6 +142,13 @@ async fn handle_request(
         .find(|l| l.to_ascii_lowercase().starts_with("range: bytes="))
         .map(|l| l.trim());
 
+    let fixture = common::continuous_ts(
+        fixture.to_vec(),
+        path.strip_prefix("/segment-")
+            .and_then(|v| v.strip_suffix(".ts"))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0),
+    );
     if let Some(header) = range_header {
         let spec = header
             .strip_prefix("range: bytes=")
@@ -176,7 +185,7 @@ async fn handle_request(
             fixture.len()
         );
         sock.write_all(header.as_bytes()).await?;
-        sock.write_all(fixture).await?;
+        sock.write_all(&fixture).await?;
     }
     Ok(())
 }

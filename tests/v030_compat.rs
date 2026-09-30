@@ -1,5 +1,6 @@
 //! Actual schema-v1 checkpoints/prefix emitted by v0.3.0 at commit 8cde2e3.
 #![cfg(all(feature = "serde", not(target_arch = "wasm32")))]
+mod common;
 use hls_transmux::*;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,6 +17,33 @@ impl CancelToken for Cancel {
     }
     fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::pending())
+    }
+}
+
+#[derive(Debug)]
+struct LegacySource {
+    source: MemorySource,
+    reads: std::sync::atomic::AtomicUsize,
+}
+impl Source for LegacySource {
+    fn read_text<'a>(
+        &'a self,
+        location: &'a SourceLocation,
+    ) -> Pin<Box<dyn Future<Output = Result<TextResource>> + Send + 'a>> {
+        self.source.read_text(location)
+    }
+    fn read_bytes<'a>(
+        &'a self,
+        location: &'a SourceLocation,
+        range: Option<&'a ByteRange>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(async move {
+            let data = self.source.read_bytes(location, range).await?;
+            Ok(common::continuous_ts(
+                data,
+                self.reads.fetch_add(1, Ordering::SeqCst),
+            ))
+        })
     }
 }
 
@@ -62,7 +90,10 @@ async fn released_v030_checkpoint_can_resume_downloading_and_retry_finalize() {
     let token = cancel.clone();
     let result = transmux_hls_to_mp4_async(
         HlsInput::custom(
-            Arc::new(source),
+            Arc::new(LegacySource {
+                source,
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }),
             SourceLocation::Url(url::Url::parse(root).unwrap()),
         ),
         &output,

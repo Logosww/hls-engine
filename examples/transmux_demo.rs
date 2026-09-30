@@ -10,6 +10,7 @@
 //!                           When absent, defaults to `HighestBandwidth`.
 //!
 //! Flags:
+//!     --batch           = write classic MP4 with the in-memory batch pipeline
 //!     --fragmented      = write fragmented MP4 (ftyp + moov + moof/mdat per segment)
 //!     --streaming       = alias for the default `StreamingMp4` pipeline (no-op;
 //!                         kept for backwards-compatible CLI usage)
@@ -59,6 +60,7 @@ async fn main() -> hls_transmux::Result<()> {
         }
     }
 
+    let batch = remaining.iter().any(|a| **a == "--batch");
     let fragmented = remaining.iter().any(|a| **a == "--fragmented");
     // `--streaming` is now a no-op alias (StreamingMp4 is the default).
     // Kept for backwards-compatible CLI usage; the flag is parsed but
@@ -67,7 +69,12 @@ async fn main() -> hls_transmux::Result<()> {
     let ffmpeg_finalize_flag = remaining.iter().any(|a| **a == "--ffmpeg-finalize");
     let positional: Vec<&String> = remaining
         .iter()
-        .filter(|a| **a != "--fragmented" && **a != "--streaming" && **a != "--ffmpeg-finalize")
+        .filter(|a| {
+            **a != "--batch"
+                && **a != "--fragmented"
+                && **a != "--streaming"
+                && **a != "--ffmpeg-finalize"
+        })
         .copied()
         .collect();
 
@@ -124,7 +131,9 @@ async fn main() -> hls_transmux::Result<()> {
     // pipeline + end defrag → standard MP4, lower peak memory); `--fragmented`
     // opts into fMP4 output directly; `--streaming` is kept as an explicit
     // alias for the default for backwards-compatible CLI usage.
-    let format = if fragmented {
+    let format = if batch {
+        OutputFormat::Mp4
+    } else if fragmented {
         OutputFormat::FragmentedMp4
     } else {
         OutputFormat::StreamingMp4

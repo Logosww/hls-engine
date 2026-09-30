@@ -90,6 +90,7 @@ struct InitTrack {
     track_id: u32,
     kind: StreamKind,
     timescale: u32,
+    timeline_offset: i128,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
     vps: Option<Vec<u8>>,
@@ -121,15 +122,37 @@ fn parse_init_segment(init: &[u8]) -> Result<Vec<InitTrack>> {
         })?;
     }
 
+    let mvhd = find_box(moov, b"mvhd")?.ok_or_else(|| Error::bitstream("missing mvhd"))?;
+    let movie_timescale = parse_mdhd_timescale(mvhd)?;
     let mut tracks = Vec::new();
     for_each_box(moov, |box_type, payload| {
         if box_type == b"trak" {
-            let track = parse_trak(payload, &trex_defaults)?;
+            let track = parse_trak(payload, &trex_defaults, movie_timescale)?;
+            if track.track_id == 0
+                || tracks
+                    .iter()
+                    .any(|existing: &InitTrack| existing.track_id == track.track_id)
+            {
+                return Err(Error::bitstream("zero or duplicate track ID"));
+            }
             tracks.push(track);
         }
         Ok(())
     })?;
 
+    if tracks
+        .iter()
+        .filter(|t| matches!(t.kind, StreamKind::Avc | StreamKind::Hevc))
+        .count()
+        > 1
+        || tracks
+            .iter()
+            .filter(|t| matches!(t.kind, StreamKind::Aac))
+            .count()
+            > 1
+    {
+        return Err(Error::unsupported("multiple tracks of the same media kind"));
+    }
     if tracks.is_empty() {
         return Err(Error::bitstream(
             "init segment does not contain any trak boxes",
@@ -176,7 +199,11 @@ fn parse_trex(payload: &[u8]) -> Result<(u32, u32, u32, u32)> {
     ))
 }
 
-fn parse_trak(trak: &[u8], trex_defaults: &HashMap<u32, (u32, u32, u32)>) -> Result<InitTrack> {
+fn parse_trak(
+    trak: &[u8],
+    trex_defaults: &HashMap<u32, (u32, u32, u32)>,
+    movie_timescale: u32,
+) -> Result<InitTrack> {
     let tkhd = find_box(trak, b"tkhd")?
         .ok_or_else(|| Error::bitstream("trak does not contain a tkhd box"))?;
     let track_id = parse_tkhd_track_id(tkhd)?;
@@ -222,6 +249,7 @@ fn parse_trak(trak: &[u8], trex_defaults: &HashMap<u32, (u32, u32, u32)>) -> Res
         track_id,
         kind,
         timescale,
+        timeline_offset: parse_edit_offset(trak, timescale, movie_timescale)?,
         sps: entry.sps,
         pps: entry.pps,
         vps: entry.vps,
@@ -237,6 +265,57 @@ fn parse_trak(trak: &[u8], trex_defaults: &HashMap<u32, (u32, u32, u32)>) -> Res
         #[cfg(not(target_arch = "wasm32"))]
         video_codec: entry.video_codec,
     })
+}
+
+fn parse_edit_offset(trak: &[u8], timescale: u32, movie_timescale: u32) -> Result<i128> {
+    let Some(edts) = find_box(trak, b"edts")? else {
+        return Ok(0);
+    };
+    let elst = find_box(edts, b"elst")?.ok_or_else(|| Error::bitstream("missing elst"))?;
+    if elst.len() < 8 || elst[0] > 1 {
+        return Err(Error::bitstream("invalid edit list"));
+    }
+    let count = u32::from_be_bytes(elst[4..8].try_into().unwrap());
+    if count == 0 {
+        return Ok(0);
+    }
+    if count > 2 {
+        return Err(Error::unsupported("complex edit lists"));
+    }
+    let width = if elst[0] == 0 { 12 } else { 20 };
+    if elst.len() != 8 + count as usize * width {
+        return Err(Error::bitstream("truncated edit list"));
+    }
+    let mut empty = 0u64;
+    for (index, entry) in elst[8..].chunks_exact(width).enumerate() {
+        let (duration, media_time, rate) = if elst[0] == 0 {
+            (
+                u64::from(u32::from_be_bytes(entry[..4].try_into().unwrap())),
+                i64::from(i32::from_be_bytes(entry[4..8].try_into().unwrap())),
+                &entry[8..],
+            )
+        } else {
+            (
+                u64::from_be_bytes(entry[..8].try_into().unwrap()),
+                i64::from_be_bytes(entry[8..16].try_into().unwrap()),
+                &entry[16..],
+            )
+        };
+        if rate != [0, 1, 0, 0] {
+            return Err(Error::unsupported("non-unit edit list rate"));
+        }
+        if media_time == -1 && index == 0 && count == 2 {
+            empty = duration;
+        } else if media_time >= 0 && index + 1 == count as usize {
+            let offset = i128::from(empty) * i128::from(timescale) / i128::from(movie_timescale)
+                - i128::from(media_time);
+            i64::try_from(offset).map_err(|_| Error::bitstream("edit timeline exceeds i64"))?;
+            return Ok(offset);
+        } else {
+            return Err(Error::unsupported("unsupported edit list layout"));
+        }
+    }
+    Err(Error::unsupported("edit list contains no media edit"))
 }
 
 fn parse_tkhd_track_id(tkhd: &[u8]) -> Result<u32> {
@@ -265,12 +344,11 @@ fn parse_mdhd_timescale(mdhd: &[u8]) -> Result<u32> {
     if mdhd.len() < pos + 8 {
         return Err(Error::bitstream("mdhd box is too short for timescale"));
     }
-    Ok(u32::from_be_bytes([
-        mdhd[pos],
-        mdhd[pos + 1],
-        mdhd[pos + 2],
-        mdhd[pos + 3],
-    ]))
+    let scale = u32::from_be_bytes(mdhd[pos..pos + 4].try_into().unwrap());
+    if scale == 0 {
+        return Err(Error::bitstream("zero track timescale"));
+    }
+    Ok(scale)
 }
 
 struct SampleEntryInfo {
@@ -292,6 +370,9 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
     // full box: version(1) + flags(3) + entry_count(4)
     if stsd.len() < 8 {
         return Err(Error::bitstream("stsd box is too short"));
+    }
+    if u32::from_be_bytes(stsd[4..8].try_into().unwrap()) != 1 {
+        return Err(Error::unsupported("multiple sample descriptions"));
     }
     let entries_data = &stsd[8..];
     if entries_data.len() < 8 {
@@ -481,6 +562,7 @@ fn read_esds_length(data: &[u8], pos: &mut usize) -> Result<usize> {
 struct Tfhd {
     track_id: u32,
     base_data_offset: Option<u64>,
+    default_base_is_moof: bool,
     default_sample_duration: Option<u32>,
     default_sample_size: Option<u32>,
     default_sample_flags: Option<u32>,
@@ -490,11 +572,11 @@ struct TrunSample {
     duration: u32,
     size: u32,
     flags: u32,
-    composition_offset: Option<i32>,
+    composition_offset: Option<i64>,
 }
 
 struct Trun {
-    data_offset: i32,
+    data_offset: Option<i32>,
     samples: Vec<TrunSample>,
 }
 
@@ -628,67 +710,108 @@ fn parse_traf(
         0
     };
 
-    let trun_data = find_box(traf, b"trun")?
-        .ok_or_else(|| Error::bitstream("traf does not contain a trun box"))?;
-    let trun = parse_trun(trun_data, &tfhd, track)?;
+    let mut mdats = Vec::new();
+    let mut box_offset = 0;
+    while box_offset < segment.len() {
+        let header = read_box_header(&segment[box_offset..])?;
+        let end = box_offset
+            .checked_add(header.total_size)
+            .filter(|&n| n <= segment.len())
+            .ok_or_else(|| Error::bitstream("box extends past segment"))?;
+        if header.box_type == *b"mdat" {
+            mdats.push(((box_offset + header.header_size) as u64, end as u64));
+        }
+        box_offset = end;
+    }
+    if tfhd.base_data_offset.is_none() && !tfhd.default_base_is_moof {
+        return Err(Error::unsupported(
+            "implicit cross-traf base data offsets are unsupported",
+        ));
+    }
+    let mut cumulative_duration = 0u64;
+    let mut sample_data_offset = base_data_offset;
+    let mut runs = 0;
+    for_each_box(traf, |kind, data| {
+        if kind != b"trun" {
+            return Ok(());
+        }
+        let trun = parse_trun(data, &tfhd, track)?;
+        if let Some(offset) = trun.data_offset {
+            sample_data_offset = base_data_offset
+                .checked_add_signed(i64::from(offset))
+                .ok_or_else(|| Error::bitstream("sample offset overflow"))?;
+        } else if runs == 0 {
+            sample_data_offset = base_data_offset;
+        }
+        runs += 1;
+        for sample in &trun.samples {
+            check()?;
+            let end = sample_data_offset
+                .checked_add(u64::from(sample.size))
+                .filter(|&end| {
+                    mdats
+                        .iter()
+                        .any(|&(start, limit)| sample_data_offset >= start && end <= limit)
+                })
+                .ok_or_else(|| Error::bitstream("sample data extends past segment"))?;
+            let raw = &segment[sample_data_offset as usize..end as usize];
+            let is_key = is_key_sample(sample.flags, raw, track);
+            let data = if matches!(track.kind, StreamKind::Avc | StreamKind::Hevc) {
+                normalize_nals(raw, track)?
+            } else {
+                raw.to_vec()
+            };
 
-    let mut sample_data_offset = base_data_offset
-        .checked_add_signed(i64::from(trun.data_offset))
-        .ok_or_else(|| Error::bitstream("sample offset overflow"))?;
-    let mut cumulative_duration: u64 = 0;
+            let dts = base_decode_time
+                .checked_add(cumulative_duration)
+                .ok_or_else(|| Error::bitstream("decode timestamp overflow"))?;
+            let pts = i128::from(dts) + i128::from(sample.composition_offset.unwrap_or(0));
 
-    for sample in &trun.samples {
-        check()?;
-        let end = sample_data_offset
-            .checked_add(u64::from(sample.size))
-            .filter(|&end| end <= segment.len() as u64)
-            .ok_or_else(|| Error::bitstream("sample data extends past segment"))?;
-        let data = segment[sample_data_offset as usize..end as usize].to_vec();
+            let dts_90k = rescale_to_90k(dts, track.timescale)?;
+            let pts_90k = rescale_to_90k(u64::try_from(pts).unwrap_or(0), track.timescale)?;
 
-        let dts = base_decode_time
-            .checked_add(cumulative_duration)
-            .ok_or_else(|| Error::bitstream("decode timestamp overflow"))?;
-        let pts = if let Some(cts) = sample.composition_offset {
-            dts.checked_add_signed(i64::from(cts))
-                .ok_or_else(|| Error::bitstream("composition timestamp overflow"))?
-        } else {
-            dts
-        };
-
-        let dts_90k = rescale_to_90k(dts, track.timescale);
-        let pts_90k = rescale_to_90k(pts, track.timescale);
-
-        let is_key = is_key_sample(sample.flags, &data, track);
-
-        match track.kind {
-            StreamKind::Avc | StreamKind::Hevc => {
-                output.saw_video = true;
+            match track.kind {
+                StreamKind::Avc | StreamKind::Hevc => {
+                    output.saw_video = true;
+                    output.video_timescale = Some(track.timescale);
+                }
+                StreamKind::Aac => {
+                    output.saw_audio = true;
+                    output.audio_timescale = Some(track.timescale);
+                }
             }
-            StreamKind::Aac => {
-                output.saw_audio = true;
+
+            let duration = u64::from(sample.duration);
+
+            output.packets.push(EncodedPacket {
+                kind: track.kind,
+                timing: Some(crate::types::PacketTiming {
+                    timescale: track.timescale,
+                    dts: i128::from(dts) + track.timeline_offset,
+                    pts: pts + track.timeline_offset,
+                    duration: sample.duration,
+                }),
+                data,
+                pts_90k: i128::from(pts_90k),
+                dts_90k,
+                duration,
+                is_key,
+                is_length_prefixed: matches!(track.kind, StreamKind::Avc | StreamKind::Hevc),
+            });
+
+            if sample.duration == 0 {
+                return Err(Error::bitstream("zero fMP4 sample duration"));
             }
+            cumulative_duration = cumulative_duration
+                .checked_add(u64::from(sample.duration))
+                .ok_or_else(|| Error::bitstream("duration overflow"))?;
+            sample_data_offset = end;
         }
 
-        let duration = if matches!(track.kind, StreamKind::Aac) {
-            sample.duration as u64
-        } else {
-            0
-        };
-
-        output.packets.push(EncodedPacket {
-            kind: track.kind,
-            data,
-            pts_90k,
-            dts_90k,
-            duration,
-            is_key,
-            is_length_prefixed: matches!(track.kind, StreamKind::Avc | StreamKind::Hevc),
-        });
-
-        cumulative_duration = cumulative_duration
-            .checked_add(u64::from(sample.duration))
-            .ok_or_else(|| Error::bitstream("duration overflow"))?;
-        sample_data_offset = end;
+        Ok(())
+    })?;
+    if runs == 0 {
+        return Err(Error::bitstream("traf does not contain a trun"));
     }
 
     Ok(())
@@ -724,7 +847,10 @@ fn parse_tfhd(data: &[u8]) -> Result<Tfhd> {
         pos += 8;
     }
     if flags & 0x000002 != 0 {
-        pos += 4; // sample_description_index (ignored)
+        if pos + 4 > data.len() || u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) != 1 {
+            return Err(Error::unsupported("unsupported sample description index"));
+        }
+        pos += 4;
     }
     if flags & 0x000008 != 0 {
         if pos + 4 > data.len() {
@@ -765,6 +891,7 @@ fn parse_tfhd(data: &[u8]) -> Result<Tfhd> {
     Ok(Tfhd {
         track_id,
         base_data_offset,
+        default_base_is_moof: flags & 0x020000 != 0,
         default_sample_duration,
         default_sample_size,
         default_sample_flags,
@@ -795,6 +922,9 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
     if data.len() < 8 {
         return Err(Error::bitstream("trun box is too short"));
     }
+    if data[0] > 1 {
+        return Err(Error::bitstream("unsupported trun version"));
+    }
     let flags = u32::from_be_bytes([0, data[1], data[2], data[3]]);
     let sample_count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
 
@@ -806,14 +936,21 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
         }
         let off = i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
-        off
+        Some(off)
     } else {
-        0
+        None
     };
 
-    if flags & 0x000004 != 0 {
-        pos += 4; // first_sample_flags (ignored — use per-sample or defaults)
-    }
+    let first_flags = if flags & 0x000004 != 0 {
+        if pos + 4 > data.len() || flags & 0x000400 != 0 {
+            return Err(Error::bitstream("invalid first_sample_flags"));
+        }
+        let value = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        Some(value)
+    } else {
+        None
+    };
 
     let has_duration = flags & 0x000100 != 0;
     let has_size = flags & 0x000200 != 0;
@@ -842,7 +979,7 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
     samples
         .try_reserve_exact(sample_count)
         .map_err(|_| Error::bitstream("trun allocation failed"))?;
-    for _ in 0..sample_count {
+    for index in 0..sample_count {
         let duration = if has_duration {
             if pos + 4 > data.len() {
                 return Err(Error::bitstream("truncated trun sample duration"));
@@ -873,7 +1010,11 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
             pos += 4;
             f
         } else {
-            default_flags
+            if index == 0 {
+                first_flags.unwrap_or(default_flags)
+            } else {
+                default_flags
+            }
         };
 
         let composition_offset = if has_cts {
@@ -882,7 +1023,13 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
             }
             let raw = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
             pos += 4;
-            Some(i32::from_be_bytes(raw))
+            Some(if data[0] == 0 {
+                i64::from(u32::from_be_bytes(raw))
+            } else if data[0] == 1 {
+                i64::from(i32::from_be_bytes(raw))
+            } else {
+                return Err(Error::bitstream("unsupported trun version"));
+            })
         } else {
             None
         };
@@ -899,6 +1046,50 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
         data_offset,
         samples,
     })
+}
+
+fn normalize_nals(data: &[u8], track: &InitTrack) -> Result<Vec<u8>> {
+    if !matches!(track.length_size, 1 | 2 | 4) {
+        return Err(Error::unsupported("unsupported NAL length prefix width"));
+    }
+    let mut output = Vec::new();
+    let mut offset = 0usize;
+    while offset < data.len() {
+        if data.len() - offset < track.length_size {
+            return Err(Error::bitstream("truncated NAL prefix"));
+        }
+        let length = read_nal_length(data, offset, track.length_size);
+        offset += track.length_size;
+        let end = offset
+            .checked_add(length)
+            .filter(|&end| end <= data.len())
+            .ok_or_else(|| Error::bitstream("truncated NAL payload"))?;
+        if length == 0 || matches!(track.kind, StreamKind::Hevc) && length < 2 {
+            return Err(Error::bitstream("invalid NAL size"));
+        }
+        let nal = &data[offset..end];
+        let expected = match track.kind {
+            StreamKind::Avc => match nal[0] & 0x1f {
+                7 => track.sps.as_deref(),
+                8 => track.pps.as_deref(),
+                _ => None,
+            },
+            StreamKind::Hevc => match (nal[0] >> 1) & 0x3f {
+                32 => track.vps.as_deref(),
+                33 => track.sps.as_deref(),
+                34 => track.pps.as_deref(),
+                _ => None,
+            },
+            StreamKind::Aac => None,
+        };
+        if expected.is_some_and(|parameter| parameter != nal) {
+            return Err(Error::unsupported("in-band codec parameter set changes"));
+        }
+        output.extend_from_slice(&(length as u32).to_be_bytes());
+        output.extend_from_slice(nal);
+        offset = end;
+    }
+    Ok(output)
 }
 
 // === Keyframe detection ===
@@ -978,11 +1169,12 @@ fn read_nal_length(data: &[u8], offset: usize, length_size: usize) -> usize {
     }
 }
 
-fn rescale_to_90k(value: u64, timescale: u32) -> u64 {
-    if timescale == 0 || timescale == 90_000 {
-        return value;
+fn rescale_to_90k(value: u64, timescale: u32) -> Result<u64> {
+    if timescale == 0 {
+        return Err(Error::bitstream("zero timescale"));
     }
-    (u128::from(value) * u128::from(90_000_u32) / u128::from(timescale)) as u64
+    u64::try_from(u128::from(value) * 90_000 / u128::from(timescale))
+        .map_err(|_| Error::bitstream("timestamp exceeds checkpoint time domain"))
 }
 
 #[cfg(test)]
@@ -1006,9 +1198,137 @@ mod tests {
 
     #[test]
     fn rescales_to_90k() {
-        assert_eq!(rescale_to_90k(44100, 44100), 90000);
-        assert_eq!(rescale_to_90k(12800, 12800), 90000);
-        assert_eq!(rescale_to_90k(100, 90000), 100);
+        assert_eq!(rescale_to_90k(44100, 44100).unwrap(), 90000);
+        assert_eq!(rescale_to_90k(12800, 12800).unwrap(), 90000);
+        assert_eq!(rescale_to_90k(100, 90000).unwrap(), 100);
+    }
+
+    fn audio_init() -> Vec<u8> {
+        crate::mp4::FragmentedMp4Muxer::new(vec![crate::mp4::FragmentedTrack::audio(
+            1,
+            48000,
+            2,
+            vec![0x11, 0x90],
+        )])
+        .write_header()
+        .unwrap()
+    }
+
+    #[test]
+    fn multiple_runs_preserve_offsets_defaults_and_native_timing() {
+        let init = audio_init();
+        let segment = boxed(b"mdat", |o| o.extend_from_slice(&[1, 2, 3, 4]));
+        let mut traf = boxed(b"tfhd", |o| {
+            o.extend_from_slice(&[0, 2, 0, 0]);
+            o.extend_from_slice(&1u32.to_be_bytes());
+        });
+        traf.extend(boxed(b"tfdt", |o| {
+            o.extend_from_slice(&[1, 0, 0, 0]);
+            o.extend_from_slice(&123u64.to_be_bytes());
+        }));
+        for (flags, offset, cts) in [(0xf01u32, Some(8i32), -4i32), (0xf00, None, 2)] {
+            traf.extend(boxed(b"trun", |o| {
+                o.push(1);
+                o.extend_from_slice(&flags.to_be_bytes()[1..]);
+                o.extend_from_slice(&1u32.to_be_bytes());
+                if let Some(offset) = offset {
+                    o.extend_from_slice(&offset.to_be_bytes());
+                }
+                for n in [1000u32, 2, 0x02000000, cts as u32] {
+                    o.extend_from_slice(&n.to_be_bytes());
+                }
+            }));
+        }
+        let mut output = DemuxOutput::default();
+        parse_traf(
+            &traf,
+            0,
+            &segment,
+            &parse_init_segment(&init).unwrap(),
+            &mut output,
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(output.packets.len(), 2);
+        assert_eq!(output.packets[0].data, [1, 2]);
+        assert_eq!(output.packets[1].data, [3, 4]);
+        let time = output.packets[1].timing.unwrap();
+        assert_eq!(
+            (time.timescale, time.dts, time.pts, time.duration),
+            (48000, 1123, 1125, 1000)
+        );
+        let mut bad = traf.clone();
+        let run = bad.windows(4).position(|v| v == b"trun").unwrap();
+        bad[run + 12..run + 16].copy_from_slice(&0i32.to_be_bytes());
+        assert!(
+            parse_traf(
+                &bad,
+                0,
+                &segment,
+                &parse_init_segment(&init).unwrap(),
+                &mut DemuxOutput::default(),
+                &|| Ok(())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn trun_first_flags_and_unsigned_composition_offsets() {
+        let tracks = parse_init_segment(&audio_init()).unwrap();
+        let tfhd = parse_tfhd(&[0, 2, 0, 0, 0, 0, 0, 1]).unwrap();
+        let mut data = vec![0, 0, 8, 4];
+        for n in [1u32, 0x01010000, u32::MAX] {
+            data.extend_from_slice(&n.to_be_bytes());
+        }
+        let run = parse_trun(&data, &tfhd, &tracks[0]).unwrap();
+        assert_eq!(run.samples[0].flags, 0x01010000);
+        assert_eq!(run.samples[0].composition_offset, Some(i64::from(u32::MAX)));
+        data.pop();
+        assert!(parse_trun(&data, &tfhd, &tracks[0]).is_err());
+    }
+
+    #[test]
+    fn nal_widths_are_normalized_and_parameter_changes_rejected() {
+        let demux =
+            crate::mpeg_ts::demux_ts(include_bytes!("../tests/fixtures/h264_aac_fhd.ts")).unwrap();
+        let init = crate::mp4::FragmentedMp4Muxer::new(vec![
+            crate::mp4::FragmentedTrack::avc_video(
+                1,
+                demux.sps.as_ref().unwrap(),
+                demux.pps.as_ref().unwrap(),
+            )
+            .unwrap(),
+        ])
+        .write_header()
+        .unwrap();
+        let mut tracks = parse_init_segment(&init).unwrap();
+        for width in [1, 2, 4] {
+            tracks[0].length_size = width;
+            for kind in [StreamKind::Avc, StreamKind::Hevc] {
+                tracks[0].kind = kind;
+                let nal = if matches!(kind, StreamKind::Avc) {
+                    vec![0x65, 1, 2]
+                } else {
+                    vec![0x26, 1, 2]
+                };
+                let mut data = (nal.len() as u32).to_be_bytes()[4 - width..].to_vec();
+                data.extend(&nal);
+                let normalized = normalize_nals(&data, &tracks[0]).unwrap();
+                assert_eq!(&normalized[..4], &[0, 0, 0, 3]);
+                assert_eq!(&normalized[4..], &nal);
+                data.pop();
+                assert!(normalize_nals(&data, &tracks[0]).is_err());
+            }
+        }
+        tracks[0].kind = StreamKind::Avc;
+        tracks[0].length_size = 1;
+        assert!(matches!(
+            normalize_nals(&[2, 0x67, 0], &tracks[0]),
+            Err(Error::Unsupported(_))
+        ));
+        tracks[0].length_size = 3;
+        assert!(normalize_nals(&[0, 0, 1, 0x65], &tracks[0]).is_err());
     }
 
     fn boxed(kind: &[u8; 4], write: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {

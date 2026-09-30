@@ -2,7 +2,7 @@
 
 > 更新日期：2026-09-30
 > 研究基线：v0.2.1，commit `11188ae`
-> 状态：阶段 A 已随 v0.3.0 发布；阶段 B 已在 v0.4.0 工作区实现并验证，尚未发布。阶段 C 与持续建设待办保留。历史研究基线与风险判断保留供追溯。
+> 状态：阶段 A 已随 v0.3.0 发布；阶段 B 已随 v0.4.0 发布；C1–C3 纳入 patch v0.4.1，工作区实现及验收完成，本次不发布。C4 与持续建设待办保留。历史研究基线与风险判断保留供追溯。
 
 下一阶段按 **可靠性修复 → 全流程低内存 → 媒体正确性与输入兼容性** 推进。
 项目已具备 TS/fMP4 输入、并发预取、流式 writer、取消接口和断点续传，优先补齐这些能力在慢网络、崩溃恢复和长视频场景下的边界。
@@ -24,7 +24,7 @@
 
 ## 2. 优先级与依赖
 
-工作量为相对规模，不代表工期承诺。**阶段 A 已随 v0.3.0 发布；阶段 B 全部纳入下一个 minor：v0.4.0**。C1/C2 仅纳入 B 所需的正确性修复与验证，其余阶段 C 暂不绑定发布版本。
+工作量为相对规模，不代表工期承诺。**阶段 A/B 已分别随 v0.3.0/v0.4.0 发布；C1–C3 纳入 v0.4.1**。C4 暂不绑定发布版本。
 
 | 阶段 | 方向 | 收益 | 相对工作量 | 依赖 |
 | --- | --- | --- | --- | --- |
@@ -123,7 +123,7 @@
 
 ## 4. 阶段 B：全流程低内存与大文件（v0.4.0）
 
-**实现记录（2026-09-30，本地实现，待发布）：**
+**实现记录（2026-09-30，已随 v0.4.0 发布）：**
 
 - B1：checkpoint 范围内的 `Read + Seek` 扫描跳过 mdat payload；续传只保留 tracks/tfra，Native finalize 保留源偏移、大小和时间信息，再以固定 1 MiB 缓冲复制。共享 mux 布局用于 bytes 与文件路径；不同 timescale 的 chunk 按实际时间排序，保留 partial 中的 duration/config。init 缓存借用、预取结果尽可能转移所有权、streaming sample 构建消费 packet 缓冲。
 - B2：按 track 自动选择 stco/co64，迭代处理 moov 增大后的偏移；支持 64 位 mdat header、长 duration 的 mvhd/tkhd/mdhd/elst，以及必要的 cslg version 1。尺寸、偏移和时间换算增加溢出校验。
@@ -162,41 +162,40 @@ v0.3.0 的 `StreamingMp4` 只有下载阶段逐片写盘，Native 收尾阶段�
 
 ### C1. 完善 fMP4 sample 解析与输出配置一致性
 
-**已确认的实现边界：** [`parse_traf`](src/isobmff.rs) 只处理找到的第一个 `trun`。
-输入的 NAL 长度字段宽度被解析，但输出配置重建采用四字节长度；直接复用 sample payload 时需要核对二者一致性。
+**v0.4.1：** 处理所有 `trun`，检查 mdat 边界；支持显式 base、moof-relative offset 和后续 run 连续偏移。AVC/HEVC 的 1/2/4 字节前缀统一为四字节；稳定完整的 avc3/hev1 转为 avc1/hvc1，移除已验证的 in-band 参数集。隐式跨 traf 布局明确拒绝。
 
-- [ ] 支持每个 `traf` 的多个 `trun`，正确处理 run 数据偏移；尚未支持的布局明确拒绝。
-- [ ] 输入 NAL 长度前缀统一转换为输出格式，或保留并正确声明原始宽度。
-- [ ] 验证 `avc1/avc3`、`hvc1/hev1` 的参数集语义及输出转换策略。
-- [ ] 统一 batch 与 streaming 路径的编码参数变更检查，避免使用旧初始化配置写入新数据。
-- [ ] 核查 `tfra` 的 track、traf、trun 与 sync sample 指向。
+- [x] 支持每个 `traf` 的多个 `trun`，正确处理 run 数据偏移；尚未支持的布局明确拒绝。
+- [x] 输入 NAL 长度前缀统一转换为输出格式，或保留并正确声明原始宽度。
+- [x] 验证 `avc1/avc3`、`hvc1/hev1` 的参数集语义及输出转换策略。
+- [x] 统一 batch 与 streaming 路径的编码参数变更检查，避免使用旧初始化配置写入新数据。
+- [x] 核查 `tfra` 的 track、traf、trun 与 sync sample 指向。
 
 **验收：** 多 `trun`、不同 NAL 前缀宽度和参数集变化样本由独立工具正确读取；不支持的组合在写入损坏结果前报错。
 
 ### C2. 保留媒体时间信息并统一报告
 
-**已确认：** [`group_samples_per_track`](src/transmux.rs) 推算视频 duration，AAC duration 固定为 1024；分片报告使用最后包的 DTS，没有计入最后 sample duration，且 `tracks` 为空。
+**v0.4.1：** fMP4 保存原 timescale/DTS/PTS/duration；TS 在排序前跨分片解包回绕，视频末帧使用下一分片首帧，EOF 使用最近有效间隔，孤立帧默认 3000/90000 秒。共用 decode 起点和配置校验；恢复扫描重建 track 统计和终点，经典 MP4 使用 edit list 与 composition 表表示展示时间。
 
-- [ ] 保留 fMP4 输入的 sample duration 和必要 timescale 信息，减少不必要的往返 rescale。
-- [ ] 区分“已知 duration”与“TS 需要推算 duration”，处理跨分片末帧的边界。
-- [ ] 覆盖 B 帧 composition offset、VFR、非零初始时间戳和 TS 33 位时间戳回绕。
-- [ ] 统一音视频时间线归零、负时间偏移和 discontinuity 的策略。
-- [ ] 完善分片输出的 track 信息与 duration 报告，明确续传后的下载字节计数语义。
-- [ ] 为下载、处理、finalize 阶段提供可区分的进度，避免分片完成被误解为任务已完成。
+- [x] 保留 fMP4 输入的 sample duration 和必要 timescale 信息，减少不必要的往返 rescale。
+- [x] 区分“已知 duration”与“TS 需要推算 duration”，处理跨分片末帧的边界。
+- [x] 覆盖 B 帧 composition offset、VFR、非零初始时间戳和 TS 33 位时间戳回绕。
+- [x] 统一音视频时间线归零、负时间偏移和 discontinuity 的策略。
+- [x] 完善分片输出的 track 信息与 duration 报告，明确续传后的下载字节计数语义。
+- [x] 为下载、处理、finalize 阶段提供可区分的进度，避免分片完成被误解为任务已完成。
 
 **验收：** 与参考工具对照 sample 数量、DTS/PTS、末帧 duration、总时长和音画起始偏移；容差依据 timescale 定义。
 
 ### C3. 优先完成低成本 HLS 与 HTTP 边界修复
 
-**依据：** [`HLS parser`](src/hls.rs) 拒绝 `PROGRAM-DATE-TIME` 和未识别的 `#EXT` 标签；init 缓存仅以 URI 为键；HTTP Range 只检查 206 和 `Content-Range` 是否存在。
+**v0.4.1：** 元数据及未知标签跳过，已知未支持的媒体语义拒绝；range 检查同 URI 连续性、非零长度和溢出。HTTP 检查 206、单位、起止、总长及实际长度。`HttpRequestPolicy` 覆盖 playlist/init/串行/预取的完整请求超时、有限指数退避和单资源上限，默认不额外重试或限制。错误保留原分类并清除 URL 用户信息、query、fragment。
 
-- [ ] 支持不影响转封装的元数据标签，并按规范处理未知标签；影响解密或媒体语义的已知未支持功能仍明确报错。
-- [ ] 隐式 BYTERANGE offset 验证前一个分片属于同一资源，且确实为 byte range。
-- [ ] init 缓存键包含解析后的 location 和 ByteRange。
-- [ ] 校验 HTTP `Content-Range` 的区间以及实际响应长度。
-- [ ] 提供明确的超时、有限重试与退避配置，覆盖串行和并发请求。
-- [ ] 为错误增加资源、分片序号和阶段上下文，兼顾签名 URL 等敏感参数的处理。
-- [ ] 评估预取的字节预算和单资源大小限制，避免仅按 slot 数量控制内存。
+- [x] 支持不影响转封装的元数据标签，并按规范处理未知标签；影响解密或媒体语义的已知未支持功能仍明确报错。
+- [x] 隐式 BYTERANGE offset 验证前一个分片属于同一资源，且确实为 byte range。
+- [x] init 缓存键包含解析后的 location 和 ByteRange。
+- [x] 校验 HTTP `Content-Range` 的区间以及实际响应长度。
+- [x] 提供明确的超时、有限重试与退避配置，覆盖串行和并发请求。
+- [x] 为错误增加资源、分片序号和阶段上下文，兼顾签名 URL 等敏感参数的处理。
+- [x] 评估预取的字节预算和单资源大小限制，避免仅按 slot 数量控制内存。
 
 规范依据：[RFC 8216 §4.3.2.2、§6.3.1](https://www.rfc-editor.org/rfc/rfc8216.html)。
 
@@ -233,7 +232,18 @@ v0.3.0 已实现阶段 A，交付顺序如下：
 3. checkpoint 文件长度、边界校验与尾部截断。
 4. finalize 失败保留临时文件，以及仅重试收尾的入口。
 
-v0.4.0 已在工作区完成 B1/B2，并补齐所需的 C1/C2 媒体验证与必要修复；待发布。下一轮按真实输入需求推进阶段 C。
+v0.4.0 已发布。v0.4.1 工作区完成 C1–C3，本次不实际发布。下一轮按真实输入需求推进 C4。
+
+## v0.4.1 验证记录与剩余边界
+
+- 默认、serde、无默认 feature、无默认 feature + serde、all-features 测试；wasm 无默认 feature 编译、fmt、Clippy 和 publish dry-run。
+- 旧公开类型完整字面量与调用仍编译；schema v1 不变，released v0.3 fixtures 和从 v0.4.0 commit `20f1593` 生成的 checkpoint/prefix 均恢复成功。
+- 多 run、NAL 宽度与 AVC/HEVC 参数变化、负 CTS、TS 回绕和恢复、init 同 URI 不同 range，以及本地 HTTP range/超时/重试/限额/取消/session 隔离测试。
+- 独立 FFprobe 对照九种 TS/fMP4 场景的输入与 fragmented、Native、batch 输出：sample 数量、DTS/PTS、duration、音视频起始偏移、规范化 NAL/AAC 内容；容差一个输出 tick。FFmpeg 完整解码及 seek 通过。
+- `downloaded_bytes` 仅累计本次成功取得的媒体分片，包括恢复校验与 lookahead；不含 init、历史或失败尝试。四类 `*_with_runtime` 入口提供独立阶段事件，Completed 仅在最终提交成功后触发；旧回调只报告已提交 checkpoint。
+- 单资源上限已实现；总预取字节预算本次仅交付测量和背压设计，见 [BENCHMARKS.md](BENCHMARKS.md)。并发 slot 限制不是整个调用的字节上限。
+- 不支持复杂 edit list、不同配置参数集、多 sample description、隐式跨 traf 布局；不连续 decode 时间线明确拒绝。仅一次换算造成的一 tick 间隙可修正。C4 的加密、discontinuity、alternate audio、live 保持拒绝。
+- 跨平台由既有 CI matrix 验证；本轮本地 macOS。两个手工大文件/RSS 测试保持 ignored，可按基准文档单独运行。
 格式和 lint 清理单独提交，便于审阅行为变更。
 
 ## 8. 维护约定

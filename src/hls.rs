@@ -85,7 +85,7 @@ pub(crate) fn parse_hls_playlist_content(
     let mut next_sequence = 0_u64;
     let mut next_duration = None;
     let mut next_byte_range = None;
-    let mut previous_byte_range_end = 0_u64;
+    let mut previous_range: Option<(String, ByteRange)> = None;
     let mut current_init_segment: Option<InitSegment> = None;
     let mut start_seconds = 0.0_f64;
     let mut segments = Vec::new();
@@ -161,10 +161,21 @@ pub(crate) fn parse_hls_playlist_content(
                 "HLS discontinuities are out of the Phase 2 slice",
             ));
         }
-        if line.starts_with("#EXT-X-PROGRAM-DATE-TIME:") {
-            return Err(Error::unsupported(
-                "program date time is out of Phase 2 scope",
-            ));
+        if [
+            "#EXT-X-I-FRAMES-ONLY",
+            "#EXT-X-START:",
+            "#EXT-X-SESSION-KEY:",
+            "#EXT-X-PART:",
+            "#EXT-X-PRELOAD-HINT:",
+            "#EXT-X-SKIP:",
+            "#EXT-X-GAP",
+        ]
+        .iter()
+        .any(|tag| line == *tag || line.starts_with(tag))
+        {
+            return Err(Error::unsupported(format!(
+                "unsupported media semantics on line {line_number}"
+            )));
         }
 
         if let Some(value) = line.strip_prefix("#EXTINF:") {
@@ -184,11 +195,7 @@ pub(crate) fn parse_hls_playlist_content(
             next_duration = Some(duration);
         } else if let Some(value) = line.strip_prefix("#EXT-X-BYTERANGE:") {
             ensure_kind(&mut kind, PlaylistKind::Media, line_number)?;
-            next_byte_range = Some(parse_byte_range(
-                value,
-                previous_byte_range_end,
-                line_number,
-            )?);
+            next_byte_range = Some((value.to_owned(), line_number));
         } else if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
             ensure_kind(&mut kind, PlaylistKind::Media, line_number)?;
             let duration = value.trim().parse::<f64>().map_err(|_| {
@@ -226,9 +233,8 @@ pub(crate) fn parse_hls_playlist_content(
         } else if line.starts_with("#EXT-X-VERSION") {
             // Informational only — does not affect parsing.
         } else if line.starts_with("#EXT") {
-            return Err(Error::unsupported(format!(
-                "unsupported HLS tag on line {line_number}: {line}"
-            )));
+            // RFC 8216: ignore unknown tags and metadata that do not affect media.
+            continue;
         } else if let Some(variant) = pending_variant.take() {
             ensure_kind(&mut kind, PlaylistKind::Master, line_number)?;
             variants.push(VariantStream {
@@ -245,13 +251,16 @@ pub(crate) fn parse_hls_playlist_content(
                     "segment URI on line {line_number} must be preceded by #EXTINF"
                 ))
             })?;
-            let byte_range = next_byte_range.take();
-            if let Some(range) = &byte_range {
-                previous_byte_range_end = range
-                    .offset
-                    .checked_add(range.length)
-                    .ok_or_else(|| Error::invalid("HLS byterange offset overflows u64"))?;
-            }
+            let byte_range = next_byte_range.take().map(|(value, number)| {
+                let previous_end = if value.contains('@') { 0 } else {
+                    let (uri, range) = previous_range.as_ref().filter(|(uri, _)| uri == line)
+                        .ok_or_else(|| Error::invalid(format!("implicit BYTERANGE on line {number} requires the preceding range on the same resource")))?;
+                    let _ = uri;
+                    range.offset.checked_add(range.length).ok_or_else(|| Error::invalid("byterange overflow"))?
+                };
+                parse_byte_range(&value, previous_end, number)
+            }).transpose()?;
+            previous_range = byte_range.map(|range| (line.to_owned(), range));
             segments.push(HlsSegment {
                 uri: line.to_owned(),
                 path: base.join(line),
@@ -403,6 +412,11 @@ fn parse_byte_range(value: &str, previous_end: u64, line_number: usize) -> Resul
         })
         .transpose()?
         .unwrap_or(previous_end);
+    if length == 0 || offset.checked_add(length).is_none() {
+        return Err(Error::invalid(format!(
+            "invalid byte range on line {line_number}"
+        )));
+    }
     Ok(ByteRange { offset, length })
 }
 
@@ -414,6 +428,45 @@ fn parse_hls_playlist_str(path: &Path, content: &str) -> Result<HlsPlaylist> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_and_unknown_tags_do_not_interrupt_vod() {
+        let content = "#EXTM3U\n#EXT-X-PROGRAM-DATE-TIME:2026-09-30T00:00:00Z\n#EXT-X-DATERANGE:ID=\"x\"\n#EXT-X-UNKNOWN-METADATA:value\n#EXTINF:1,\nseg.ts\n#EXT-X-ENDLIST\n";
+        assert!(parse_hls_playlist_content(None, content).is_ok());
+        for tag in [
+            "#EXT-X-DISCONTINUITY",
+            "#EXT-X-KEY:METHOD=AES-128",
+            "#EXT-X-GAP",
+            "#EXT-X-PART:URI=\"p\"",
+        ] {
+            assert!(matches!(
+                parse_hls_playlist_content(
+                    None,
+                    &content.replace("#EXTINF", &format!("{tag}\n#EXTINF"))
+                ),
+                Err(Error::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn implicit_range_requires_immediately_preceding_same_resource() {
+        for first in [
+            "#EXTINF:1,\n#EXT-X-BYTERANGE:2@0\na.ts\n",
+            "#EXTINF:1,\nb.ts\n",
+            "",
+        ] {
+            let content =
+                format!("#EXTM3U\n{first}#EXTINF:1,\n#EXT-X-BYTERANGE:2\nb.ts\n#EXT-X-ENDLIST\n");
+            assert!(matches!(
+                parse_hls_playlist_content(None, &content),
+                Err(Error::InvalidInput(_))
+            ));
+        }
+        for range in ["0@0", "2@18446744073709551615"] {
+            assert!(parse_byte_range(range, 0, 1).is_err());
+        }
+    }
 
     #[test]
     fn parses_simple_vod_playlist() {

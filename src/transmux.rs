@@ -121,8 +121,8 @@ pub enum FinalizeBackend {
 /// When `None`, the pipeline behaves exactly as it did before these hooks
 /// existed — existing callers and tests do not need to change.
 ///
-/// - `on_progress`: invoked synchronously after each segment is fully
-///   processed. The callback receives a [`TransmuxProgress`] which includes
+/// - `on_progress`: invoked synchronously after a streaming segment is
+///   committed. Batch output uses runtime phase events instead. The callback receives a [`TransmuxProgress`] which includes
 ///   a fresh [`TransmuxResumeState`] snapshot; callers should persist it if
 ///   they want to support resume.
 /// - `cancel`: checked at the top of each segment iteration and raced
@@ -213,10 +213,11 @@ pub struct TransmuxProgress {
     pub total_segments: usize,
     /// Segments fully processed so far.
     pub completed_segments: usize,
-    /// Cumulative downloaded segment bytes (excludes init segments).
+    /// Successful media bytes read in this invocation (includes lookahead and
+    /// recovery verification; excludes init, failed retries and prior invocations).
     pub downloaded_bytes: u64,
     /// Bytes written to the output file. 0 for the [`Mp4`](OutputFormat::Mp4)
-    /// batch path (which buffers in memory until the end).
+    /// batch path (which emits runtime phase events, not checkpoint callbacks).
     pub bytes_written: u64,
     /// Index of the segment just completed.
     pub current_segment_index: usize,
@@ -225,11 +226,143 @@ pub struct TransmuxProgress {
     pub resume: TransmuxResumeState,
 }
 
+/// Fine-grained phase notifications, independent of durable checkpoint events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransmuxPhase {
+    Downloading,
+    Processing,
+    Finalizing,
+    Completed,
+}
+
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct TransmuxEvent {
+    pub phase: TransmuxPhase,
+    pub current_segment_index: Option<usize>,
+    pub completed_segments: usize,
+    pub total_segments: Option<usize>,
+    pub bytes_written: u64,
+}
+
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct TransmuxRuntimeOptions {
+    pub on_event: Option<Arc<dyn Fn(TransmuxEvent) + Send + Sync>>,
+}
+impl TransmuxRuntimeOptions {
+    fn emit(
+        &self,
+        phase: TransmuxPhase,
+        index: Option<usize>,
+        completed: usize,
+        total: Option<usize>,
+        bytes: u64,
+    ) {
+        if let Some(callback) = &self.on_event {
+            callback(TransmuxEvent {
+                phase,
+                current_segment_index: index,
+                completed_segments: completed,
+                total_segments: total,
+                bytes_written: bytes,
+            });
+        }
+    }
+}
+impl std::fmt::Debug for TransmuxRuntimeOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransmuxRuntimeOptions")
+            .field("on_event", &self.on_event.as_ref().map(|_| "<callback>"))
+            .finish()
+    }
+}
+
+/// File output with optional phase events. Completion follows final file commit.
+pub async fn transmux_hls_to_mp4_async_with_runtime(
+    input: HlsInput,
+    output: impl AsRef<Path>,
+    options: TransmuxOptions,
+    runtime: TransmuxRuntimeOptions,
+) -> Result<TransmuxReport> {
+    runtime.emit(TransmuxPhase::Downloading, None, 0, None, 0);
+    let report = transmux_file_impl(input, output, options, &runtime).await?;
+    runtime.emit(
+        TransmuxPhase::Completed,
+        None,
+        report.segment_count,
+        Some(report.segment_count),
+        report.bytes_written,
+    );
+    Ok(report)
+}
+
+/// Writer output with optional phase events. Completion follows sink flush.
+pub async fn transmux_hls_to_writer_async_with_runtime<W: tokio::io::AsyncWrite + Send + Unpin>(
+    input: HlsInput,
+    writer: &mut W,
+    options: TransmuxOptions,
+    runtime: TransmuxRuntimeOptions,
+) -> Result<TransmuxReport> {
+    runtime.emit(TransmuxPhase::Downloading, None, 0, None, 0);
+    let report = transmux_writer_impl(input, writer, options, &runtime).await?;
+    runtime.emit(
+        TransmuxPhase::Completed,
+        None,
+        report.segment_count,
+        Some(report.segment_count),
+        report.bytes_written,
+    );
+    Ok(report)
+}
+
+/// Classic MP4 bytes with optional phase events.
+pub async fn transmux_hls_to_mp4_bytes_with_runtime(
+    input: HlsInput,
+    options: TransmuxOptions,
+    runtime: TransmuxRuntimeOptions,
+) -> Result<(Vec<u8>, TransmuxReport)> {
+    let mut bytes = Vec::new();
+    let report = transmux_hls_to_writer_async_with_runtime(
+        input,
+        &mut bytes,
+        TransmuxOptions {
+            output_format: OutputFormat::Mp4,
+            ..options
+        },
+        runtime,
+    )
+    .await?;
+    Ok((bytes, report))
+}
+
+/// Retry finalization without accessing the network, with optional phase events.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn finalize_partial_mp4_async_with_runtime(
+    partial: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    checkpoint: TransmuxResumeState,
+    options: TransmuxOptions,
+    runtime: TransmuxRuntimeOptions,
+) -> Result<TransmuxReport> {
+    let report = finalize_impl(partial, output, checkpoint, options, &runtime).await?;
+    runtime.emit(
+        TransmuxPhase::Completed,
+        None,
+        report.segment_count,
+        Some(report.segment_count),
+        report.bytes_written,
+    );
+    Ok(report)
+}
+
 /// Internal bundle of the optional hooks extracted from `TransmuxOptions`,
 /// passed down to the per-segment loops. Holds borrowed `Arc`s so the loops
 /// can invoke the callback / check cancellation without re-reading the
 /// `Option`s each iteration.
 struct Hooks<'a> {
+    runtime: &'a TransmuxRuntimeOptions,
     on_progress: Option<&'a Arc<dyn Fn(TransmuxProgress) + Send + Sync>>,
     cancel: Option<&'a Arc<dyn CancelToken>>,
     options: &'a TransmuxOptions,
@@ -276,9 +409,12 @@ impl<'a> Hooks<'a> {
     }
 }
 
+type InitCache = Option<((SourceLocation, Option<crate::ByteRange>), Vec<u8>)>;
+
 #[derive(Debug, Default)]
 struct PacketCollector {
     packets: Vec<EncodedPacket>,
+    config: Option<DemuxOutput>,
     vps: Option<Vec<u8>>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
@@ -298,12 +434,27 @@ pub async fn transmux_hls_to_mp4_async(
     output: impl AsRef<Path>,
     options: TransmuxOptions,
 ) -> Result<TransmuxReport> {
+    transmux_hls_to_mp4_async_with_runtime(
+        input,
+        output,
+        options,
+        TransmuxRuntimeOptions::default(),
+    )
+    .await
+}
+
+async fn transmux_file_impl(
+    input: HlsInput,
+    output: impl AsRef<Path>,
+    options: TransmuxOptions,
+    runtime: &TransmuxRuntimeOptions,
+) -> Result<TransmuxReport> {
     // On wasm32, file system APIs (tokio::fs) are unavailable. Keep the
     // symbol so consumers don't get link errors, but return a clear error
     // guiding them to the writer / bytes API.
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (&input, &output, &options);
+        let _ = (&input, &output, &options, runtime);
         return Err(Error::unsupported(
             "transmux_hls_to_mp4_async is not available on wasm32 (requires file system); \
              use transmux_hls_to_writer_async or transmux_hls_to_mp4_bytes instead",
@@ -324,13 +475,8 @@ pub async fn transmux_hls_to_mp4_async(
             if r.stage == TransmuxStage::Finalizing
                 && options.output_format == OutputFormat::StreamingMp4
             {
-                return finalize_partial_mp4_async(
-                    temp_fmp4_path(output),
-                    output,
-                    r.clone(),
-                    options,
-                )
-                .await;
+                return finalize_impl(temp_fmp4_path(output), output, r.clone(), options, runtime)
+                    .await;
             }
         }
         let (root_location, source) = input.into_parts()?;
@@ -349,6 +495,7 @@ pub async fn transmux_hls_to_mp4_async(
         }
 
         let hooks = Hooks {
+            runtime,
             on_progress: options.on_progress.as_ref(),
             cancel: options.cancel.as_ref(),
             options: &options,
@@ -389,6 +536,7 @@ pub async fn transmux_hls_to_mp4_async(
                     ..options.clone()
                 };
                 let stage_hooks = Hooks {
+                    runtime,
                     on_progress: stage_options.on_progress.as_ref(),
                     cancel: options.cancel.as_ref(),
                     options: &stage_options,
@@ -420,7 +568,7 @@ pub async fn transmux_hls_to_mp4_async(
                         callback(event);
                     }) as Arc<dyn Fn(TransmuxProgress) + Send + Sync>
                 });
-                finalize_partial_mp4_async(&temp_path, output, progress.resume, final_options).await
+                finalize_impl(&temp_path, output, progress.resume, final_options, runtime).await
             }
         }
     }
@@ -437,6 +585,31 @@ pub async fn finalize_partial_mp4_async(
     checkpoint: TransmuxResumeState,
     options: TransmuxOptions,
 ) -> Result<TransmuxReport> {
+    finalize_partial_mp4_async_with_runtime(
+        partial,
+        output,
+        checkpoint,
+        options,
+        TransmuxRuntimeOptions::default(),
+    )
+    .await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn finalize_impl(
+    partial: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    checkpoint: TransmuxResumeState,
+    options: TransmuxOptions,
+    runtime: &TransmuxRuntimeOptions,
+) -> Result<TransmuxReport> {
+    runtime.emit(
+        TransmuxPhase::Finalizing,
+        None,
+        checkpoint.completed_segments,
+        Some(checkpoint.total_segments),
+        checkpoint.bytes_written,
+    );
     use std::io::Write;
     #[cfg(feature = "ffmpeg-finalize")]
     use std::io::{Read, Seek};
@@ -571,7 +744,11 @@ pub async fn finalize_partial_mp4_async(
                 drop(prefix_guard);
                 TransmuxReport {
                     segment_count: state.total_segments,
-                    tracks: Vec::new(),
+                    tracks: tracks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| track_report(t, index.sample_counts[i], index.decode_ends[i]))
+                        .collect(),
                     duration: duration.max(0) as u64 / 1000,
                     duration_timescale: 1000,
                     bytes_written: file.metadata()?.len(),
@@ -692,6 +869,21 @@ pub async fn transmux_hls_to_writer_async<W>(
 where
     W: tokio::io::AsyncWrite + Send + Unpin,
 {
+    transmux_hls_to_writer_async_with_runtime(
+        input,
+        writer,
+        options,
+        TransmuxRuntimeOptions::default(),
+    )
+    .await
+}
+
+async fn transmux_writer_impl<W: tokio::io::AsyncWrite + Send + Unpin>(
+    input: HlsInput,
+    writer: &mut W,
+    options: TransmuxOptions,
+    runtime: &TransmuxRuntimeOptions,
+) -> Result<TransmuxReport> {
     use tokio::io::AsyncWriteExt;
     if options.resume.is_some() {
         return Err(Error::invalid("writer API does not support resume"));
@@ -710,6 +902,7 @@ where
         resolve_media_playlist(&reader, &root_resource, options.variant).await?;
 
     let hooks = Hooks {
+        runtime,
         on_progress: options.on_progress.as_ref(),
         cancel: options.cancel.as_ref(),
         options: &options,
@@ -873,6 +1066,13 @@ async fn mux_to_mp4_bytes(
         hooks,
     )
     .await?;
+    hooks.runtime.emit(
+        TransmuxPhase::Finalizing,
+        None,
+        media_playlist.segments.len(),
+        Some(media_playlist.segments.len()),
+        0,
+    );
     let (mp4, report) = mux_collected_packets(collector, media_playlist.segments.len())?;
     Ok((mp4, report))
 }
@@ -958,6 +1158,13 @@ impl Drop for BlockingStopGuard {
 struct RecoveryIndex {
     tracks: Vec<FragmentedTrack>,
     entries: Vec<Vec<TfraEntry>>,
+    sample_counts: Vec<usize>,
+    decode_ends: Vec<u64>,
+    presentation_ends: Vec<i128>,
+    config: Option<DemuxOutput>,
+    origin: Option<(i128, u32)>,
+    verification_bytes: u64,
+    last_durations: Vec<u32>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1028,7 +1235,7 @@ async fn transmux_fragmented_async(
         let cancel = hooks.options.cancel.clone();
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let _guard = BlockingStopGuard(stopped.clone());
-        let recovered = tokio::task::spawn_blocking(move || {
+        let mut recovered = tokio::task::spawn_blocking(move || {
             let mut file = std::fs::File::open(path)?;
             let check = || {
                 if stopped.load(std::sync::atomic::Ordering::Acquire)
@@ -1043,26 +1250,57 @@ async fn transmux_fragmented_async(
             Ok::<_, Error>(RecoveryIndex {
                 tracks,
                 entries: index.entries,
+                sample_counts: index.sample_counts,
+                decode_ends: index.decode_ends,
+                presentation_ends: index.presentation_ends,
+                config: None,
+                origin: None,
+                verification_bytes: 0,
+                last_durations: index.last_durations,
             })
         })
         .await
         .map_err(|e| Error::muxing(format!("recovery worker failed: {e}")))??;
         // Recheck the source codec config and normalization base before modifying
         // the file. Finalize-only recovery instead uses exclusively local data.
-        let (first, _) = demux_segment(
+        let (first, verification_bytes) = demux_segment(
             reader,
             media_location,
             &media_playlist.segments[0],
             &mut None,
+            &mut TimestampClock::default(),
         )
         .await?;
-        if config_digest(&build_fragmented_tracks(&first)?) != r.init_digest
+        let mut input_tracks = build_fragmented_tracks(&first)?;
+        if input_tracks.len() == recovered.tracks.len() {
+            for (input, saved) in input_tracks.iter_mut().zip(&recovered.tracks) {
+                input.timescale = saved.timescale;
+            }
+        }
+        if config_digest(&input_tracks) != r.init_digest
             || first.packets.first().map_or(0, |p| p.dts_90k) != r.global_base_dts_90k
         {
             return Err(Error::invalid(
                 "checkpoint initialization or timestamp base mismatch",
             ));
         }
+        recovered.verification_bytes = verification_bytes;
+        recovered.origin = first
+            .packets
+            .first()
+            .and_then(|p| p.timing)
+            .map(|t| (t.dts, t.timescale));
+        if first.video_timescale.is_some_and(|scale| {
+            recovered.tracks.iter().any(|t| {
+                matches!(t.kind, crate::mp4::FragmentedTrackKind::Video { .. })
+                    && t.timescale != scale
+            })
+        }) {
+            recovered.origin = None; // Legacy fMP4 output used the 90 kHz normalization domain.
+        }
+        let mut first = first;
+        first.packets.clear();
+        recovered.config = Some(first);
         Some(recovered)
     } else {
         None
@@ -1088,6 +1326,7 @@ async fn transmux_fragmented_async(
         None
     };
     let hooks = &Hooks {
+        runtime: hooks.runtime,
         on_progress: hooks.on_progress,
         cancel: hooks.cancel,
         options: hooks.options,
@@ -1153,10 +1392,16 @@ where
 
     let mut muxer: Option<FragmentedMp4Muxer> = None;
     let mut layout = TrackLayout::default();
-    let mut init_cache: Option<(String, Vec<u8>)> = None;
+    let mut init_cache: InitCache = None;
     let mut saved_tracks: Option<Vec<FragmentedTrack>> = None;
     let mut max_duration_ms = resume.as_ref().map_or(0, |r| r.duration_ms);
-    let mut downloaded_bytes = 0_u64;
+    let mut downloaded_bytes = resume_existing.as_ref().map_or(0, |r| r.verification_bytes);
+    let mut clock = TimestampClock::default();
+    let mut config = None;
+    let mut origin = None;
+    let mut track_infos = Vec::new();
+    let mut decode_ends = Vec::new();
+    let mut last_video_delta = 3000;
 
     // Per-track tfra entries accumulated as each fragment is streamed to the
     // writer; consumed by the trailing mfra box at the end. Fresh runs start
@@ -1178,6 +1423,47 @@ where
             recovered.tracks.clone(),
             r.next_sequence,
         ));
+        track_infos = recovered
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, track)| {
+                track_report(
+                    track,
+                    recovered.sample_counts[i],
+                    u64::try_from(
+                        recovered.presentation_ends[i].max(i128::from(recovered.decode_ends[i])),
+                    )
+                    .unwrap_or(u64::MAX),
+                )
+            })
+            .collect();
+        max_duration_ms = recovered
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                (recovered.presentation_ends[i].max(i128::from(recovered.decode_ends[i]))) * 1000
+                    / i128::from(t.timescale)
+            })
+            .max()
+            .unwrap_or(0)
+            .max(0) as u64;
+        decode_ends = recovered.decode_ends;
+        for (track, end) in recovered.tracks.iter().zip(&decode_ends) {
+            let absolute = global_base_dts_90k.unwrap_or(0)
+                + (*end as u128 * 90_000 / u128::from(track.timescale)) as u64;
+            if matches!(track.kind, crate::mp4::FragmentedTrackKind::Audio { .. }) {
+                clock.audio = Some(absolute);
+            } else {
+                clock.video = Some(absolute);
+            }
+        }
+        if let Some(i) = layout.video_index {
+            last_video_delta = recovered.last_durations[i].max(1);
+        }
+        config = recovered.config;
+        origin = recovered.origin;
         saved_tracks = Some(recovered.tracks);
         tfra_entries_per_track = recovered.entries;
     }
@@ -1192,15 +1478,55 @@ where
     // must reference the total size of all fragments, which is unknown until
     // the end, and writing it would require buffering everything in memory
     // (the exact pattern we are avoiding). mfra is appended at EOF instead.
+    let mut pending = None;
     for (loop_index, segment) in segments[start_index..].iter().enumerate() {
         // Cooperative cancellation: check at the top of each iteration so a
         // cancelled run stops before downloading the next segment.
         hooks.check_cancel()?;
 
         let segment_index = start_index + loop_index;
-        let (demuxed, segment_bytes) =
-            demux_segment(reader, media_location, segment, &mut init_cache).await?;
-        downloaded_bytes += segment_bytes;
+        hooks.runtime.emit(
+            TransmuxPhase::Downloading,
+            Some(segment_index),
+            segment_index,
+            Some(segments.len()),
+            bytes_written,
+        );
+        let (mut demuxed, _segment_bytes) = if let Some(next) = pending.take() {
+            next
+        } else {
+            let current =
+                demux_segment(reader, media_location, segment, &mut init_cache, &mut clock).await?;
+            downloaded_bytes += current.1;
+            current
+        };
+        check_media_config(&mut config, &demuxed)
+            .map_err(|error| error.context(format!("process segment {segment_index}")))?;
+        if origin.is_none() && global_base_dts_90k.is_none() {
+            origin = demuxed
+                .packets
+                .first()
+                .and_then(|p| p.timing)
+                .map(|t| (t.dts, t.timescale));
+        }
+        if demuxed
+            .packets
+            .iter()
+            .any(|p| p.timing.is_none() && !matches!(p.kind, StreamKind::Aac))
+            && segment_index + 1 < segments.len()
+        {
+            let next = demux_segment(
+                reader,
+                media_location,
+                &segments[segment_index + 1],
+                &mut init_cache,
+                &mut clock,
+            )
+            .await?;
+            downloaded_bytes += next.1;
+            set_boundary_duration(&mut demuxed, &next.0)?;
+            pending = Some(next);
+        }
 
         // Capture the global base DTS from the first packet we ever see, so
         // every sample across all segments is shifted to a zero-based timeline.
@@ -1211,6 +1537,13 @@ where
             global_base_dts_90k = Some(first.dts_90k);
         }
         let base = global_base_dts_90k.unwrap_or(0);
+        hooks.runtime.emit(
+            TransmuxPhase::Processing,
+            Some(segment_index),
+            segment_index,
+            Some(segments.len()),
+            bytes_written,
+        );
 
         if muxer.is_none() {
             let tracks = build_fragmented_tracks(&demuxed)?;
@@ -1223,13 +1556,55 @@ where
             })
             .await?;
             bytes_written += header.len() as u64;
+            track_infos = tracks
+                .iter()
+                .map(|track| track_report(track, 0, 0))
+                .collect();
+            decode_ends = vec![0; tracks.len()];
             saved_tracks = Some(tracks);
             muxer = Some(m);
         }
 
         let muxer = muxer.as_mut().expect("muxer was just initialized");
-        let last_dts = demuxed.packets.last().map(|p| p.dts_90k);
-        let samples_per_track = group_samples_per_track(demuxed.packets, &layout, base)?;
+        let samples_per_track =
+            group_samples_per_track(demuxed.packets, &layout, base, origin, last_video_delta)?;
+        if let Some(i) = layout.video_index
+            && let Some(last) = samples_per_track[i].last()
+        {
+            last_video_delta = last.duration;
+        }
+        for (i, samples) in samples_per_track.iter().enumerate() {
+            if let Some(first) = samples.first()
+                && track_infos[i].sample_count > 0
+                && first.dts < decode_ends[i]
+            {
+                return Err(Error::unsupported(
+                    "overlapping decode timeline or timestamp reset",
+                ));
+            }
+            if let Some(last) = samples.last() {
+                decode_ends[i] = last
+                    .dts
+                    .checked_add(u64::from(last.duration))
+                    .ok_or_else(|| Error::muxing("duration overflow"))?;
+            }
+            track_infos[i].sample_count += samples.len();
+            track_infos[i].duration = track_infos[i].duration.max(decode_ends[i]);
+            let end = samples
+                .iter()
+                .map(|sample| {
+                    (sample.pts + i128::from(sample.duration))
+                        .max(i128::from(sample.dts) + i128::from(sample.duration))
+                })
+                .max()
+                .unwrap_or(0);
+            track_infos[i].duration = track_infos[i].duration.max(
+                u64::try_from(end.max(0)).map_err(|_| Error::muxing("track duration overflow"))?,
+            );
+            let ms = end.max(0) * 1000 / i128::from(track_infos[i].timescale);
+            max_duration_ms = max_duration_ms
+                .max(u64::try_from(ms).map_err(|_| Error::muxing("report duration overflow"))?);
+        }
 
         // Record per-track tfra entries before writing the fragment, using the
         // current writer offset (pointing at the styp that starts this fragment).
@@ -1279,13 +1654,6 @@ where
         })
         .await?;
         bytes_written += fragment_bytes.len() as u64;
-
-        if let Some(last_dts) = last_dts {
-            let ms = last_dts.saturating_sub(base).saturating_mul(1000) / 90_000;
-            if ms > max_duration_ms {
-                max_duration_ms = ms;
-            }
-        }
 
         // Emit progress with a fresh resume snapshot. The caller should
         // persist this on every callback so a crash/cancel can resume from
@@ -1374,7 +1742,7 @@ where
 
     Ok(TransmuxReport {
         segment_count: media_playlist.segments.len(),
-        tracks: Vec::new(),
+        tracks: track_infos,
         duration: max_duration_ms,
         duration_timescale: 1000,
         bytes_written,
@@ -1389,6 +1757,7 @@ struct TrackLayout {
     audio_index: Option<usize>,
     /// Audio timescale (AAC sample rate) for rescaling 90 kHz timestamps.
     audio_timescale: u32,
+    video_timescale: u32,
 }
 
 impl TrackLayout {
@@ -1397,10 +1766,14 @@ impl TrackLayout {
         let mut layout = Self::default();
         for (index, track) in tracks.iter().enumerate() {
             match &track.kind {
-                FragmentedTrackKind::Video { .. } => layout.video_index = Some(index),
+                FragmentedTrackKind::Video { .. } => {
+                    layout.video_index = Some(index);
+                    layout.video_timescale = track.timescale;
+                }
                 FragmentedTrackKind::Audio { sample_rate, .. } => {
                     layout.audio_index = Some(index);
-                    layout.audio_timescale = *sample_rate;
+                    let _ = sample_rate;
+                    layout.audio_timescale = track.timescale;
                 }
             }
         }
@@ -1420,31 +1793,60 @@ async fn demux_segment(
     reader: &SourceReader,
     playlist_location: &SourceLocation,
     segment: &crate::hls::HlsSegment,
-    init_cache: &mut Option<(String, Vec<u8>)>,
+    init_cache: &mut InitCache,
+    clock: &mut TimestampClock,
 ) -> Result<(DemuxOutput, u64)> {
     let location = playlist_location.resolve(&segment.uri)?;
     let data = reader
         .read_bytes(&location, segment.byte_range.as_ref())
-        .await?;
+        .await
+        .map_err(|error| {
+            error.context(format!(
+                "download segment {} resource {}",
+                segment.sequence_number,
+                crate::source::safe_location(&location)
+            ))
+        })?;
     let segment_bytes = data.len() as u64;
 
-    let demuxed = if let Some(init_spec) = &segment.init_segment {
+    let mut demuxed = if let Some(init_spec) = &segment.init_segment {
+        let init_location = playlist_location.resolve(&init_spec.uri)?;
+        let key = (init_location.clone(), init_spec.byte_range);
         let init_bytes = if let Some((_, cached_bytes)) =
-            init_cache.as_ref().filter(|(uri, _)| uri == &init_spec.uri)
+            init_cache.as_ref().filter(|(cached, _)| cached == &key)
         {
             cached_bytes.as_slice()
         } else {
-            let init_location = playlist_location.resolve(&init_spec.uri)?;
             let bytes = reader
                 .read_bytes(&init_location, init_spec.byte_range.as_ref())
-                .await?;
-            *init_cache = Some((init_spec.uri.clone(), bytes));
+                .await
+                .map_err(|error| {
+                    error.context(format!(
+                        "initialize segment {} resource {}",
+                        segment.sequence_number,
+                        crate::source::safe_location(&init_location)
+                    ))
+                })?;
+            *init_cache = Some((key, bytes));
             init_cache.as_ref().unwrap().1.as_slice()
         };
-        demux_isobmff(init_bytes, &data)?
+        demux_isobmff(init_bytes, &data).map_err(|error| {
+            error.context(format!(
+                "process fMP4 segment {} resource {}",
+                segment.sequence_number,
+                crate::source::safe_location(&location)
+            ))
+        })?
     } else {
-        demux_ts(&data)?
+        demux_ts(&data).map_err(|error| {
+            error.context(format!(
+                "process TS segment {} resource {}",
+                segment.sequence_number,
+                crate::source::safe_location(&location)
+            ))
+        })?
     };
+    clock.normalize(&mut demuxed)?;
     Ok((demuxed, segment_bytes))
 }
 
@@ -1495,6 +1897,16 @@ fn build_fragmented_tracks(first: &DemuxOutput) -> Result<Vec<FragmentedTrack>> 
         ));
     }
 
+    for track in &mut tracks {
+        track.timescale = match &track.kind {
+            crate::mp4::FragmentedTrackKind::Video { .. } => {
+                first.video_timescale.unwrap_or(90_000)
+            }
+            crate::mp4::FragmentedTrackKind::Audio { sample_rate, .. } => {
+                first.audio_timescale.unwrap_or(*sample_rate)
+            }
+        };
+    }
     if tracks.is_empty() {
         return Err(Error::invalid("first segment produced no tracks"));
     }
@@ -1509,69 +1921,300 @@ fn build_fragmented_tracks(first: &DemuxOutput) -> Result<Vec<FragmentedTrack>> 
 /// the timeline starts at 0; this keeps tfdt values correct (fragment 0 starts
 /// at 0, later fragments at their cumulative offset) without inflating the
 /// track duration with a non-zero TS encoder initial timestamp.
+fn set_boundary_duration(current: &mut DemuxOutput, next: &DemuxOutput) -> Result<()> {
+    if let Some(last) = current
+        .packets
+        .iter_mut()
+        .rev()
+        .find(|p| !matches!(p.kind, StreamKind::Aac))
+        && last.timing.is_none()
+        && let Some(first) = next
+            .packets
+            .iter()
+            .find(|p| !matches!(p.kind, StreamKind::Aac))
+    {
+        last.duration = first
+            .dts_90k
+            .checked_sub(last.dts_90k)
+            .filter(|&d| d > 0)
+            .ok_or_else(|| Error::unsupported("non-increasing cross-segment video DTS"))?;
+    }
+    Ok(())
+}
+
+fn track_report(track: &FragmentedTrack, sample_count: usize, duration: u64) -> crate::TrackInfo {
+    use crate::mp4::FragmentedTrackKind;
+    let (track_type, codec, width, height, sample_rate, channel_count) = match &track.kind {
+        FragmentedTrackKind::Video {
+            width,
+            height,
+            codec,
+        } => (
+            crate::TrackType::Video,
+            codec.codec(),
+            Some(*width),
+            Some(*height),
+            None,
+            None,
+        ),
+        FragmentedTrackKind::Audio {
+            sample_rate,
+            channel_count,
+            ..
+        } => (
+            crate::TrackType::Audio,
+            crate::Codec::Aac,
+            None,
+            None,
+            Some(*sample_rate),
+            Some(*channel_count),
+        ),
+    };
+    crate::TrackInfo {
+        track_type,
+        codec,
+        timescale: track.timescale,
+        duration,
+        sample_count,
+        width,
+        height,
+        sample_rate,
+        channel_count,
+    }
+}
+
+fn packet_sample(
+    packet: EncodedPacket,
+    timescale: u32,
+    base_90k: u64,
+    origin: Option<(i128, u32)>,
+) -> Result<Mp4Sample> {
+    let (dts, pts, duration) = if let Some(time) = packet.timing.filter(|_| origin.is_some()) {
+        let (base, base_scale) = origin.unwrap_or((i128::from(base_90k), 90_000));
+        let scale = |value: i128| -> Result<i128> {
+            let denominator = i128::from(time.timescale) * i128::from(base_scale);
+            if denominator == 0 {
+                return Err(Error::muxing("zero timestamp timescale"));
+            }
+            value
+                .checked_mul(i128::from(base_scale))
+                .and_then(|v| {
+                    base.checked_mul(i128::from(time.timescale))
+                        .and_then(|base| v.checked_sub(base))
+                })
+                .and_then(|v| v.checked_mul(i128::from(timescale)))
+                .map(|v| v / denominator)
+                .ok_or_else(|| Error::muxing("timestamp conversion overflow"))
+        };
+        (
+            scale(time.dts)?,
+            scale(time.pts)?,
+            i128::from(time.duration) * i128::from(timescale) / i128::from(time.timescale),
+        )
+    } else {
+        let scale = |value: i128| value * i128::from(timescale) / 90_000;
+        (
+            scale(i128::from(packet.dts_90k) - i128::from(base_90k)),
+            scale(packet.pts_90k - i128::from(base_90k)),
+            if let Some(time) = packet.timing {
+                i128::from(time.duration) * i128::from(timescale) / i128::from(time.timescale)
+            } else if matches!(packet.kind, StreamKind::Aac) {
+                i128::from(packet.duration)
+            } else {
+                scale(i128::from(packet.duration))
+            },
+        )
+    };
+    let data = if packet.is_length_prefixed || matches!(packet.kind, StreamKind::Aac) {
+        packet.data
+    } else {
+        avc::annex_b_to_length_prefixed(&packet.data)?
+    };
+    let data = if matches!(packet.kind, StreamKind::Avc | StreamKind::Hevc) {
+        crate::codecs::strip_video_parameters(data, packet.kind)?
+    } else {
+        data
+    };
+    Ok(Mp4Sample {
+        source: None,
+        data,
+        dts: u64::try_from(dts).map_err(|_| Error::muxing("DTS precedes common decode origin"))?,
+        pts,
+        duration: u32::try_from(duration).map_err(|_| Error::muxing("sample duration overflow"))?,
+        is_key: packet.is_key,
+        offset: 0,
+    })
+}
+
 fn group_samples_per_track(
     packets: Vec<EncodedPacket>,
     layout: &TrackLayout,
     base_dts_90k: u64,
+    origin: Option<(i128, u32)>,
+    fallback_duration: u32,
 ) -> Result<Vec<Vec<Mp4Sample>>> {
-    let mut video_samples: Vec<Mp4Sample> = Vec::new();
-    let mut audio_samples: Vec<Mp4Sample> = Vec::new();
-
+    let mut out: Vec<Vec<Mp4Sample>> = (0..layout.track_count()).map(|_| Vec::new()).collect();
     for packet in packets {
-        match packet.kind {
-            StreamKind::Avc | StreamKind::Hevc => {
-                let data = if packet.is_length_prefixed {
-                    packet.data
-                } else {
-                    avc::annex_b_to_length_prefixed(&packet.data)?
-                };
-                // Shift to a zero-based timeline using the global base so tfdt
-                // starts at 0 and the track duration is not inflated by the
-                // TS encoder's initial timestamp offset.
-                video_samples.push(Mp4Sample {
-                    source: None,
-                    data,
-                    dts: packet.dts_90k.saturating_sub(base_dts_90k),
-                    pts: packet.pts_90k.saturating_sub(base_dts_90k),
-                    duration: 0,
-                    is_key: packet.is_key,
-                    offset: 0,
-                });
-            }
-            StreamKind::Aac => {
-                let audio_ts = if layout.audio_timescale > 0 {
-                    layout.audio_timescale
-                } else {
-                    90_000
-                };
-                let dts = rescale_90k(packet.dts_90k.saturating_sub(base_dts_90k), audio_ts);
-                let pts = rescale_90k(packet.pts_90k.saturating_sub(base_dts_90k), audio_ts);
-                audio_samples.push(Mp4Sample {
-                    source: None,
-                    data: packet.data,
-                    dts,
-                    pts,
-                    duration: 1024,
-                    is_key: true,
-                    offset: 0,
-                });
-            }
-        }
+        let (index, timescale) = match packet.kind {
+            StreamKind::Avc | StreamKind::Hevc => (layout.video_index, layout.video_timescale),
+            StreamKind::Aac => (layout.audio_index, layout.audio_timescale),
+        };
+        let index = index.ok_or_else(|| Error::unsupported("track configuration changed"))?;
+        out[index].push(packet_sample(packet, timescale, base_dts_90k, origin)?);
     }
-
-    // Build the output in track-index order, with empty vecs for missing tracks.
-    let track_count = layout.track_count();
-    let mut out: Vec<Vec<Mp4Sample>> = (0..track_count).map(|_| Vec::new()).collect();
-    if let Some(vi) = layout.video_index {
-        if !video_samples.is_empty() {
-            assign_delta_durations(&mut video_samples)?;
+    if let Some(index) = layout.video_index {
+        if out[index].len() == 1 && out[index][0].duration == 0 {
+            out[index][0].duration = fallback_duration;
         }
-        out[vi] = video_samples;
+        assign_delta_durations(&mut out[index])?;
     }
-    if let Some(ai) = layout.audio_index {
-        out[ai] = audio_samples;
+    for samples in &mut out {
+        crate::mp4::normalize_sample_timeline(samples)?;
     }
     Ok(out)
+}
+
+/// Checks initialization before handing packets to either output pipeline.
+fn check_media_config(previous: &mut Option<DemuxOutput>, current: &DemuxOutput) -> Result<()> {
+    if let Some(old) = previous {
+        if old.saw_video != current.saw_video
+            || old.saw_audio != current.saw_audio
+            || old.video_timescale != current.video_timescale
+            || old.audio_timescale != current.audio_timescale
+            || current.width.is_some_and(|v| old.width != Some(v))
+            || current.height.is_some_and(|v| old.height != Some(v))
+            || old.sample_rate != current.sample_rate
+            || old.channel_count != current.channel_count
+            || current
+                .sps
+                .as_ref()
+                .is_some_and(|v| old.sps.as_ref() != Some(v))
+            || current
+                .pps
+                .as_ref()
+                .is_some_and(|v| old.pps.as_ref() != Some(v))
+            || current
+                .vps
+                .as_ref()
+                .is_some_and(|v| old.vps.as_ref() != Some(v))
+            || current
+                .audio_specific_config
+                .as_ref()
+                .is_some_and(|v| old.audio_specific_config.as_ref() != Some(v))
+        {
+            return Err(Error::unsupported(
+                "mid-stream track or codec configuration changed",
+            ));
+        }
+    } else {
+        *previous = Some(DemuxOutput {
+            packets: Vec::new(),
+            video_timescale: current.video_timescale,
+            audio_timescale: current.audio_timescale,
+            saw_video: current.saw_video,
+            saw_audio: current.saw_audio,
+            vps: current.vps.clone(),
+            sps: current.sps.clone(),
+            pps: current.pps.clone(),
+            width: current.width,
+            height: current.height,
+            audio_specific_config: current.audio_specific_config.clone(),
+            sample_rate: current.sample_rate,
+            channel_count: current.channel_count,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct TimestampClock {
+    video: Option<u64>,
+    audio: Option<u64>,
+}
+impl TimestampClock {
+    fn normalize(&mut self, output: &mut DemuxOutput) -> Result<()> {
+        const PERIOD: u64 = 1 << 33;
+        let nearest = |raw: u64, last: u64| -> Result<u64> {
+            let raw = raw % PERIOD;
+            let mut value = (last / PERIOD)
+                .checked_mul(PERIOD)
+                .and_then(|base| base.checked_add(raw))
+                .ok_or_else(|| Error::bitstream("TS timestamp overflow"))?;
+            if value < last && last - value > PERIOD / 2 {
+                value = value
+                    .checked_add(PERIOD)
+                    .ok_or_else(|| Error::bitstream("TS timestamp overflow"))?;
+            } else if value > last && value - last > PERIOD / 2 && value >= PERIOD {
+                value -= PERIOD;
+            }
+            Ok(value)
+        };
+        let initial_anchor = if self.video.is_none() && self.audio.is_none() {
+            let minimum = output
+                .packets
+                .iter()
+                .filter(|p| p.timing.is_none())
+                .map(|p| p.dts_90k)
+                .min();
+            let maximum = output
+                .packets
+                .iter()
+                .filter(|p| p.timing.is_none())
+                .map(|p| p.dts_90k)
+                .max();
+            match (minimum, maximum) {
+                (Some(min), Some(max)) if max - min > PERIOD / 2 => output
+                    .packets
+                    .iter()
+                    .find(|p| p.timing.is_none())
+                    .and_then(|p| p.dts_90k.checked_add(PERIOD)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        for packet in &mut output.packets {
+            if packet.timing.is_some() {
+                continue;
+            }
+            let anchor = self.video.or(self.audio).or(initial_anchor);
+            let last = if matches!(packet.kind, StreamKind::Aac) {
+                &mut self.audio
+            } else {
+                &mut self.video
+            };
+            let dts = nearest(packet.dts_90k, last.or(anchor).unwrap_or(packet.dts_90k))?;
+            let mut cts =
+                packet.pts_90k.rem_euclid(i128::from(PERIOD)) - i128::from(packet.dts_90k % PERIOD);
+            if cts > i128::from(PERIOD / 2) {
+                cts -= i128::from(PERIOD);
+            }
+            if cts < -i128::from(PERIOD / 2) {
+                cts += i128::from(PERIOD);
+            }
+            let pts = i128::from(dts) + cts;
+            if last.is_some_and(|old| dts < old) {
+                return Err(Error::unsupported(format!(
+                    "TS timestamp reset without supported discontinuity: {:?} DTS {dts} after {}",
+                    packet.kind,
+                    last.unwrap()
+                )));
+            }
+            *last = Some(dts);
+            packet.dts_90k = dts;
+            packet.pts_90k = pts;
+        }
+        output.packets.sort_by(|a, b| {
+            let left = a
+                .timing
+                .map_or((i128::from(a.dts_90k), 90_000), |t| (t.dts, t.timescale));
+            let right = b
+                .timing
+                .map_or((i128::from(b.dts_90k), 90_000), |t| (t.dts, t.timescale));
+            (left.0 * i128::from(right.1)).cmp(&(right.0 * i128::from(left.1)))
+        });
+        Ok(())
+    }
 }
 
 async fn read_media_segments(
@@ -1581,43 +2224,49 @@ async fn read_media_segments(
     collector: &mut PacketCollector,
     hooks: &Hooks<'_>,
 ) -> Result<()> {
-    let mut init_cache: Option<(String, Vec<u8>)> = None;
-    let mut downloaded_bytes = 0_u64;
+    let mut init_cache: InitCache = None;
+    let mut clock = TimestampClock::default();
     let total_segments = playlist.segments.len();
 
     for (index, segment) in playlist.segments.iter().enumerate() {
         // Cooperative cancellation: check before downloading each segment.
         hooks.check_cancel()?;
 
-        let (demuxed, segment_bytes) =
-            demux_segment(reader, playlist_location, segment, &mut init_cache).await?;
-        downloaded_bytes += segment_bytes;
-        collector.push_demuxed(demuxed)?;
+        hooks.runtime.emit(
+            TransmuxPhase::Downloading,
+            Some(index),
+            index,
+            Some(total_segments),
+            0,
+        );
+        let (demuxed, _segment_bytes) = demux_segment(
+            reader,
+            playlist_location,
+            segment,
+            &mut init_cache,
+            &mut clock,
+        )
+        .await?;
+        hooks.runtime.emit(
+            TransmuxPhase::Processing,
+            Some(index),
+            index,
+            Some(total_segments),
+            0,
+        );
+        collector
+            .push_demuxed(demuxed)
+            .map_err(|error| error.context(format!("process segment {index}")))?;
 
-        // Mp4 batch path doesn't write to disk per-segment, so bytes_written
-        // stays 0 and the resume snapshot is informational only — Mp4 output
-        // does not support resume (rejected at the entry point).
-        hooks.emit(TransmuxProgress {
-            stage: TransmuxStage::Downloading,
-            total_segments,
-            completed_segments: index + 1,
-            downloaded_bytes,
-            bytes_written: 0,
-            current_segment_index: index,
-            resume: TransmuxResumeState {
-                completed_segments: index + 1,
-                bytes_written: 0,
-                next_sequence: (index + 1) as u32,
-                global_base_dts_90k: 0,
-                ..Default::default()
-            },
-        });
+        // Batch output has no resumable committed fragment. Phase events
+        // report its work; the legacy callback is reserved for checkpoints.
     }
     Ok(())
 }
 
 impl PacketCollector {
     fn push_demuxed(&mut self, demuxed: DemuxOutput) -> Result<()> {
+        check_media_config(&mut self.config, &demuxed)?;
         if let Some(segment_vps) = demuxed.vps {
             update_param(
                 &mut self.vps,
@@ -1697,6 +2346,7 @@ fn mux_collected_packets_checked(
     check()?;
     let PacketCollector {
         packets,
+        config,
         vps,
         sps,
         pps,
@@ -1721,49 +2371,27 @@ fn mux_collected_packets_checked(
     let channel_count = channel_count
         .ok_or_else(|| Error::unsupported("AAC audio is required for non-fragmented MP4"))?;
 
+    let origin = packets
+        .iter()
+        .filter_map(|p| p.timing)
+        .min_by(|a, b| (a.dts * i128::from(b.timescale)).cmp(&(b.dts * i128::from(a.timescale))))
+        .map(|t| (t.dts, t.timescale));
+    let video_timescale = config
+        .as_ref()
+        .and_then(|c| c.video_timescale)
+        .unwrap_or(90_000);
+    let audio_timescale = config
+        .as_ref()
+        .and_then(|c| c.audio_timescale)
+        .unwrap_or(sample_rate);
     let mut video_samples = Vec::new();
     let mut audio_samples = Vec::new();
     for packet in packets {
         check()?;
-        if packet.dts_90k < base_dts || packet.pts_90k < base_dts {
-            return Err(Error::muxing(
-                "packet timestamps precede the normalization base",
-            ));
-        }
-
-        match packet.kind {
-            StreamKind::Avc | StreamKind::Hevc => {
-                let data = if packet.is_length_prefixed {
-                    packet.data
-                } else {
-                    // Annex B — reuse the AVC start-code scanner for both codecs
-                    // (HEVC and AVC share the 0x000001 / 0x00000001 start code syntax).
-                    avc::annex_b_to_length_prefixed(&packet.data)?
-                };
-                video_samples.push(Mp4Sample {
-                    source: None,
-                    data,
-                    dts: packet.dts_90k - base_dts,
-                    pts: packet.pts_90k - base_dts,
-                    duration: 0,
-                    is_key: packet.is_key,
-                    offset: 0,
-                });
-            }
-            StreamKind::Aac => {
-                let dts = rescale_90k(packet.dts_90k - base_dts, sample_rate);
-                let pts = rescale_90k(packet.pts_90k - base_dts, sample_rate);
-                audio_samples.push(Mp4Sample {
-                    source: None,
-                    data: packet.data,
-                    dts,
-                    pts,
-                    duration: u32::try_from(packet.duration)
-                        .map_err(|_| Error::muxing("AAC packet duration exceeds u32"))?,
-                    is_key: true,
-                    offset: 0,
-                });
-            }
+        if matches!(packet.kind, StreamKind::Aac) {
+            audio_samples.push(packet_sample(packet, audio_timescale, base_dts, origin)?);
+        } else {
+            video_samples.push(packet_sample(packet, video_timescale, base_dts, origin)?);
         }
     }
 
@@ -1780,7 +2408,7 @@ fn mux_collected_packets_checked(
         make_video_track(video_samples, &sps, &pps)?
     };
 
-    let tracks = vec![
+    let mut tracks = vec![
         video_track,
         make_audio_track(
             audio_samples,
@@ -1789,6 +2417,12 @@ fn mux_collected_packets_checked(
             audio_specific_config,
         )?,
     ];
+    if let crate::mp4::Mp4Track::Video { timescale, .. } = &mut tracks[0] {
+        *timescale = video_timescale;
+    }
+    if let crate::mp4::Mp4Track::Audio { timescale, .. } = &mut tracks[1] {
+        *timescale = audio_timescale;
+    }
     let (mp4, track_infos) = Mp4Muxer::new(tracks).write_checked(check)?;
 
     let duration = track_infos
@@ -1809,6 +2443,7 @@ fn mux_collected_packets_checked(
     ))
 }
 
+#[cfg(test)]
 fn rescale_90k(value: u64, to_timescale: u32) -> u64 {
     value.saturating_mul(u64::from(to_timescale)) / 90_000
 }
@@ -1912,6 +2547,148 @@ mod tests {
         );
     }
 
+    fn packet(kind: StreamKind, dts: u64, pts: u64) -> EncodedPacket {
+        EncodedPacket {
+            kind,
+            timing: None,
+            data: vec![0, 0, 0, 1, 0x65],
+            pts_90k: i128::from(pts),
+            dts_90k: dts,
+            duration: 0,
+            is_key: true,
+            is_length_prefixed: true,
+        }
+    }
+
+    #[test]
+    fn timestamp_clock_unwraps_before_sort_and_rejects_resets() {
+        let period = 1u64 << 33;
+        let mut clock = TimestampClock::default();
+        let mut output = DemuxOutput {
+            packets: vec![
+                packet(StreamKind::Avc, period - 100, period - 50),
+                packet(StreamKind::Avc, 10, 20),
+                packet(StreamKind::Aac, period - 90, period - 90),
+            ],
+            ..Default::default()
+        };
+        clock.normalize(&mut output).unwrap();
+        let dts: Vec<_> = output.packets.iter().map(|p| p.dts_90k).collect();
+        assert_eq!(dts, [2 * period - 100, 2 * period - 90, 2 * period + 10]);
+        let mut next = DemuxOutput {
+            packets: vec![packet(StreamKind::Avc, 100, 90)],
+            ..Default::default()
+        };
+        clock.normalize(&mut next).unwrap();
+        assert_eq!(next.packets[0].dts_90k, 2 * period + 100);
+        let mut reset = DemuxOutput {
+            packets: vec![packet(StreamKind::Avc, 0, 0)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            clock.normalize(&mut reset),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn timestamp_clock_preserves_negative_pts_near_zero() {
+        let mut output = DemuxOutput {
+            packets: vec![packet(StreamKind::Avc, 0, (1u64 << 33) - 10)],
+            ..Default::default()
+        };
+        TimestampClock::default().normalize(&mut output).unwrap();
+        assert_eq!(output.packets[0].pts_90k, -10);
+    }
+
+    #[test]
+    fn native_timescale_duration_and_negative_cts_survive_conversion() {
+        let mut input = packet(StreamKind::Avc, 0, 0);
+        input.timing = Some(crate::types::PacketTiming {
+            timescale: 12800,
+            dts: 101,
+            pts: 99,
+            duration: 513,
+        });
+        let sample = packet_sample(input, 12800, 0, Some((101, 12800))).unwrap();
+        assert_eq!((sample.dts, sample.pts, sample.duration), (0, -2, 513));
+        let mut samples = vec![
+            sample,
+            Mp4Sample {
+                data: vec![],
+                source: None,
+                dts: 513,
+                pts: 517,
+                duration: 211,
+                is_key: false,
+                offset: 0,
+            },
+        ];
+        assign_delta_durations(&mut samples).unwrap();
+        assert_eq!(samples[1].duration, 211);
+    }
+
+    #[tokio::test]
+    async fn initialization_cache_distinguishes_ranges_on_same_uri() {
+        let root = "https://cache.test/list.m3u8";
+        let mut bytes = Vec::new();
+        let mut fragments = Vec::new();
+        let mut ranges = Vec::new();
+        for rate in [48000, 44100] {
+            let mut muxer =
+                FragmentedMp4Muxer::new(vec![FragmentedTrack::audio(1, rate, 2, vec![0x12, 0x10])]);
+            let init = muxer.write_header().unwrap();
+            ranges.push(crate::ByteRange {
+                offset: bytes.len() as u64,
+                length: init.len() as u64,
+            });
+            bytes.extend(init);
+            fragments.push(
+                muxer
+                    .write_fragment(&[vec![Mp4Sample {
+                        data: vec![1],
+                        source: None,
+                        dts: 0,
+                        pts: 0,
+                        duration: 1024,
+                        is_key: true,
+                        offset: 0,
+                    }]])
+                    .unwrap(),
+            );
+        }
+        let source = crate::MemorySource::new()
+            .segment("https://cache.test/init.mp4", bytes)
+            .segment("https://cache.test/0.m4s", fragments.remove(0))
+            .segment("https://cache.test/1.m4s", fragments.remove(0));
+        let reader = SourceReader::new(Arc::new(source), None);
+        let location = SourceLocation::Url(url::Url::parse(root).unwrap());
+        let mut cache = None;
+        let mut clock = TimestampClock::default();
+        for (index, range) in ranges.into_iter().enumerate() {
+            let segment = crate::hls::HlsSegment {
+                uri: format!("{index}.m4s"),
+                path: Default::default(),
+                duration_seconds: 1.0,
+                sequence_number: index as u64,
+                start_seconds: index as f64,
+                byte_range: None,
+                init_segment: Some(crate::hls::InitSegment {
+                    uri: "init.mp4".into(),
+                    path: Default::default(),
+                    byte_range: Some(range),
+                }),
+            };
+            let (demux, _) = demux_segment(&reader, &location, &segment, &mut cache, &mut clock)
+                .await
+                .unwrap();
+            assert_eq!(
+                demux.sample_rate,
+                Some(if index == 0 { 48000 } else { 44100 })
+            );
+        }
+    }
+
     #[tokio::test]
     #[cfg(feature = "default-source")]
     async fn rejects_master_without_variant() {
@@ -1959,6 +2736,7 @@ mod tests {
             ..Default::default()
         };
         let hooks = Hooks {
+            runtime: &TransmuxRuntimeOptions::default(),
             on_progress: options.on_progress.as_ref(),
             cancel: None,
             options: &options,

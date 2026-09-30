@@ -1,4 +1,4 @@
-# v0.4.0 Native finalize validation
+# v0.4.0 / v0.4.1 validation
 
 Measured 2026-09-30 on macOS 27.0.1, arm64, Rust 1.98.1, release profile.
 Each RSS measurement runs in a fresh test process, using `/usr/bin/time -l`.
@@ -51,8 +51,7 @@ Fixed sample count increased payload 32× without proportional RSS growth.
 Increasing sample count increased RSS, as expected for metadata retained in
 memory. This supports payload-independent finalize buffering, not constant
 memory for arbitrarily long videos. Download memory still includes the current
-segment, demux/mux buffers, and configured prefetch slots; byte-budget limits
-remain roadmap C3 work. The bytes API and batch `Mp4` retain their memory-output
+segment, demux/mux buffers, and configured prefetch slots; a configurable single-resource limit is available in v0.4.1; a shared byte budget remains future work. The bytes API and batch `Mp4` retain their memory-output
 semantics.
 
 ## Media and large-file correctness
@@ -78,11 +77,50 @@ semantics.
   artifacts without changing schema v1.
 
 Native finalize preserves the timing/configuration stored in its partial file.
-Earlier TS/fMP4 normalization and unsupported discontinuities, multiple-trun
-inputs, and NAL-prefix conversion remain stage C work. Individual sample sizes
+v0.4.1 adds multi-trun parsing, NAL-prefix conversion and native timing preservation. Discontinuities remain unsupported. Individual sample sizes
 remain 32-bit, as required by sample tables; individual in-memory fragments
 must also fit their signed trun data offsets and the platform address space.
 
 All required feature combinations, all-features with FFmpeg 9, wasm check,
 fmt and Clippy were verified locally. Cross-platform runs are delegated to the
 existing Linux/macOS/Windows CI matrix. Publication is not part of this change.
+
+## v0.4.1 prefetch measurements and budget design
+
+Run `python3 scripts/benchmark_prefetch.py` with local TCP listening allowed.
+Fresh release processes serve 32 synthetic resources on loopback, with a per-resource
+limit equal to the payload size. Concurrency 1 retains one serial body; concurrency 4
+admits the current 12-slot prefetch window. Wait for server writes and then 50 ms.
+
+| Resource bytes | Concurrency | Admitted payload estimate | Peak RSS bytes |
+| ---: | ---: | ---: | ---: |
+| 1,048,576 | 1 | 1,048,576 | 10,223,616 |
+| 1,048,576 | 4 | 12,582,912 | 29,458,432 |
+| 8,388,608 | 1 | 8,388,608 | 19,644,416 |
+| 8,388,608 | 4 | 100,663,296 | 58,589,184 |
+
+These are macOS arm64 observations, not hard RSS bounds. The payload estimate uses
+completed server writes rather than an atomic snapshot of ready slots. Socket/body
+reads may still be in flight, and synthetic repeated bytes can benefit from OS memory
+compression. Peak RSS includes the server, runtime and transport. The consumer,
+init cache, demux buffers and one TS lookahead segment add memory beyond ready slots.
+With finite cap L, each response body is at most L and ready-slot bodies are bounded
+by approximately 3 * concurrency * L. Defaults do not impose a byte bound.
+
+A subsequent shared byte budget should reserve credits before admitting each fetch,
+including init, consumer-created requests and ready/in-flight prefetch bodies. Known
+lengths reserve upfront; unknown lengths acquire additional credits before retaining
+each chunk. Eviction, consumption, failure and cancellation release credits via RAII.
+The consumer's next resource gets priority and reserved headroom, so workers cannot
+fill the budget and deadlock it. Resources exceeding the configured budget fail before
+waiting; unknown-length growth must fail or spill, rather than hold partial credits
+while all workers wait for more. Slot and byte permits jointly bound scheduling, and
+cancellation wakes permit waits. Explicit ownership/transfer avoids charging a body
+twice while it moves from a slot into processing. This design is not an implemented
+runtime option in 0.4.1.
+
+The expanded media verifier covers nine inputs: regular and VFR TS; regular, negative
+CTS, VFR, delayed audio, one/two-byte multi-run AVC fMP4; HEVC fMP4. Each compares the
+input directly against fragmented, Native and batch output (counts, rational timing
+within one destination tick, normalized NAL/AAC payload), followed by FFmpeg decoding
+and seeking. Released v0.4.0 checkpoint fixtures complement the v0.3.0 fixtures.

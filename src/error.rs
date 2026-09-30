@@ -28,6 +28,21 @@ pub enum Error {
 }
 
 impl Error {
+    pub(crate) fn context(self, context: impl std::fmt::Display) -> Self {
+        match self {
+            Self::Io(error) => Self::Io(std::io::Error::new(
+                error.kind(),
+                format!("{context}: {error}"),
+            )),
+            Self::Http(message) => Self::Http(format!("{context}: {message}")),
+            Self::InvalidInput(message) => Self::InvalidInput(format!("{context}: {message}")),
+            Self::Unsupported(message) => Self::Unsupported(format!("{context}: {message}")),
+            Self::Bitstream(message) => Self::Bitstream(format!("{context}: {message}")),
+            Self::Muxing(message) => Self::Muxing(format!("{context}: {message}")),
+            Self::Cancelled => Self::Cancelled,
+        }
+    }
+
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidInput(message.into())
     }

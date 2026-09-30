@@ -161,6 +161,7 @@ pub trait Source: Send + Sync + std::fmt::Debug {
 #[cfg(feature = "default-source")]
 pub struct ReqwestSource {
     http: reqwest::Client,
+    policy: HttpRequestPolicy,
     concurrency: usize,
     /// Headers applied to every outbound HTTP request (playlist + segment,
     /// sequential + concurrent). Cloned into `PrefetchState` on prefetch init
@@ -179,6 +180,34 @@ pub struct ReqwestSource {
     /// `cancel_tx` would never drop.
     cancel_tx: std::sync::OnceLock<tokio::sync::watch::Sender<bool>>,
     tasks: std::sync::Mutex<Vec<tokio::task::AbortHandle>>,
+}
+
+/// Optional HTTP safeguards, shared by sequential reads and prefetch workers.
+/// Defaults preserve the client's own timeout and perform no extra retries.
+#[cfg(feature = "default-source")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct HttpRequestPolicy {
+    pub request_timeout: Option<std::time::Duration>,
+    /// Additional attempts after the initial request.
+    pub max_retries: u32,
+    pub backoff_base: std::time::Duration,
+    pub backoff_max: std::time::Duration,
+    /// Maximum response body bytes, including playlists and initialization.
+    pub max_resource_bytes: Option<u64>,
+}
+
+#[cfg(feature = "default-source")]
+impl Default for HttpRequestPolicy {
+    fn default() -> Self {
+        Self {
+            request_timeout: None,
+            max_retries: 0,
+            backoff_base: std::time::Duration::from_millis(200),
+            backoff_max: std::time::Duration::from_secs(5),
+            max_resource_bytes: None,
+        }
+    }
 }
 
 #[cfg(feature = "default-source")]
@@ -203,6 +232,7 @@ impl Clone for ReqwestSource {
     fn clone(&self) -> Self {
         Self {
             http: self.http.clone(),
+            policy: self.policy.clone(),
             concurrency: self.concurrency,
             headers: self.headers.clone(),
             // Each clone gets its own (lazily-initialized) prefetch state.
@@ -221,6 +251,7 @@ impl ReqwestSource {
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::new(),
+            policy: HttpRequestPolicy::default(),
             concurrency: 1,
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
@@ -234,6 +265,7 @@ impl ReqwestSource {
     pub fn with_client(http: reqwest::Client) -> Self {
         Self {
             http,
+            policy: HttpRequestPolicy::default(),
             concurrency: 1,
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
@@ -248,6 +280,7 @@ impl ReqwestSource {
     pub fn with_concurrency(concurrency: usize) -> Self {
         Self {
             http: reqwest::Client::new(),
+            policy: HttpRequestPolicy::default(),
             concurrency: concurrency.max(1),
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
@@ -263,6 +296,7 @@ impl ReqwestSource {
     pub fn with_client_and_concurrency(http: reqwest::Client, concurrency: usize) -> Self {
         Self {
             http,
+            policy: HttpRequestPolicy::default(),
             concurrency: concurrency.max(1),
             headers: reqwest::header::HeaderMap::new(),
             state: std::sync::OnceLock::new(),
@@ -284,6 +318,7 @@ impl ReqwestSource {
     pub fn with_headers(headers: reqwest::header::HeaderMap) -> Self {
         Self {
             http: reqwest::Client::new(),
+            policy: HttpRequestPolicy::default(),
             concurrency: 1,
             headers,
             state: std::sync::OnceLock::new(),
@@ -306,6 +341,7 @@ impl ReqwestSource {
     ) -> Self {
         Self {
             http: reqwest::Client::new(),
+            policy: HttpRequestPolicy::default(),
             concurrency: concurrency.max(1),
             headers,
             state: std::sync::OnceLock::new(),
@@ -327,6 +363,15 @@ impl ReqwestSource {
     /// Returns the configured concurrency level (1 = sequential).
     pub fn concurrency(&self) -> usize {
         self.concurrency
+    }
+
+    /// Applies optional timeout, retry and body-size safeguards to every HTTP read.
+    pub fn with_request_policy(mut self, policy: HttpRequestPolicy) -> Self {
+        self.stop_session();
+        self.state.take();
+        self.cancel_tx.take();
+        self.policy = policy;
+        self
     }
 
     /// Returns a reference to the headers applied to every outbound HTTP
@@ -373,25 +418,10 @@ impl Source for ReqwestSource {
                     }
                 }
                 SourceLocation::Url(url) => {
-                    let mut request = self.http.get(url.clone());
-                    if !self.headers.is_empty() {
-                        request = request.headers(self.headers.clone());
-                    }
-                    let response = request
-                        .send()
-                        .await
-                        .map_err(|e| Error::Http(e.to_string()))?;
-                    if !response.status().is_success() {
-                        return Err(Error::Http(format!(
-                            "GET {url} returned status {}",
-                            response.status()
-                        )));
-                    }
-                    let final_url = response.url().clone();
-                    let content = response
-                        .text()
-                        .await
-                        .map_err(|e| Error::Http(e.to_string()))?;
+                    let (bytes, final_url) =
+                        fetch_resource(&self.http, &self.headers, url, None, &self.policy).await?;
+                    let content = String::from_utf8(bytes)
+                        .map_err(|_| Error::invalid("playlist is not UTF-8"))?;
                     TextResource {
                         content,
                         location: SourceLocation::Url(final_url),
@@ -422,7 +452,7 @@ impl Source for ReqwestSource {
                     // Wait for it to become Ready, take the bytes, evict.
                     if let Some(state_ref) = self.state.get() {
                         let state = std::sync::Arc::clone(state_ref);
-                        let key = (url.clone(), range.copied());
+                        let key = (http_cache_url(url), range.copied());
                         // Try the cache first — MutexGuard is dropped before
                         // the await boundary (MutexGuard is !Send).
                         let cached_slot = { state.slots.lock().unwrap().get(&key).cloned() };
@@ -459,6 +489,7 @@ impl Source for ReqwestSource {
                                     // one-shot task).
                                     let http = state.http.clone();
                                     let headers = state.headers.clone();
+                                    let policy = state.policy.clone();
                                     let fetch_url = url.clone();
                                     let fetch_range = range.copied();
                                     let fetch_slot = std::sync::Arc::clone(&slot);
@@ -468,6 +499,7 @@ impl Source for ReqwestSource {
                                             &headers,
                                             &fetch_url,
                                             fetch_range.as_ref(),
+                                            &policy,
                                         )
                                         .await;
                                         let mut s = fetch_slot.state.lock().await;
@@ -491,7 +523,8 @@ impl Source for ReqwestSource {
                     }
                     // Fall through: init segment, URL not in prefetch list,
                     // or concurrency == 1 (state never initialized).
-                    fetch_bytes_with_range(&self.http, &self.headers, url, range).await
+                    fetch_bytes_with_range(&self.http, &self.headers, url, range, &self.policy)
+                        .await
                 }
             }
         })
@@ -616,6 +649,7 @@ impl SourceReader {
             self.source.read_text(location).await
         })
         .await
+        .map_err(|error| error.context(format!("playlist resource {}", safe_location(location))))
     }
 
     pub(crate) async fn read_bytes(
@@ -799,6 +833,13 @@ fn location_key(location: &SourceLocation) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "default-source")]
+fn http_cache_url(url: &Url) -> Url {
+    let mut url = url.clone();
+    url.set_fragment(None);
+    url
+}
+
+#[cfg(feature = "default-source")]
 type SlotKey = (Url, Option<ByteRange>);
 
 #[cfg(feature = "default-source")]
@@ -813,6 +854,7 @@ struct PrefetchState {
     targets: std::sync::Mutex<std::collections::VecDeque<SlotKey>>,
     /// Shared HTTP client (clone is cheap — internally `Arc`).
     http: reqwest::Client,
+    policy: HttpRequestPolicy,
     /// Headers applied to every worker fetch (cloned from `ReqwestSource`).
     /// Workers read this without mutation, so no `Mutex` needed. The
     /// consumer-self-built-slot path also clones this for its one-shot
@@ -879,7 +921,7 @@ impl ReqwestSource {
             .iter()
             .filter_map(|seg| {
                 let seg_url = playlist_url.join(&seg.uri).ok()?;
-                Some((seg_url, seg.byte_range))
+                Some((http_cache_url(&seg_url), seg.byte_range))
             })
             .collect();
         if targets.is_empty() {
@@ -905,6 +947,7 @@ impl ReqwestSource {
                 slots: std::sync::Mutex::new(HashMap::new()),
                 targets: std::sync::Mutex::new(targets),
                 http: self.http.clone(),
+                policy: self.policy.clone(),
                 headers: self.headers.clone(),
                 buffer_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(self.concurrency * 3)),
             })
@@ -990,7 +1033,7 @@ async fn prefetch_worker(
         let result = tokio::select! {
             biased;
             _ = cancel_rx.changed() => return,
-            result = fetch_bytes_with_range(&http, &headers, &url, range.as_ref()) => result,
+            result = fetch_bytes_with_range(&http, &headers, &url, range.as_ref(), &state.policy) => result,
         };
 
         // Store the result and wake any waiting consumers.
@@ -1086,55 +1129,164 @@ async fn fetch_bytes_with_range(
     headers: &reqwest::header::HeaderMap,
     url: &Url,
     range: Option<&ByteRange>,
+    policy: &HttpRequestPolicy,
 ) -> Result<Vec<u8>> {
+    fetch_resource(http, headers, url, range, policy)
+        .await
+        .map(|(bytes, _)| bytes)
+}
+
+/// A URL safe to include in diagnostics. Never expose credentials or signatures.
+pub(crate) fn safe_location(location: &SourceLocation) -> String {
+    match location {
+        SourceLocation::File(path) => path.display().to_string(),
+        SourceLocation::Url(url) => {
+            let mut clean = url.clone();
+            let _ = clean.set_username("");
+            let _ = clean.set_password(None);
+            clean.set_query(None);
+            clean.set_fragment(None);
+            clean.to_string()
+        }
+    }
+}
+
+#[cfg(feature = "default-source")]
+fn validate_content_range(value: &str, range: &ByteRange) -> Result<()> {
+    let invalid = || Error::Http("invalid Content-Range for requested interval".into());
+    let value = value.strip_prefix("bytes ").ok_or_else(invalid)?;
+    let (interval, total) = value.split_once('/').ok_or_else(invalid)?;
+    let (start, end) = interval.split_once('-').ok_or_else(invalid)?;
+    let start = start.parse::<u64>().map_err(|_| invalid())?;
+    let end = end.parse::<u64>().map_err(|_| invalid())?;
+    let expected = range
+        .offset
+        .checked_add(range.length)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(invalid)?;
+    if range.length == 0 || start != range.offset || end != expected {
+        return Err(invalid());
+    }
+    if total != "*" && total.parse::<u64>().map_err(|_| invalid())? <= end {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "default-source")]
+async fn fetch_resource(
+    http: &reqwest::Client,
+    headers: &reqwest::header::HeaderMap,
+    url: &Url,
+    range: Option<&ByteRange>,
+    policy: &HttpRequestPolicy,
+) -> Result<(Vec<u8>, Url)> {
     use reqwest::header::{CONTENT_RANGE, RANGE};
-
-    let mut request = http.get(url.clone());
-    if !headers.is_empty() {
-        request = request.headers(headers.clone());
-    }
-    if let Some(range) = range {
-        let end = range
-            .offset
-            .checked_add(range.length)
-            .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| Error::invalid("HTTP byterange overflows u64"))?;
-        // `header()` uses HeaderMap::insert → replaces any `Range` the
-        // caller may have set in `headers`. Desired: `range` param wins.
-        request = request.header(RANGE, format!("bytes={}-{}", range.offset, end));
-    }
-
-    let response = request
-        .send()
-        .await
-        .map_err(|e| Error::Http(e.to_string()))?;
-    if let Some(range) = range {
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            return Err(Error::Http(format!(
-                "Range request for {url} returned status {} instead of 206",
-                response.status()
-            )));
+    let resource = safe_location(&SourceLocation::Url(url.clone()));
+    let transport = |e: reqwest::Error| {
+        let retryable = e.is_connect() || e.is_timeout();
+        (Error::Http(e.without_url().to_string()), retryable)
+    };
+    let end = range
+        .map(|r| {
+            if r.length == 0 {
+                return Err(Error::invalid("zero length HTTP range"));
+            }
+            r.offset
+                .checked_add(r.length)
+                .and_then(|v| v.checked_sub(1))
+                .ok_or_else(|| Error::invalid("HTTP range overflow"))
+        })
+        .transpose()?;
+    let mut attempt = 0u32;
+    loop {
+        let fetch = async {
+            let mut request = http.get(url.clone()).headers(headers.clone());
+            if let Some(end) = end {
+                request = request.header(RANGE, format!("bytes={}-{end}", range.unwrap().offset));
+            }
+            let mut response = request.send().await.map_err(&transport)?;
+            let status = response.status();
+            if !status.is_success() {
+                let retryable = matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504);
+                return Err((
+                    Error::Http(format!("GET returned status {status}")),
+                    retryable,
+                ));
+            }
+            if let Some(range) = range {
+                if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                    return Err((
+                        Error::Http("Range request requires status 206".into()),
+                        false,
+                    ));
+                }
+                let value = response
+                    .headers()
+                    .get(CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| (Error::Http("missing Content-Range".into()), false))?;
+                validate_content_range(value, range).map_err(|e| (e, false))?;
+            }
+            let limit = match (policy.max_resource_bytes, range.map(|r| r.length)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            if response
+                .content_length()
+                .is_some_and(|n| limit.is_some_and(|max| n > max))
+            {
+                return Err((
+                    Error::Http("response exceeds resource size limit".into()),
+                    false,
+                ));
+            }
+            let final_url = response.url().clone();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(&transport)? {
+                let next = (bytes.len() as u64)
+                    .checked_add(chunk.len() as u64)
+                    .ok_or_else(|| (Error::Http("response size overflow".into()), false))?;
+                if limit.is_some_and(|max| next > max) {
+                    return Err((
+                        Error::Http("response exceeds resource size limit".into()),
+                        false,
+                    ));
+                }
+                bytes
+                    .try_reserve(chunk.len())
+                    .map_err(|_| (Error::Http("response allocation failed".into()), false))?;
+                bytes.extend_from_slice(&chunk);
+            }
+            if range.is_some_and(|r| bytes.len() as u64 != r.length) {
+                return Err((
+                    Error::Http("Range response length does not match requested interval".into()),
+                    false,
+                ));
+            }
+            Ok((bytes, final_url))
+        };
+        let result = if let Some(timeout) = policy.request_timeout {
+            tokio::time::timeout(timeout, fetch)
+                .await
+                .unwrap_or_else(|_| Err((Error::Http("request timed out".into()), true)))
+        } else {
+            fetch.await
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err((error, retryable)) if retryable && attempt < policy.max_retries => {
+                let _ = error;
+                let delay = policy
+                    .backoff_base
+                    .saturating_mul(1u32.checked_shl(attempt).unwrap_or(u32::MAX))
+                    .min(policy.backoff_max);
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+            }
+            Err((error, _)) => return Err(Error::Http(format!("resource {resource}: {error}"))),
         }
-        if response.headers().get(CONTENT_RANGE).is_none() {
-            return Err(Error::Http(format!(
-                "Range request for {url} did not include Content-Range"
-            )));
-        }
-        if range.length == 0 {
-            return Ok(Vec::new());
-        }
-    } else if !response.status().is_success() {
-        return Err(Error::Http(format!(
-            "GET {url} returned status {}",
-            response.status()
-        )));
     }
-
-    Ok(response
-        .bytes()
-        .await
-        .map_err(|e| Error::Http(e.to_string()))?
-        .to_vec())
 }
 
 #[cfg(test)]
@@ -1183,6 +1335,7 @@ mod tests {
                     slots: std::sync::Mutex::new(HashMap::new()),
                     targets: std::sync::Mutex::new(Default::default()),
                     http: reqwest::Client::new(),
+                    policy: HttpRequestPolicy::default(),
                     headers: Default::default(),
                     buffer_sem: Arc::new(tokio::sync::Semaphore::new(1)),
                 });

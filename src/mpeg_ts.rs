@@ -145,9 +145,6 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
         ));
     }
 
-    result
-        .packets
-        .sort_by_key(|packet| (packet.dts_90k, packet.pts_90k));
     Ok(result)
 }
 
@@ -266,12 +263,59 @@ fn section_length(section: &[u8]) -> Result<usize> {
     Ok((((section[1] & 0x0f) as usize) << 8) | section[2] as usize)
 }
 
+fn validate_video_parameters(payload: &[u8], kind: StreamKind, output: &DemuxOutput) -> Result<()> {
+    let mut vps = output.vps.as_deref();
+    let mut sps = output.sps.as_deref();
+    let mut pps = output.pps.as_deref();
+    for nal in avc::nal_units_annex_b(payload) {
+        let nal = nal.data;
+        if nal.is_empty() {
+            continue;
+        }
+        let slot = match kind {
+            StreamKind::Avc => match nal[0] & 0x1f {
+                7 => Some(&mut sps),
+                8 => Some(&mut pps),
+                _ => None,
+            },
+            StreamKind::Hevc => match (nal[0] >> 1) & 0x3f {
+                32 => Some(&mut vps),
+                33 => Some(&mut sps),
+                34 => Some(&mut pps),
+                _ => None,
+            },
+            StreamKind::Aac => None,
+        };
+        if let Some(slot) = slot {
+            if slot.is_some_and(|old| old != nal) {
+                return Err(Error::unsupported("in-band codec parameter set changes"));
+            }
+            *slot = Some(nal);
+        }
+    }
+    Ok(())
+}
+
+fn check_parameter(previous: &Option<Vec<u8>>, current: &Option<Vec<u8>>) -> Result<()> {
+    if let (Some(old), Some(new)) = (previous, current)
+        && old != new
+    {
+        return Err(Error::unsupported("in-band codec parameter set changes"));
+    }
+    Ok(())
+}
+
 fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()> {
     let header = parse_pes_header(&accumulator.data)?;
     let payload = &accumulator.data[header.payload_start..];
+    if !matches!(accumulator.kind, StreamKind::Aac) {
+        validate_video_parameters(payload, accumulator.kind, result)?;
+    }
     match accumulator.kind {
         StreamKind::Avc => {
             let (sps, pps) = avc::extract_sps_pps(payload);
+            check_parameter(&result.sps, &sps)?;
+            check_parameter(&result.pps, &pps)?;
             if result.sps.is_none() {
                 result.sps = sps;
                 if let Some(ref sps) = result.sps {
@@ -288,9 +332,10 @@ fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()
             }
             result.saw_video = true;
             result.packets.push(EncodedPacket {
+                timing: None,
                 kind: StreamKind::Avc,
                 data: payload.to_vec(),
-                pts_90k: header.pts_90k,
+                pts_90k: i128::from(header.pts_90k),
                 dts_90k: header.dts_90k,
                 duration: 0,
                 is_key: avc::contains_idr(payload),
@@ -299,6 +344,9 @@ fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()
         }
         StreamKind::Hevc => {
             let (vps, sps, pps) = hevc::extract_vps_sps_pps(payload);
+            check_parameter(&result.vps, &vps)?;
+            check_parameter(&result.sps, &sps)?;
+            check_parameter(&result.pps, &pps)?;
             if result.vps.is_none() {
                 result.vps = vps;
             }
@@ -318,9 +366,10 @@ fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()
             }
             result.saw_video = true;
             result.packets.push(EncodedPacket {
+                timing: None,
                 kind: StreamKind::Hevc,
                 data: payload.to_vec(),
-                pts_90k: header.pts_90k,
+                pts_90k: i128::from(header.pts_90k),
                 dts_90k: header.dts_90k,
                 duration: 0,
                 is_key: hevc::contains_irap(payload),
@@ -347,15 +396,16 @@ fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()
                     ));
                 }
 
-                let frame_duration_90k = 1024_u64 * 90_000 / u64::from(header_adts.sample_rate);
-                let pts = header.pts_90k + frame_index * frame_duration_90k;
+                let pts = header.pts_90k
+                    + frame_index * 1024 * 90_000 / u64::from(header_adts.sample_rate);
                 let frame_start = offset + header_adts.header_length;
                 let frame_end = offset + header_adts.frame_length;
                 result.saw_audio = true;
                 result.packets.push(EncodedPacket {
+                    timing: None,
                     kind: StreamKind::Aac,
                     data: payload[frame_start..frame_end].to_vec(),
-                    pts_90k: pts,
+                    pts_90k: i128::from(pts),
                     dts_90k: pts,
                     duration: 1024,
                     is_key: true,

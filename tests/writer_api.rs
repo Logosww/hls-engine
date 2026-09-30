@@ -8,6 +8,8 @@
 //! - Streaming semantics: first bytes reach the sink before all segments
 //!   are processed (via `tokio::io::duplex`).
 
+mod common;
+
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -42,8 +44,8 @@ fn temp_dir(name: &str) -> PathBuf {
 /// bytes regardless of which segment is requested.
 fn playlist_with(count: usize) -> String {
     let mut s = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:8\n#EXT-X-MEDIA-SEQUENCE:0\n");
-    for _ in 0..count {
-        s.push_str("#EXTINF:7.0,\nsegment.ts\n");
+    for index in 0..count {
+        s.push_str(&format!("#EXTINF:2.0,\nsegment-{index}.ts\n"));
     }
     s.push_str("#EXT-X-ENDLIST\n");
     s
@@ -72,10 +74,13 @@ impl Source for MockSource {
 
     fn read_bytes<'a>(
         &'a self,
-        _location: &'a SourceLocation,
+        location: &'a SourceLocation,
         _range: Option<&'a ByteRange>,
     ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
-        let bytes = (*self.segment_bytes).clone();
+        let bytes = common::continuous_ts(
+            (*self.segment_bytes).clone(),
+            common::segment_index(location),
+        );
         Box::pin(async move { Ok(bytes) })
     }
 }

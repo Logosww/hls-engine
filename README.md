@@ -36,6 +36,71 @@ of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
 with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
+## v0.4.1 media and HTTP fixes
+
+The legacy `on_progress` callback now publishes committed checkpoints only.
+Batch `Mp4` has no checkpoint; use runtime phase events for batch progress.
+
+Existing entry points, public struct literals and checkpoint schema v1 remain
+compatible. Released v0.3/v0.4 artifacts are covered by recovery tests.
+
+- fMP4 supports multiple `trun` boxes, explicit/moof-relative offsets and run
+  continuation. AVC/HEVC NAL widths 1, 2 and 4 are normalized to four bytes.
+  Stable `avc3/hev1` initialization is accepted; matching in-band parameter sets
+  move to the `avc1/hvc1` sample entry and are removed from samples. Configuration
+  changes fail before the affected fragment is written.
+- Input fMP4 timescales, sample durations and simple unit-rate edit-list offsets
+  are retained. TS timestamps unwrap across the 33-bit boundary before sorting.
+  All output modes use a common decode origin and retain signed composition
+  offsets and audio/video start differences. Reports include every track and the
+  final sample's duration; track durations cover the maximum decode/presentation
+  end in their own timescale.
+- TS video waits for the next segment to determine the previous final frame's
+  duration. At EOF it uses the latest interval, falling back to 3000/90000 seconds
+  when none is available. At most one segment awaits commit; an error preserves
+  earlier committed fragments. This can delay the first write until the second
+  segment arrives. fMP4 with known durations does not require this lookahead.
+- Metadata and unknown HLS tags are ignored; unsupported media semantics still
+  fail. Implicit ranges require the immediately preceding range on the same URI.
+  Initialization caching includes resolved location and range. HTTP ranges check
+  status, exact interval, total-size consistency and actual body length.
+
+Configure HTTP safeguards without changing `TransmuxOptions`:
+
+```rust,no_run
+use hls_transmux::{HttpRequestPolicy, ReqwestSource};
+use std::time::Duration;
+let mut policy = HttpRequestPolicy::default();
+policy.request_timeout = Some(Duration::from_secs(30)); // headers and entire body
+policy.max_retries = 2; // additional attempts; transient transport/status errors
+policy.max_resource_bytes = Some(64 * 1024 * 1024); // each HTTP response
+let source = ReqwestSource::with_concurrency(4).with_request_policy(policy);
+```
+
+Defaults preserve the supplied client's timeout, add no retries and impose no
+size cap. Exponential backoff is capped by `backoff_max`; cancellation interrupts
+reads and backoff. Policies cover playlists, initialization and media, including
+prefetch. Diagnostic URLs omit credentials, query strings and fragments.
+A resource cap is not a total memory budget; measurements and the proposed byte
+budget are in [BENCHMARKS.md](BENCHMARKS.md).
+
+For finer progress, use `TransmuxRuntimeOptions::on_event` with
+`transmux_hls_to_mp4_async_with_runtime`, `transmux_hls_to_writer_async_with_runtime`,
+`transmux_hls_to_mp4_bytes_with_runtime` or native-only
+`finalize_partial_mp4_async_with_runtime`. Each adds a final runtime argument.
+Events distinguish `Downloading`, `Processing`, `Finalizing`, `Completed`.
+Completion follows successful sink flush/file commit and is never emitted on
+failure. Existing checkpoint callbacks retain their commit ordering.
+`downloaded_bytes` counts successful media reads in this invocation, including
+TS lookahead and recovery verification; it excludes init, failed retry traffic
+and bytes downloaded by earlier invocations. Finalize-only recovery reports zero.
+
+Unsupported boundaries: dependent implicit cross-traf offsets, multiple sample
+entries/parameter-set configurations, complex edit lists, decode gaps requiring
+additional edits/runs, encryption, discontinuities, alternate audio and live.
+Pure-track expansion remains roadmap C4. Legacy partial files retain their
+existing media/timescale interpretation; recovery does not rewrite history.
+
 ## Installation
 
 ```toml
@@ -212,7 +277,7 @@ behavior as before for existing callers):
 
 ### Progress callback
 
-After each segment is processed (demux + write), the crate synchronously invokes
+After each streaming segment is committed (demux + write + flush), the crate synchronously invokes
 `on_progress` with current progress and a resume snapshot:
 
 ```rust
@@ -249,7 +314,7 @@ let report = transmux_hls_to_mp4_async(
 | `total_segments`        | `usize`               | Total segments in playlist                               |
 | `completed_segments`    | `usize`               | Segments completed so far                                |
 | `downloaded_bytes`      | `u64`                 | Cumulative segment bytes downloaded (excludes init)      |
-| `bytes_written`         | `u64`                 | Bytes written to disk (always 0 on `Mp4` batch path)     |
+| `bytes_written`         | `u64`                 | Bytes committed to output; batch uses runtime events    |
 | `current_segment_index` | `usize`               | Index of the segment just completed                      |
 | `resume`                | `TransmuxResumeState` | Current resume snapshot; persist on every callback       |
 
@@ -749,7 +814,6 @@ These cases return structured `Error::Unsupported`:
 - Live playlists, `#EXT-X-DISCONTINUITY`
 - Alternate audio groups, multiple video / audio tracks
 - Codecs other than AVC / HEVC / AAC-LC (e.g. MP3, AC-3, E-AC-3, AV1)
-- Output larger than 4 GiB (non-fragmented MP4 uses 32-bit offsets)
 
 ## Design notes
 
@@ -976,7 +1040,7 @@ let _ = transmux_hls_to_mp4_async(
 
 #### 进度回调
 
-每个分片处理完成后（demux + 写盘），crate 同步调用 `on_progress`
+每个流式分片提交完成后（demux + 写入 + flush），crate 同步调用 `on_progress`
 回调，报告当前进度与续传快照：
 
 ```rust
@@ -1013,7 +1077,7 @@ let report = transmux_hls_to_mp4_async(
 | `total_segments`        | `usize`               | playlist 总分片数                       |
 | `completed_segments`    | `usize`               | 已完成分片数                            |
 | `downloaded_bytes`      | `u64`                 | 累计已下载分片字节（不含 init segment） |
-| `bytes_written`         | `u64`                 | 已写盘字节（`Mp4` batch 路径恒为 0）    |
+| `bytes_written`         | `u64`                 | 已提交输出字节；batch 使用 runtime 事件 |
 | `current_segment_index` | `usize`               | 刚完成的分片下标                        |
 | `resume`                | `TransmuxResumeState` | 当前续传快照，app 应在每次回调时持久化  |
 
@@ -1158,6 +1222,46 @@ v0.4 的 Native 收尾及续传校验扫描跳过媒体 payload；经典 MP4 支
 v0.3 的 schema v1 checkpoint 保持兼容。测量与限制见 [BENCHMARKS.md](BENCHMARKS.md)。
 取消为协作式；文件提交以及
 FFmpeg 的 header/trailer 操作完成后才返回。
+
+#### v0.4.1 媒体与 HTTP 修复
+
+旧 `on_progress` 回调仅发布已提交 checkpoint；batch `Mp4` 没有 checkpoint，
+进度请使用 runtime 阶段事件。
+
+现有入口、公开结构完整字面量和 checkpoint schema v1 保持兼容，真实 v0.3/v0.4
+产物加入恢复测试。fMP4 支持多个 trun、显式/moof 相对偏移及 run 连续数据偏移；
+AVC/HEVC 的 1、2、4 字节 NAL 前缀统一为四字节。稳定且初始化完整的 avc3/hev1
+可转换为 avc1/hvc1；相同的 in-band 参数集从 sample 移到初始化声明，配置变化
+在对应 fragment 写入前失败。
+
+保留 fMP4 原始 timescale、duration 和简单的单位速率 edit list 偏移；TS 33 位
+时间戳先解回绕再排序。各输出共用 decode 起点，保留有符号 composition offset
+与音视频起始差。分片报告包含 tracks 和末 sample duration，track duration 使用
+归零后 decode/presentation 终点的最大值，单位为轨道自己的 timescale。
+
+TS 视频用下一分片首帧确定当前末帧 duration，最多保留一个待提交分片，因此首写
+可能等待第二分片。EOF 使用最近帧间隔，无间隔时回退到 3000/90000 秒；网络错误
+保留之前已提交的成果。已知 duration 的 fMP4 不需要该等待。
+
+元数据和未知 HLS 标签忽略；影响媒体语义的未支持功能仍报错。隐式 range 要求
+前一分片是同 URI 的 byte range；init 缓存包含解析后位置与 range。HTTP 校验
+206、Content-Range 精确区间、总长度及实际 body 长度。
+
+通过 `HttpRequestPolicy` 和 `ReqwestSource::with_request_policy` 配置完整请求
+超时、有限重试、指数退避与单响应大小上限，统一覆盖 playlist/init/media 和预取；
+读取与退避均可取消。默认沿用客户端超时、不额外重试、不设大小上限。错误保留
+分类并补充阶段、资源和分片序号，URL 去除凭据、query 和 fragment。单资源限制
+不是总内存预算；测量和后续字节预算设计见 [BENCHMARKS.md](BENCHMARKS.md)。
+
+新增 `TransmuxRuntimeOptions::on_event` 和四类 `*_with_runtime` 入口，最后一个
+参数为 runtime options，事件区分 Downloading/Processing/Finalizing/Completed。
+成功 flush/文件提交后才发 Completed；旧 checkpoint 回调顺序保持不变。
+`downloaded_bytes` 表示本次调用成功读取的媒体字节，包括 TS lookahead 和恢复时
+的首片复核，不含 init、失败重试流量和历史下载。仅收尾恢复为零。
+
+复杂 edit list、依赖跨 traf 隐式偏移、多 sample entry/参数集配置、需要额外 edit/run
+的 decode gap，以及 C4 的加密、discontinuity、alternate audio、live 仍不支持。
+旧 partial 保留其既有时间解释，续传不重写历史媒体。
 
 #### `serde` feature
 
@@ -1501,7 +1605,6 @@ CI 管道包含 `cargo check --target wasm32-unknown-unknown
 - Live playlist、`#EXT-X-DISCONTINUITY`
 - Alternate audio group、多视频 / 多音频 track
 - 非 AVC / HEVC / AAC-LC 的 codec（如 MP3、AC-3、E-AC-3、AV1）
-- 输出超过 4 GiB（非分片 MP4 受 32-bit 偏移限制）
 
 ### 设计说明
 

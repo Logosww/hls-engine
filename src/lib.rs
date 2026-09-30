@@ -88,12 +88,13 @@
 //!   (`ftyp` + `moov` + per-segment `moof` + `mdat`), streaming pipeline.
 //! - [`StreamingMp4`](OutputFormat::StreamingMp4): non-fragmented MP4 via the
 //!   streaming fragmented pipeline + finalization. Downloading is streamed; Native
-//!   finalization still buffers the full media. The temp file is retained on failure.
+//!   finalization scans metadata and copies payload in fixed-size chunks. The temp
+//!   file is retained on failure.
 //!
 //! # Not yet supported
 //!
 //! Encryption (AES-128 / SAMPLE-AES), live playlists, discontinuities, alternate
-//! audio groups, multi-track streams, and non-AVC/HEVC/AAV-LC codecs return a
+//! audio groups, multi-track streams, and non-AVC/HEVC/AAC-LC codecs return a
 //! structured [`Error::Unsupported`] variant.
 
 mod cancel;
@@ -115,14 +116,17 @@ pub use error::{Error, Result};
 pub use resume::{
     CHECKPOINT_SCHEMA_VERSION, CheckpointDurability, TransmuxResumeState, TransmuxStage,
 };
-#[cfg(feature = "default-source")]
-pub use source::ReqwestSource;
 pub use source::{ByteRange, HlsInput, MemorySource, Source, SourceLocation, TextResource};
+#[cfg(feature = "default-source")]
+pub use source::{HttpRequestPolicy, ReqwestSource};
 pub use transmux::{
-    FinalizeBackend, OutputFormat, TransmuxOptions, TransmuxProgress, VariantSelection,
-    transmux_hls_to_mp4_async, transmux_hls_to_mp4_bytes, transmux_hls_to_writer_async,
+    FinalizeBackend, OutputFormat, TransmuxEvent, TransmuxOptions, TransmuxPhase, TransmuxProgress,
+    TransmuxRuntimeOptions, VariantSelection, transmux_hls_to_mp4_async,
+    transmux_hls_to_mp4_async_with_runtime, transmux_hls_to_mp4_bytes,
+    transmux_hls_to_mp4_bytes_with_runtime, transmux_hls_to_writer_async,
+    transmux_hls_to_writer_async_with_runtime,
 };
 pub use types::{Codec, TrackInfo, TrackType, TransmuxReport};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use transmux::finalize_partial_mp4_async;
+pub use transmux::{finalize_partial_mp4_async, finalize_partial_mp4_async_with_runtime};

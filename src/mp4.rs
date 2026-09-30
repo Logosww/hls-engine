@@ -13,7 +13,7 @@ pub(crate) struct Mp4Sample {
     /// File-backed payload; absent for the in-memory APIs.
     pub source: Option<(u64, u32)>,
     pub dts: u64,
-    pub pts: u64,
+    pub pts: i128,
     pub duration: u32,
     pub is_key: bool,
     pub(crate) offset: u64,
@@ -170,6 +170,9 @@ impl Mp4Muxer {
         if self.tracks.is_empty() {
             return Err(Error::muxing("MP4 output requires at least one track"));
         }
+        for track in &mut self.tracks {
+            normalize_sample_timeline(track.samples_mut())?;
+        }
         // Validate before table construction so all timeline additions are safe.
         for track in &self.tracks {
             if track_timescale(track) == 0 {
@@ -194,7 +197,7 @@ impl Mp4Muxer {
                     .ok_or_else(|| Error::muxing("DTS overflow"))?;
                 sample
                     .pts
-                    .checked_add(u64::from(sample.duration))
+                    .checked_add(i128::from(sample.duration))
                     .ok_or_else(|| Error::muxing("PTS overflow"))?;
             }
             presentation_span(track.samples())
@@ -358,7 +361,9 @@ pub(crate) fn make_audio_track(
         return Err(Error::muxing("audio track contains no samples"));
     }
     for sample in &mut samples {
-        sample.duration = 1024;
+        if sample.duration == 0 {
+            sample.duration = 1024;
+        }
     }
 
     Ok(Mp4Track::Audio {
@@ -368,6 +373,28 @@ pub(crate) fn make_audio_track(
         channel_count,
         audio_specific_config,
     })
+}
+
+/// MP4 sample tables and one trun describe a contiguous decode timeline.
+/// Absorb a single rescaling tick; reject gaps instead of silently retiming media.
+pub(crate) fn normalize_sample_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
+    let Some(first) = samples.first() else {
+        return Ok(());
+    };
+    let mut expected = first.dts;
+    for sample in samples {
+        if sample.dts.abs_diff(expected) > 1 {
+            return Err(Error::unsupported(
+                "non-contiguous decode timeline requires unsupported edits or runs",
+            ));
+        }
+        sample.pts += i128::from(expected) - i128::from(sample.dts);
+        sample.dts = expected;
+        expected = expected
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| Error::muxing("sample timeline overflow"))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn assign_delta_durations(samples: &mut [Mp4Sample]) -> Result<()> {
@@ -385,7 +412,9 @@ pub(crate) fn assign_delta_durations(samples: &mut [Mp4Sample]) -> Result<()> {
         } else {
             previous_delta
         };
-        samples[index].duration = duration;
+        if samples[index].duration == 0 {
+            samples[index].duration = duration;
+        }
         previous_delta = duration;
     }
     Ok(())
@@ -393,9 +422,14 @@ pub(crate) fn assign_delta_durations(samples: &mut [Mp4Sample]) -> Result<()> {
 
 fn track_duration(samples: &[Mp4Sample]) -> u64 {
     samples
-        .last()
-        .map(|sample| sample.dts + u64::from(sample.duration))
+        .iter()
+        .map(|sample| {
+            (i128::from(sample.dts) + i128::from(sample.duration))
+                .max(sample.pts + i128::from(sample.duration))
+        })
+        .max()
         .unwrap_or(0)
+        .max(0) as u64
 }
 
 /// Presentation span in the track's timescale: max(PTS + duration) − min(PTS).
@@ -408,17 +442,17 @@ fn presentation_span(samples: &[Mp4Sample]) -> u64 {
     let min_pts = samples.iter().map(|s| s.pts).min().unwrap_or(0);
     let max_end = samples
         .iter()
-        .map(|s| s.pts + u64::from(s.duration))
+        .map(|s| s.pts + i128::from(s.duration))
         .max()
         .unwrap_or(0);
-    max_end.saturating_sub(min_pts)
+    u64::try_from(max_end.saturating_sub(min_pts)).unwrap_or(u64::MAX)
 }
 
 /// Initial PTS of the track in the track's timescale. Used to build an edit
 /// list when the first sample doesn't start at PTS 0 (e.g. non-aligned HLS
 /// segments).
 fn start_offset(samples: &[Mp4Sample]) -> u64 {
-    samples.first().map(|s| s.pts).unwrap_or(0)
+    (samples.iter().map(|s| s.pts).min().unwrap_or(0) + composition_shift(samples)).max(0) as u64
 }
 
 fn ftyp_box(tracks: &[Mp4Track]) -> Vec<u8> {
@@ -471,7 +505,12 @@ fn fragmented_ftyp_box() -> Vec<u8> {
 }
 
 fn moov_box(tracks: &[Mp4Track], chunks_per_track: &[Vec<ChunkMeta>]) -> Result<Vec<u8>> {
-    let movie_timescale = MOVIE_TIMESCALE;
+    let movie_timescale = tracks
+        .iter()
+        .map(track_timescale)
+        .max()
+        .unwrap_or(MOVIE_TIMESCALE)
+        .max(MOVIE_TIMESCALE);
     // Movie duration = max over tracks of (start_offset + presentation_span),
     // all rescaled into the movie timescale. Using PTS span (not DTS-based
     // track_duration) correctly accounts for B-frame composition offsets and
@@ -536,7 +575,16 @@ fn trak_box(
 /// initial PTS gap, followed by the real edit (media_time = 0) for the
 /// presentation span. Per ISO/IEC 14496-12.
 fn edts_box(empty_duration: u64, real_duration: u64) -> Result<Vec<u8>> {
-    let wide = empty_duration.max(real_duration) > u64::from(u32::MAX);
+    edts_box_with_media_time(empty_duration, real_duration, 0)
+}
+
+fn edts_box_with_media_time(
+    empty_duration: u64,
+    real_duration: u64,
+    media_time: i64,
+) -> Result<Vec<u8>> {
+    let wide =
+        empty_duration.max(real_duration) > u64::from(u32::MAX) || media_time > i64::from(i32::MAX);
     let elst = full_box_result(b"elst", u8::from(wide), 0, |out| {
         be_u32(out, 2); // entry_count
         // Empty edit: hold for empty_duration, media_time = -1 (no media).
@@ -551,10 +599,10 @@ fn edts_box(empty_duration: u64, real_duration: u64) -> Result<Vec<u8>> {
         // Real edit: play the media for real_duration starting at media_time 0.
         if wide {
             be_u64(out, real_duration);
-            be_u64(out, 0);
+            be_u64(out, media_time as u64);
         } else {
             be_u32(out, real_duration as u32);
-            be_u32(out, 0);
+            be_i32(out, media_time as i32);
         }
         be_u32(out, 0x0001_0000);
         Ok(())
@@ -590,7 +638,7 @@ fn stbl_box(track: &Mp4Track, chunks: &[ChunkMeta]) -> Result<Vec<u8>> {
     let needs_ctts = track
         .samples()
         .iter()
-        .any(|sample| sample.pts != sample.dts);
+        .any(|sample| sample.pts != i128::from(sample.dts));
     let all_key = track.samples().iter().all(|sample| sample.is_key);
     boxed_result(b"stbl", |out| {
         out.extend_from_slice(&stsd_box(track)?);
@@ -954,14 +1002,23 @@ fn stts_box(samples: &[Mp4Sample]) -> Vec<u8> {
     })
 }
 
+fn composition_shift(samples: &[Mp4Sample]) -> i128 {
+    -samples
+        .iter()
+        .map(|sample| sample.pts - i128::from(sample.dts))
+        .min()
+        .unwrap_or(0)
+        .min(0)
+}
+
 fn ctts_box(samples: &[Mp4Sample]) -> Result<Vec<u8>> {
-    // version 1: composition offsets are signed i32, supporting B-frame
-    // scenarios where PTS < DTS (negative offset).
+    // Version 1 preserves signed composition offsets. The edit list and
+    // cslg account for the decode shift required by reordered frames.
     full_box_result(b"ctts", 1, 0, |out| {
         let offsets: Vec<i32> = samples
             .iter()
             .map(|s| {
-                let cts = i128::from(s.pts) - i128::from(s.dts);
+                let cts = s.pts - i128::from(s.dts);
                 i32::try_from(cts)
                     .map_err(|_| Error::muxing("composition offset exceeds i32 range"))
             })
@@ -982,18 +1039,18 @@ fn ctts_box(samples: &[Mp4Sample]) -> Result<Vec<u8>> {
 fn cslg_box(samples: &[Mp4Sample]) -> Result<Vec<u8>> {
     let min = samples
         .iter()
-        .map(|s| i128::from(s.pts) - i128::from(s.dts))
+        .map(|s| s.pts - i128::from(s.dts))
         .min()
         .unwrap_or(0);
     let max = samples
         .iter()
-        .map(|s| i128::from(s.pts) - i128::from(s.dts))
+        .map(|s| s.pts - i128::from(s.dts))
         .max()
         .unwrap_or(0);
-    let start = samples.iter().map(|s| i128::from(s.pts)).min().unwrap_or(0);
+    let start = samples.iter().map(|s| s.pts).min().unwrap_or(0);
     let end = samples
         .iter()
-        .map(|s| i128::from(s.pts) + i128::from(s.duration))
+        .map(|s| s.pts + i128::from(s.duration))
         .max()
         .unwrap_or(0);
     let values = [(-min).max(0), min, max, start, end];
@@ -1792,7 +1849,7 @@ fn trun_box(samples: &[Mp4Sample], data_offset: u32) -> Result<Vec<u8>> {
             };
             be_u32(out, sample_flags);
             // composition offset (signed, i32 reinterpreted as u32 for wire format)
-            let cts = i128::from(sample.pts) - i128::from(sample.dts);
+            let cts = sample.pts - i128::from(sample.dts);
             let cts = i32::try_from(cts)
                 .map_err(|_| Error::muxing("fragment composition offset exceeds i32"))?;
             be_u32(out, cts as u32);
@@ -1973,6 +2030,7 @@ mod tests {
             audio(vec![file_sample(0, 1), file_sample(96000, 16)], 48000),
             audio(vec![file_sample(48000, 8)], 48000),
         ];
+        tracks[0].samples_mut()[0].duration = 96000;
         let chunks: Vec<_> = tracks.iter().map(split_chunks).collect();
         let base = (ftyp_box(&tracks).len() + moov_box(&tracks, &chunks).unwrap().len() + 8) as u64;
         tracks[0].samples_mut()[0].source = Some((0, (u64::from(u32::MAX) - base - 4) as u32));
@@ -2148,7 +2206,7 @@ mod tests {
             data: vec![1, 2, 3],
             source: None,
             dts,
-            pts,
+            pts: i128::from(pts),
             duration,
             is_key: true,
             offset: 0,

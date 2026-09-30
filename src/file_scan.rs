@@ -8,6 +8,10 @@ pub(crate) struct FileIndex {
     pub samples: Vec<Vec<Mp4Sample>>,
     pub entries: Vec<Vec<TfraEntry>>,
     pub fragments: usize,
+    pub sample_counts: Vec<usize>,
+    pub decode_ends: Vec<u64>,
+    pub presentation_ends: Vec<i128>,
+    pub last_durations: Vec<u32>,
 }
 
 struct Header {
@@ -106,6 +110,10 @@ pub(crate) fn scan<R: Read + Seek>(
         samples: (0..tracks.len()).map(|_| Vec::new()).collect(),
         entries: (0..tracks.len()).map(|_| Vec::new()).collect(),
         fragments: 0,
+        sample_counts: vec![0; tracks.len()],
+        decode_ends: vec![0; tracks.len()],
+        presentation_ends: vec![0; tracks.len()],
+        last_durations: vec![0; tracks.len()],
     };
     while position < limit {
         check()?;
@@ -157,66 +165,81 @@ pub(crate) fn scan<R: Read + Seek>(
             }
             seen.push(ti);
             let track = &tracks[ti];
-            let mut runs = 0;
-            for_each_box(traf, |kind, _| {
-                if kind == b"trun" {
-                    runs += 1;
-                }
-                Ok(())
-            })?;
-            if runs != 1 {
-                return Err(Error::unsupported("recovery requires one trun per traf"));
+            if tfhd.base_data_offset.is_none() && !tfhd.default_base_is_moof {
+                return Err(Error::unsupported("implicit cross-traf base offsets"));
             }
-            let trun_data =
-                find_box(traf, b"trun")?.ok_or_else(|| Error::invalid("missing trun"))?;
-            let run = parse_trun(trun_data, &tfhd, track)?;
             let mut dts = parse_tfdt(
                 find_box(traf, b"tfdt")?.ok_or_else(|| Error::invalid("missing tfdt"))?,
             )?;
+            if result.sample_counts[ti] > 0 && dts < result.decode_ends[ti] {
+                return Err(Error::invalid(
+                    "fragment decode timeline overlaps committed samples",
+                ));
+            }
             let base = tfhd.base_data_offset.unwrap_or(moof.start);
-            let mut offset = base
-                .checked_add_signed(i64::from(run.data_offset))
-                .ok_or_else(|| Error::invalid("sample offset overflow"))?;
+            let mut offset = base;
+            let mut run_number = 0u32;
             let mut indexed_sync = false;
-            for (si, sample) in run.samples.iter().enumerate() {
-                check()?;
-                let end = offset
-                    .checked_add(u64::from(sample.size))
-                    .filter(|&end| offset >= mdat.payload && end <= mdat.end)
-                    .ok_or_else(|| Error::invalid("sample data extends past mdat"))?;
-                let pts = dts
-                    .checked_add_signed(i64::from(sample.composition_offset.unwrap_or(0)))
-                    .ok_or_else(|| Error::invalid("composition timestamp overflow"))?;
-                let is_key =
-                    matches!(track.kind, StreamKind::Aac) || sample.flags & 0x0001_0000 == 0;
-                if is_key && !indexed_sync {
-                    result.entries[ti].push(TfraEntry {
-                        time: dts,
-                        moof_offset: moof.start,
-                        traf_number,
-                        trun_number: 1,
-                        sample_number: u32::try_from(si + 1)
-                            .map_err(|_| Error::invalid("sample count overflow"))?,
-                    });
-                    indexed_sync = true;
+            for_each_box(traf, |kind, data| {
+                if kind != b"trun" {
+                    return Ok(());
                 }
-                if keep_samples {
-                    result.samples[ti].push(Mp4Sample {
-                        data: Vec::new(),
-                        source: Some((offset, sample.size)),
-                        dts,
-                        pts,
-                        duration: sample.duration,
-                        is_key,
-                        offset: 0,
-                    });
+                run_number += 1;
+                let run = parse_trun(data, &tfhd, track)?;
+                if let Some(delta) = run.data_offset {
+                    offset = base
+                        .checked_add_signed(i64::from(delta))
+                        .ok_or_else(|| Error::invalid("sample offset overflow"))?;
                 }
-                dts = dts
-                    .checked_add(u64::from(sample.duration))
-                    .ok_or_else(|| Error::invalid("decode timestamp overflow"))?;
-                pts.checked_add(u64::from(sample.duration))
-                    .ok_or_else(|| Error::invalid("presentation timestamp overflow"))?;
-                offset = end;
+                for (si, sample) in run.samples.iter().enumerate() {
+                    check()?;
+                    let end = offset
+                        .checked_add(u64::from(sample.size))
+                        .filter(|&end| offset >= mdat.payload && end <= mdat.end)
+                        .ok_or_else(|| Error::invalid("sample data extends past mdat"))?;
+                    let pts = i128::from(dts) + i128::from(sample.composition_offset.unwrap_or(0));
+                    let is_key =
+                        matches!(track.kind, StreamKind::Aac) || sample.flags & 0x0001_0000 == 0;
+                    if is_key && !indexed_sync {
+                        result.entries[ti].push(TfraEntry {
+                            time: dts,
+                            moof_offset: moof.start,
+                            traf_number,
+                            trun_number: run_number,
+                            sample_number: u32::try_from(si + 1)
+                                .map_err(|_| Error::invalid("sample count overflow"))?,
+                        });
+                        indexed_sync = true;
+                    }
+                    if keep_samples {
+                        result.samples[ti].push(Mp4Sample {
+                            data: Vec::new(),
+                            source: Some((offset, sample.size)),
+                            dts,
+                            pts,
+                            duration: sample.duration,
+                            is_key,
+                            offset: 0,
+                        });
+                    }
+                    dts = dts
+                        .checked_add(u64::from(sample.duration))
+                        .ok_or_else(|| Error::invalid("decode timestamp overflow"))?;
+                    pts.checked_add(i128::from(sample.duration))
+                        .ok_or_else(|| Error::invalid("presentation timestamp overflow"))?;
+                    offset = end;
+                    result.sample_counts[ti] = result.sample_counts[ti]
+                        .checked_add(1)
+                        .ok_or_else(|| Error::invalid("sample count overflow"))?;
+                    result.decode_ends[ti] = dts;
+                    result.last_durations[ti] = sample.duration;
+                    result.presentation_ends[ti] =
+                        result.presentation_ends[ti].max(pts + i128::from(sample.duration));
+                }
+                Ok(())
+            })?;
+            if run_number == 0 {
+                return Err(Error::invalid("missing trun"));
             }
             Ok(())
         })?;
@@ -246,7 +269,7 @@ mod tests {
                         data: vec![1; 64 * 1024],
                         source: None,
                         dts,
-                        pts: dts,
+                        pts: i128::from(dts),
                         duration: 1024,
                         is_key: true,
                         offset: 0,
@@ -255,7 +278,7 @@ mod tests {
                         data: vec![2; 64 * 1024],
                         source: None,
                         dts: dts + 1024,
-                        pts: dts + 1024,
+                        pts: i128::from(dts) + 1024,
                         duration: 1024,
                         is_key: true,
                         offset: 0,
@@ -441,7 +464,7 @@ mod tests {
             data: vec![0],
             source: None,
             dts,
-            pts: dts,
+            pts: i128::from(dts),
             duration: 1024,
             is_key: true,
             offset: 0,
@@ -507,7 +530,7 @@ mod tests {
                 data: vec![0],
                 source: None,
                 dts: u64::from(i) * 1024,
-                pts: u64::from(i) * 1024,
+                pts: i128::from(i) * 1024,
                 duration: 1024,
                 is_key: true,
                 offset: 0,

@@ -295,6 +295,12 @@ pub(crate) mod avc {
         }
         let length_size_minus_one = data[4] & 0x03;
         let num_sps = (data[5] & 0x1f) as usize;
+        if num_sps > 1 {
+            return Err(Error::unsupported("multiple AVC SPS parameter sets"));
+        }
+        if length_size_minus_one == 2 {
+            return Err(Error::bitstream("reserved AVC NAL prefix width"));
+        }
         if num_sps == 0 {
             return Err(Error::bitstream("avcC contains no SPS"));
         }
@@ -318,6 +324,9 @@ pub(crate) mod avc {
             return Err(Error::bitstream("avcC is missing PPS count"));
         }
         let num_pps = data[offset] as usize;
+        if num_pps > 1 {
+            return Err(Error::unsupported("multiple AVC PPS parameter sets"));
+        }
         offset += 1;
         let mut pps = Vec::new();
         for _ in 0..num_pps {
@@ -670,6 +679,9 @@ pub(crate) mod hevc {
             return Err(Error::bitstream("hvcC box is too short"));
         }
         let length_size_minus_one = data[21] & 0x03;
+        if length_size_minus_one == 2 {
+            return Err(Error::bitstream("reserved HEVC NAL prefix width"));
+        }
         let num_arrays = data[22] as usize;
         let mut vps = None;
         let mut sps = None;
@@ -695,6 +707,15 @@ pub(crate) mod hevc {
                 let nal = data[pos..pos + len].to_vec();
                 pos += len;
                 match nal_type {
+                    NAL_VPS if vps.as_ref().is_some_and(|old| old != &nal) => {
+                        return Err(Error::unsupported("multiple HEVC VPS parameter sets"));
+                    }
+                    NAL_SPS if sps.as_ref().is_some_and(|old| old != &nal) => {
+                        return Err(Error::unsupported("multiple HEVC SPS parameter sets"));
+                    }
+                    NAL_PPS if pps.as_ref().is_some_and(|old| old != &nal) => {
+                        return Err(Error::unsupported("multiple HEVC PPS parameter sets"));
+                    }
                     NAL_VPS if vps.is_none() => vps = Some(nal),
                     NAL_SPS if sps.is_none() => sps = Some(nal),
                     NAL_PPS if pps.is_none() => pps = Some(nal),
@@ -837,4 +858,54 @@ pub(crate) mod hevc {
             assert!(!contains_irap(&non_irap));
         }
     }
+}
+
+/// avc1/hvc1 carry parameter sets in the sample entry. Keep only media NALs
+/// after the demuxer has checked that any in-band sets match initialization.
+pub(crate) fn strip_video_parameters(
+    data: Vec<u8>,
+    kind: crate::types::StreamKind,
+) -> crate::Result<Vec<u8>> {
+    use crate::types::StreamKind;
+    let mut offset = 0usize;
+    let mut parameters = false;
+    let mut kept = Vec::new();
+    while offset < data.len() {
+        if data.len() - offset < 4 {
+            return Err(crate::Error::bitstream("truncated output NAL prefix"));
+        }
+        let length = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let end = offset
+            .checked_add(4)
+            .and_then(|v| v.checked_add(length))
+            .filter(|&v| v <= data.len())
+            .ok_or_else(|| crate::Error::bitstream("truncated output NAL payload"))?;
+        if length == 0 {
+            return Err(crate::Error::bitstream("zero output NAL size"));
+        }
+        let is_parameter = match kind {
+            StreamKind::Avc => matches!(data[offset + 4] & 0x1f, 7 | 8),
+            StreamKind::Hevc => matches!((data[offset + 4] >> 1) & 0x3f, 32..=34),
+            StreamKind::Aac => false,
+        };
+        if is_parameter {
+            parameters = true;
+        } else {
+            kept.push(offset..end);
+        }
+        offset = end;
+    }
+    if !parameters {
+        return Ok(data);
+    }
+    let mut output = Vec::with_capacity(kept.iter().map(|range| range.len()).sum());
+    for range in kept {
+        output.extend_from_slice(&data[range]);
+    }
+    if output.is_empty() {
+        return Err(crate::Error::unsupported(
+            "video sample contains only parameter sets",
+        ));
+    }
+    Ok(output)
 }

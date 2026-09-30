@@ -1,6 +1,6 @@
 [package]
 name = "hls-transmux"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "A small, dependency-light HLS → MP4 transmuxer for Rust (TS/fMP4 in, MP4/CMAF out)."
 license = "MIT"
@@ -36,7 +36,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 # Base tokio for all targets: only features that work on wasm32.
 # Native-only features (fs, net, rt-multi-thread) are added via
 # target-specific dependencies below.
-tokio = { version = "1", default-features = false, features = ["io-util", "macros", "sync", "rt"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "sync", "rt", "time"] }
 url = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

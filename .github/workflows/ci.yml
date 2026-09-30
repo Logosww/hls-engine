@@ -61,5 +61,5 @@ jobs:
       - name: Clippy with FFmpeg backend
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Verify Native media with FFprobe and FFmpeg
-        run: python3 scripts/verify_media.py
+      - name: Verify retained media corpus with FFprobe and FFmpeg
+        run: python3 -u scripts/verify_media.py

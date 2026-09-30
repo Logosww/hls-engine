@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Generate a continuous B-frame HLS input and independently verify Native finalize.
-Run: python3 scripts/verify_media.py (requires ffmpeg, ffprobe, cargo).
+"""Verify the retained media corpus with FFprobe/FFmpeg, without a player.
+Run normally to verify; --generate rebuilds fixtures and their provenance manifest.
+Requires ffmpeg (libx264/libx265), ffprobe, cargo.
 """
+import argparse
+import hashlib
 import json
 import pathlib
 import struct
@@ -14,10 +17,23 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def run(*args):
-    return subprocess.check_output(args, cwd=ROOT, stderr=subprocess.PIPE).decode()
+    result = subprocess.run(args, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        raise RuntimeError(f'{args!r} failed ({result.returncode}):\n{result.stderr.decode()}')
+    return result.stdout.decode()
 
 
 def packets(path):
+    # FFprobe's HLS demuxer repeats the first AAC packet for audio-only TS.
+    # Probe the physical continuous TS bytes instead, preserving all timestamps.
+    if path.suffix == '.m3u8' and '#EXT-X-MAP' not in path.read_text():
+        with tempfile.TemporaryDirectory(prefix='hls-transmux-reference-') as directory:
+            joined = pathlib.Path(directory) / 'reference.ts'
+            with joined.open('wb') as sink:
+                for uri in path.read_text().splitlines():
+                    if uri and not uri.startswith('#'):
+                        sink.write((path.parent / uri).read_bytes())
+            return packets(joined)
     doc = json.loads(run('ffprobe', '-v', 'error', '-show_streams', '-show_packets',
                          '-show_data', '-show_data_hash', 'sha256', '-of', 'json', str(path)))
     streams = {s['index']: s for s in doc['streams']}
@@ -39,8 +55,10 @@ def verify(source, output):
             for field in ('dts', 'pts', 'duration', 'size', 'data_hash'):
                 assert before.get(field) == after.get(field), (kind, field, before.get(field), after.get(field))
         print(f'{kind}: {len(a[kind])} samples, matching DTS/PTS/duration/payload')
-    run('ffmpeg', '-v', 'error', '-xerror', '-i', str(output), '-f', 'null', '-')
-    run('ffmpeg', '-v', 'error', '-xerror', '-ss', '3', '-i', str(output), '-t', '1', '-f', 'null', '-')
+    verify_layout(output, fragmented=False)
+
+
+def verify_layout(output, fragmented):
     with output.open('rb') as f:
         types = []
         while header := f.read(8):
@@ -50,9 +68,16 @@ def verify(source, output):
                 head = 16
             else:
                 head = 8
+            assert size >= head and f.tell() + size - head <= output.stat().st_size
             types.append(kind)
             f.seek(size - head, 1)
-    assert types == [b'ftyp', b'moov', b'mdat'], types
+    if fragmented:
+        assert types[:2] == [b'ftyp', b'moov'], types
+        tail = types[2:-1] if types[-1] == b'mfra' else types[2:]
+        assert len(tail) >= 9 and len(tail) % 3 == 0, types
+        assert all(tail[i:i+3] == [b'styp', b'moof', b'mdat'] for i in range(0, len(tail), 3)), types
+    else:
+        assert types == [b'ftyp', b'moov', b'mdat'], types
 
 
 def payload(packet):
@@ -231,44 +256,195 @@ def rewrite_nal2_and_runs(playlist, width=2):
         path.write_bytes(data)
 
 
+CORPUS = ROOT / 'tests/fixtures/media'
+CASES = [
+    ('ts', 'avc', 'regular'), ('ts', 'avc', 'vfr'), ('ts', 'hevc', 'regular'),
+    ('fmp4', 'avc', 'regular'), ('fmp4', 'avc', 'negative_cts'),
+    ('fmp4', 'avc', 'vfr'), ('fmp4', 'avc', 'offset'),
+    ('fmp4', 'avc', 'nal2_multirun'), ('fmp4', 'avc', 'nal1_multirun'),
+    ('fmp4', 'hevc', 'regular'),
+    ('ts', 'aac', 'audio_only'), ('ts', 'avc', 'video_only'),
+    ('fmp4', 'aac', 'audio_only'), ('fmp4', 'avc', 'video_only'),
+]
+
+
+def decode_and_seek(path):
+    # Fail on decoder errors; exercise every present audio/video stream.
+    run('ffmpeg', '-v', 'error', '-xerror', '-err_detect', 'explode',
+        '-i', str(path), '-map', '0:v?', '-map', '0:a?', '-f', 'null', '-')
+    decoded = json.loads(run('ffprobe', '-v', 'error', '-read_intervals', '3%+1',
+                            '-show_frames', '-of', 'json', str(path)))
+    assert decoded.get('frames'), (path, 'seek returned no frames')
+    run('ffmpeg', '-v', 'error', '-xerror', '-ss', '3', '-i', str(path),
+        '-t', '1', '-map', '0:v?', '-map', '0:a?', '-f', 'null', '-')
+
+
+def reference_tracks(playlist):
+    return {kind: {'codec': rows[0][1]['codec_name'], 'sample_count': len(rows),
+                   'time_base': rows[0][1]['time_base'],
+                   'first_dts': int(rows[0][0]['dts']), 'first_pts': int(rows[0][0]['pts']),
+                   'last_dts': int(rows[-1][0]['dts'])}
+            for kind, rows in packets(playlist).items()}
+
+
+def generate_corpus():
+    CORPUS.mkdir(parents=True, exist_ok=True)
+    manifest = {'schema_version': 1, 'ffmpeg': run('ffmpeg', '-version').splitlines()[0],
+                'ffprobe': run('ffprobe', '-version').splitlines()[0], 'cases': []}
+    for mode, codec, scenario in CASES:
+        name = f'{mode}_{codec}_{scenario}'
+        folder = CORPUS / name
+        folder.mkdir(exist_ok=True)
+        playlist = folder / 'input.m3u8'
+        inputs = []
+        if scenario != 'audio_only':
+            picture = 'color=c=black:size=16x16:rate=30' if scenario == 'nal1_multirun' else 'testsrc2=size=320x180:rate=30'
+            inputs += ['-f', 'lavfi', '-i', picture]
+        if scenario != 'video_only':
+            if scenario == 'offset':
+                inputs += ['-itsoffset', '0.12']
+            inputs += ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000']
+        video = []
+        if scenario != 'audio_only':
+            video = ['-c:v', 'libx264', '-g', '60', '-bf', '2', '-sc_threshold', '0'] if codec == 'avc' else [
+                '-c:v', 'libx265', '-x265-params',
+                'pools=1:frame-threads=1:log-level=error:keyint=60:min-keyint=60:scenecut=0', '-tag:v', 'hev1']
+            video += ['-pix_fmt', 'yuv420p']
+        filtering = ['-vf', "select='not(eq(mod(n,5),0))'", '-fps_mode', 'vfr'] if scenario == 'vfr' else []
+        fragment_options = ['-hls_segment_options', 'movflags=+negative_cts_offsets'] if scenario == 'negative_cts' else []
+        segment_type = 'mpegts' if mode == 'ts' else 'fmp4'
+        mux_options = ['-hls_fmp4_init_filename', 'init.fmp4'] if mode == 'fmp4' else []
+        command = ['ffmpeg', '-y', '-v', 'error', *inputs, '-t', '6', *filtering, *video,
+                   '-c:a', 'aac', '-b:a', '96k', '-f', 'hls', '-hls_time', '2',
+                   '-hls_list_size', '0', '-hls_segment_type', segment_type, *mux_options,
+                   *fragment_options, '-hls_segment_filename', str(folder / ('seg%d.ts' if mode == 'ts' else 'seg%d.m4s')),
+                   str(playlist)]
+        run(*command)
+        if scenario in ('nal1_multirun', 'nal2_multirun'):
+            rewrite_nal2_and_runs(playlist, 1 if scenario == 'nal1_multirun' else 2)
+        # Portable commands and hashes preserve provenance, not encoder bit identity.
+        manifest['cases'].append({
+            'name': name, 'mode': mode, 'codec': codec, 'scenario': scenario,
+            'reference': reference_tracks(playlist),
+            'command': [a.replace(str(CORPUS), '<corpus>') for a in command],
+            'derivation': f'rewrite_nal2_and_runs(width={1 if scenario == "nal1_multirun" else 2})' if 'multirun' in scenario else None,
+            'sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                       for p in sorted(folder.iterdir()) if p.is_file()},
+        })
+    (CORPUS / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+def has_signed_cts(playlist):
+    # FFprobe may shift DTS by the minimum CTS; inspect stored signed trun values.
+    for uri in playlist.read_text().splitlines():
+        if not uri or uri.startswith('#'):
+            continue
+        data = (playlist.parent / uri).read_bytes()
+        for moof, size, kind in boxes(data):
+            if kind != b'moof':
+                continue
+            for traf, size, kind in boxes(data, moof+8, moof+size):
+                if kind != b'traf':
+                    continue
+                for run, size, kind in boxes(data, traf+8, traf+size):
+                    if kind != b'trun':
+                        continue
+                    vf, count = struct.unpack_from('>II', data, run+8)
+                    if vf >> 24 != 1 or not vf & 0x800:
+                        continue
+                    fields = [flag for flag in (0x100, 0x200, 0x400, 0x800) if vf & flag]
+                    header = 16 + (4 if vf & 1 else 0) + (4 if vf & 4 else 0)
+                    assert header + count * len(fields) * 4 == size
+                    for i in range(count):
+                        offset = run + header + (i * len(fields) + fields.index(0x800)) * 4
+                        if struct.unpack_from('>i', data, offset)[0] < 0:
+                            return True
+    return False
+
+
+def verify_source(case, playlist):
+    segments = [line for line in playlist.read_text().splitlines() if line and not line.startswith('#')]
+    assert len(segments) >= 3, (case['name'], 'expected continuous multi-segment media')
+    assert len({hashlib.sha256((playlist.parent / uri).read_bytes()).hexdigest() for uri in segments}) == len(segments)
+    assert reference_tracks(playlist) == case['reference'], (case['name'], 'FFprobe reference drift')
+    rows = packets(playlist)
+    expected = {'audio'} if case['scenario'] == 'audio_only' else {'video'} if case['scenario'] == 'video_only' else {'audio', 'video'}
+    assert rows.keys() == expected, (case['name'], rows.keys())
+    for kind, samples in rows.items():
+        dts = [int(p['dts']) for p, _ in samples]
+        assert all(b > a for a, b in zip(dts, dts[1:])), (case['name'], kind, 'decode timeline reset')
+        if kind == 'video':
+            codec = 'hevc' if case['codec'] == 'hevc' else 'h264'
+            assert all(s['codec_name'] == codec for _, s in samples)
+            assert any(p['pts'] != p['dts'] for p, _ in samples), 'B-frame fixture lost composition offsets'
+            if case['scenario'] == 'vfr':
+                assert len({b - a for a, b in zip(dts, dts[1:])}) > 1, 'VFR fixture became CFR'
+        else:
+            assert all(s['codec_name'] == 'aac' for _, s in samples)
+    if case['scenario'] == 'negative_cts':
+        assert has_signed_cts(playlist), 'negative CTS fixture lost signed trun offsets'
+    if case['scenario'] == 'offset':
+        start = {kind: min(Fraction(p['dts']) * Fraction(s['time_base']) for p, s in samples)
+                 for kind, samples in rows.items()}
+        assert start['audio'] - start['video'] >= Fraction(1, 10), 'audio offset fixture lost its delay'
+    decode_and_seek(playlist)
+
+
+def expected_failure(case, flag):
+    # Pure-track expansion belongs to C4. Freeze the current support boundary.
+    if case['mode'] == 'ts' and case['scenario'] == 'audio_only':
+        return 'MPEG-TS segment does not contain an H.264 or HEVC video stream'
+    if case['mode'] == 'ts' and case['scenario'] == 'video_only':
+        return 'MPEG-TS segment does not contain a Phase 1 AAC audio stream'
+    if flag == '--batch' and case['scenario'] == 'audio_only':
+        return 'H.264 SPS was not found'
+    if flag == '--batch' and case['scenario'] == 'video_only':
+        return 'AAC audio is required for non-fragmented MP4'
+    return None
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--generate', action='store_true', help='regenerate retained corpus before verification')
+    args = parser.parse_args()
+    if args.generate:
+        generate_corpus()
+    manifest = json.loads((CORPUS / 'manifest.json').read_text())
+    assert manifest['schema_version'] == 1
+    assert [(c['mode'], c['codec'], c['scenario']) for c in manifest['cases']] == CASES
     run('cargo', 'build', '--offline', '--example', 'transmux_demo')
+    demo = str(ROOT / 'target/debug/examples/transmux_demo')
+    passed = rejected = 0
     with tempfile.TemporaryDirectory(prefix='hls-transmux-media-') as directory:
         folder = pathlib.Path(directory)
-        cases = [('ts', 'avc', 'regular'), ('ts', 'avc', 'vfr'), ('fmp4', 'avc', 'regular'), ('fmp4', 'avc', 'negative_cts'),
-                 ('fmp4', 'avc', 'vfr'), ('fmp4', 'avc', 'offset'), ('fmp4', 'avc', 'nal2_multirun'), ('fmp4', 'avc', 'nal1_multirun'),
-                 ('fmp4', 'hevc', 'regular')]
-        for mode, codec, scenario in cases:
-            name = f'{mode}_{codec}_{scenario}'
-            playlist = folder / f'input_{name}.m3u8'
-            audio_offset = ['-itsoffset', '0.12'] if scenario == 'offset' else []
-            video = ['-c:v', 'libx264', '-g', '60', '-bf', '2', '-sc_threshold', '0'] if codec == 'avc' else [
-                '-c:v', 'libx265', '-x265-params', 'pools=1:frame-threads=1:log-level=error:keyint=60:min-keyint=60:scenecut=0', '-tag:v', 'hev1']
-            filtering = ['-vf', "select='not(eq(mod(n,5),0))'", '-fps_mode', 'vfr'] if scenario == 'vfr' else []
-            fragment_options = ['-hls_segment_options', 'movflags=+negative_cts_offsets'] if scenario == 'negative_cts' else []
-            picture = 'color=c=black:size=16x16:rate=30' if scenario == 'nal1_multirun' else 'testsrc2=size=320x180:rate=30'
-            run('ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', picture,
-                *audio_offset, '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-t', '6',
-                *filtering, *video, '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k',
-                '-f', 'hls', '-hls_time', '2', '-hls_list_size', '0',
-                '-hls_segment_type', 'mpegts' if mode == 'ts' else 'fmp4', *fragment_options, str(playlist))
-            if scenario in ('nal1_multirun', 'nal2_multirun'):
-                rewrite_nal2_and_runs(playlist, 1 if scenario == 'nal1_multirun' else 2)
-            fragment = folder / f'fragment_{name}.mp4'
-            classic = folder / f'classic_{name}.mp4'
-            batch = folder / f'batch_{name}.mp4'
-            demo = str(ROOT / 'target/debug/examples/transmux_demo')
-            run(demo, str(playlist), str(fragment), '--fragmented')
-            run(demo, str(playlist), str(classic), '--streaming')
-            run(demo, str(playlist), str(batch), '--batch')
-            print(f'Input: {name}')
-            verify_input(playlist, fragment, mode)
-            verify_input(playlist, classic, mode)
-            verify_input(playlist, batch, mode)
-            verify(fragment, classic)
-            verify(fragment, batch)
-            print('Native faststart output decoded and seeked successfully.')
-
+        for case in manifest['cases']:
+            name = case['name']
+            for filename, digest in case['sha256'].items():
+                assert hashlib.sha256((CORPUS / name / filename).read_bytes()).hexdigest() == digest, (name, filename, 'fixture hash mismatch')
+            playlist = CORPUS / name / 'input.m3u8'
+            print(f'Input: {name}', flush=True)
+            verify_source(case, playlist)
+            outputs = []
+            for flag in ('--fragmented', '--streaming', '--batch'):
+                output = folder / f'{name}_{flag[2:]}.mp4'
+                failure = expected_failure(case, flag)
+                if failure:
+                    result = subprocess.run([demo, str(playlist), str(output), flag], cwd=ROOT,
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    assert result.returncode != 0 and failure in result.stderr.decode(), (name, flag, result.stderr.decode())
+                    assert not output.exists() or output.stat().st_size == 0, (name, flag, 'rejected input wrote media')
+                    rejected += 1
+                    print(f'{flag}: expected rejection ({failure})')
+                    continue
+                run(demo, str(playlist), str(output), flag)
+                verify_input(playlist, output, case['mode'])
+                decode_and_seek(output)
+                verify_layout(output, fragmented=flag == '--fragmented')
+                outputs.append(output)
+                if flag != '--fragmented':
+                    verify(outputs[0], output)
+                passed += 1
+    print(f'Verified {len(CASES)} inputs: {passed} successful outputs, {rejected} expected rejections; no player validation.')
 
 
 if __name__ == '__main__':

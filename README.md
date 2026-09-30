@@ -98,6 +98,12 @@ and bytes downloaded by earlier invocations. Finalize-only recovery reports zero
 Unsupported boundaries: dependent implicit cross-traf offsets, multiple sample
 entries/parameter-set configurations, complex edit lists, decode gaps requiring
 additional edits/runs, encryption, discontinuities, alternate audio and live.
+
+The retained [media corpus](tests/fixtures/media/README.md) covers 14 continuous
+FFmpeg inputs, including HEVC, B frames, VFR and pure-track support boundaries.
+Run `cargo test --test media_corpus` for fixture regressions and
+`python3 scripts/verify_media.py` for independent FFprobe/FFmpeg verification.
+
 Pure-track expansion remains roadmap C4. Legacy partial files retain their
 existing media/timescale interpretation; recovery does not rewrite history.
 

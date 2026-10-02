@@ -1205,7 +1205,7 @@ async fn fetch_resource(
             if let Some(end) = end {
                 request = request.header(RANGE, format!("bytes={}-{end}", range.unwrap().offset));
             }
-            let mut response = request.send().await.map_err(&transport)?;
+            let mut response = request.send().await.map_err(transport)?;
             let status = response.status();
             if !status.is_success() {
                 let retryable = matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504);
@@ -1243,7 +1243,7 @@ async fn fetch_resource(
             }
             let final_url = response.url().clone();
             let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(&transport)? {
+            while let Some(chunk) = response.chunk().await.map_err(transport)? {
                 let next = (bytes.len() as u64)
                     .checked_add(chunk.len() as u64)
                     .ok_or_else(|| (Error::Http("response size overflow".into()), false))?;

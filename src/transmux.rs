@@ -160,7 +160,8 @@ pub struct TransmuxOptions {
     /// ([`transmux_hls_to_writer_async`]) honors this flag so callers
     /// targeting a non-seekable streaming sink can set it to `false` to
     /// skip the trailing index (it has little value when the sink cannot
-    /// be seeked from the end).
+    /// be seeked from the end). When disabled, per-fragment random-access
+    /// index entries are neither accumulated nor rebuilt during resume.
     pub write_mfra: bool,
     /// File persistence guarantee at each checkpoint. Writer sinks only flush.
     pub checkpoint_durability: CheckpointDurability,
@@ -1175,7 +1176,13 @@ fn scan_checkpoint<R: std::io::Read + std::io::Seek>(
     check: &dyn Fn() -> Result<()>,
 ) -> Result<(crate::isobmff::FileIndex, Vec<FragmentedTrack>)> {
     state.validate()?;
-    let index = crate::isobmff::scan_file(reader, state.bytes_written, samples, check)?;
+    let index = crate::isobmff::scan_file(
+        reader,
+        state.bytes_written,
+        samples,
+        state.write_mfra,
+        check,
+    )?;
     if index.fragments != state.completed_segments {
         return Err(Error::invalid("checkpoint fragment count mismatch"));
     }
@@ -1357,6 +1364,41 @@ async fn transmux_fragmented_async(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Record random-access metadata only when it will be written at EOF.
+fn record_fragment_index(
+    write_mfra: bool,
+    entries: &mut [Vec<TfraEntry>],
+    samples_per_track: &[Vec<Mp4Sample>],
+    fragment_offset: u64,
+    fragment_bytes: &[u8],
+) -> Result<()> {
+    if !write_mfra {
+        return Ok(());
+    }
+    // The muxer starts each fragment with styp, followed immediately by moof.
+    let styp_size = u32::from_be_bytes(fragment_bytes[..4].try_into().unwrap()) as u64;
+    let mut traf_number = 0;
+    for (track_index, samples) in samples_per_track.iter().enumerate() {
+        if samples.is_empty() {
+            continue;
+        }
+        traf_number += 1;
+        if let Some((sample_index, first)) =
+            samples.iter().enumerate().find(|(_, sample)| sample.is_key)
+        {
+            entries[track_index].push(TfraEntry {
+                time: first.dts,
+                moof_offset: fragment_offset + styp_size,
+                traf_number,
+                trun_number: 1,
+                sample_number: u32::try_from(sample_index + 1)
+                    .map_err(|_| Error::muxing("sync sample index overflow"))?,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// fMP4 streaming transmux core loop shared by the file path entry point
@@ -1606,48 +1648,14 @@ where
                 .max(u64::try_from(ms).map_err(|_| Error::muxing("report duration overflow"))?);
         }
 
-        // Record per-track tfra entries before writing the fragment, using the
-        // current writer offset (pointing at the styp that starts this fragment).
-        // Each fragment begins with an styp box; its size (first 4 bytes) is
-        // the offset of the moof within the fragment.
-        let pre_write_offset = bytes_written;
-        let mut traf_number = 0;
-        let mut new_entries = vec![false; samples_per_track.len()];
-        for (track_index, samples) in samples_per_track.iter().enumerate() {
-            if samples.is_empty() {
-                continue;
-            }
-            traf_number += 1;
-            if let Some((sample_index, first)) =
-                samples.iter().enumerate().find(|(_, sample)| sample.is_key)
-            {
-                tfra_entries_per_track[track_index].push(TfraEntry {
-                    time: first.dts,
-                    moof_offset: 0,
-                    traf_number,
-                    trun_number: 1,
-                    sample_number: u32::try_from(sample_index + 1)
-                        .map_err(|_| Error::muxing("sync sample index overflow"))?,
-                });
-                new_entries[track_index] = true;
-            }
-        }
-
         let fragment_bytes = muxer.write_fragment(&samples_per_track)?;
-        // Each fragment starts with an styp box; its size field (first 4
-        // bytes, big-endian) gives us the moof offset relative to the
-        // fragment start.
-        let styp_size = u32::from_be_bytes(fragment_bytes[0..4].try_into().unwrap()) as u64;
-
-        // Fix up the moof_offset for the entries we just pushed.
-        for track_index in 0..samples_per_track.len() {
-            if new_entries[track_index] {
-                let entry = tfra_entries_per_track[track_index]
-                    .last_mut()
-                    .expect("entry was just pushed");
-                entry.moof_offset = pre_write_offset + styp_size;
-            }
-        }
+        record_fragment_index(
+            write_mfra,
+            &mut tfra_entries_per_track,
+            &samples_per_track,
+            bytes_written,
+            &fragment_bytes,
+        )?;
 
         crate::cancel::wait(hooks.cancel, async {
             writer.write_all(&fragment_bytes).await.map_err(Error::from)
@@ -2455,6 +2463,43 @@ mod tests {
 
     use super::*;
     use crate::hls::VariantStream;
+
+    #[test]
+    fn fragment_index_retention_is_optional() {
+        let sample = Mp4Sample {
+            data: vec![1],
+            source: None,
+            dts: 1024,
+            pts: 1024,
+            duration: 1024,
+            is_key: true,
+            offset: 0,
+        };
+        let mut non_sync = sample.clone();
+        non_sync.is_key = false;
+        // Empty tracks do not get a traf; nonempty tracks without sync samples do.
+        let samples = vec![vec![], vec![non_sync.clone()], vec![non_sync, sample]];
+        let mut entries: Vec<Vec<TfraEntry>> = vec![vec![], vec![], vec![]];
+        for _ in 0..10_000 {
+            record_fragment_index(false, &mut entries, &samples, 100, &24u32.to_be_bytes())
+                .unwrap();
+        }
+        assert!(
+            entries
+                .iter()
+                .all(|track| track.is_empty() && track.capacity() == 0)
+        );
+        record_fragment_index(true, &mut entries, &samples, 100, &24u32.to_be_bytes()).unwrap();
+        assert!(entries[0].is_empty());
+        assert!(entries[1].is_empty());
+        assert_eq!(entries[2].len(), 1);
+        let entry = &entries[2][0];
+        assert_eq!(entry.time, 1024);
+        assert_eq!(entry.moof_offset, 124);
+        assert_eq!(entry.traf_number, 2);
+        assert_eq!(entry.trun_number, 1);
+        assert_eq!(entry.sample_number, 2);
+    }
 
     fn variant(uri: &str, bandwidth: Option<u64>) -> VariantStream {
         VariantStream {

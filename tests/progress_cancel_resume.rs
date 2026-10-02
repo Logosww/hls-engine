@@ -308,16 +308,27 @@ async fn cancel_returns_cancelled_error() {
 
 #[tokio::test]
 async fn resume_produces_identical_output() {
-    let dir = temp_dir("resume");
+    for write_mfra in [false, true] {
+        check_resume_produces_identical_output(write_mfra).await;
+    }
+}
+
+async fn check_resume_produces_identical_output(write_mfra: bool) {
+    let dir = temp_dir(if write_mfra {
+        "resume-indexed"
+    } else {
+        "resume-unindexed"
+    });
     let full_output = dir.join("full.fmp4");
     let resume_output = dir.join("resume.fmp4");
 
-    // (a) Run to completion → C_full (includes mfra).
+    // (a) Run to completion with the selected index policy.
     transmux_hls_to_mp4_async(
         mock_input(3),
         &full_output,
         TransmuxOptions {
             output_format: OutputFormat::FragmentedMp4,
+            write_mfra,
             ..Default::default()
         },
     )
@@ -333,6 +344,7 @@ async fn resume_produces_identical_output() {
 
     let opts = TransmuxOptions {
         output_format: OutputFormat::FragmentedMp4,
+        write_mfra,
         cancel: Some(token),
         on_progress: Some(Arc::new(move |p: TransmuxProgress| {
             *snapshot_cb.lock().unwrap() = Some(p.resume.clone());
@@ -357,11 +369,12 @@ async fn resume_produces_identical_output() {
         "snapshot should record 2 completed segments"
     );
 
-    // (c) Resume from R → C_resumed (omits mfra).
+    // (c) Resume from R with the same index policy.
     let resumed_events: Arc<Mutex<Vec<TransmuxProgress>>> = Arc::new(Mutex::new(Vec::new()));
     let re_cb = resumed_events.clone();
     let opts = TransmuxOptions {
         output_format: OutputFormat::FragmentedMp4,
+        write_mfra,
         resume: Some(r),
         on_progress: Some(Arc::new(move |p: TransmuxProgress| {
             if p.stage != hls_transmux::TransmuxStage::Completed {
@@ -378,9 +391,8 @@ async fn resume_produces_identical_output() {
     // (d) Normalize wall-clock timestamps, then compare byte-for-byte.
     // mvhd/mdhd creation_time and modification_time use SystemTime::now(), so
     // they differ between runs — normalize them to zero before byte comparison.
-    // Both outputs include a complete mfra box: the resumed run rebuilds
-    // historical tfra entries by scanning the existing .partial.mp4's moof
-    // boxes (plan §5.5 enhancement), so the mfra boxes are byte-identical.
+    // When enabled, both outputs include a complete mfra box; otherwise
+    // neither run retains or emits the random-access index.
     let mut c_full_norm = c_full.clone();
     let mut c_resumed_norm = c_resumed.clone();
     normalize_moov_timestamps(&mut c_full_norm);

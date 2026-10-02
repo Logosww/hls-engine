@@ -36,6 +36,13 @@ of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
 with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
+## v0.4.2 streaming index memory fix
+
+Setting `write_mfra=false` now skips per-fragment random-access index retention
+both during streaming and checkpoint recovery. This benefits browser WASM and
+native callers. Default indexed output, public APIs and checkpoint schema v1
+remain compatible; playlist metadata and media buffers still require memory.
+
 ## v0.4.1 media and HTTP fixes
 
 The legacy `on_progress` callback now publishes committed checkpoints only.
@@ -629,9 +636,11 @@ buffer) instead of requiring a file path.
 - **`OutputFormat::StreamingMp4`** returns `Error::InvalidInput` (requires file system
   for temp fMP4 + defrag).
 
-`resume` is only supported for `FragmentedMp4` (sink is not seekable; cannot rebuild
-`tfra` for `Mp4` batch). [`TransmuxOptions::write_mfra`] (default `true`) controls the
-trailing `mfra` box; set `false` for non-seekable HTTP sinks.
+The writer API rejects `resume`; use the file-path API for resumable output.
+[`TransmuxOptions::write_mfra`] (default `true`) controls the
+trailing `mfra` box; set `false` for non-seekable HTTP sinks. This also skips
+per-fragment random-access index accumulation and index reconstruction during
+resume; playlist metadata and media buffers still require memory.
 
 For a simple one-liner that returns classic MP4 bytes, use
 [`transmux_hls_to_mp4_bytes`]:
@@ -1229,6 +1238,12 @@ v0.3 的 schema v1 checkpoint 保持兼容。测量与限制见 [BENCHMARKS.md](
 取消为协作式；文件提交以及
 FFmpeg 的 header/trailer 操作完成后才返回。
 
+#### v0.4.2 流式索引内存修复
+
+设置 `write_mfra=false` 后，流式处理和断点恢复均不再保留逐片段随机访问索引，
+浏览器 WASM 和原生调用方都可受益。默认带索引输出、公共 API 和 checkpoint
+schema v1 保持兼容；播放列表元数据和媒体缓冲仍需占用内存。
+
 #### v0.4.1 媒体与 HTTP 修复
 
 旧 `on_progress` 回调仅发布已提交 checkpoint；batch `Mp4` 没有 checkpoint，
@@ -1420,9 +1435,11 @@ let report = tokio::runtime::Runtime::new()
 - **`OutputFormat::StreamingMp4`** 返回 `Error::InvalidInput`（需要文件系统做临时
   fMP4 + defrag）。
 
-`resume` 仅 `FragmentedMp4` 支持（Mp4 batch 路径 sink 不可 seek，无法重建
-`tfra`）。[`TransmuxOptions::write_mfra`]（默认 `true`）控制末端
+writer API 不支持 `resume`；需要断点恢复时请使用文件路径 API。
+[`TransmuxOptions::write_mfra`]（默认 `true`）控制末端
 `mfra` box：流式 HTTP sink 不可 seek 时可设 `false` 跳过。
+关闭后也不再累积逐片段随机访问索引，断点恢复时不重建这些索引；
+播放列表元数据和媒体缓冲仍需占用内存。
 
 一行便捷函数 [`transmux_hls_to_mp4_bytes`] 直接返回经典 MP4 字节：
 

@@ -80,11 +80,13 @@ fn metadata<R: Read + Seek>(
     Ok(bytes)
 }
 
-/// Never reads media payload. `keep_samples=false` retains only recovery metadata.
+/// Never reads media payload. Sample metadata and random-access index retention
+/// are independent; validation always runs even when both are disabled.
 pub(crate) fn scan<R: Read + Seek>(
     reader: &mut R,
     limit: u64,
     keep_samples: bool,
+    keep_index: bool,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<FileIndex> {
     check()?;
@@ -200,7 +202,7 @@ pub(crate) fn scan<R: Read + Seek>(
                     let pts = i128::from(dts) + i128::from(sample.composition_offset.unwrap_or(0));
                     let is_key =
                         matches!(track.kind, StreamKind::Aac) || sample.flags & 0x0001_0000 == 0;
-                    if is_key && !indexed_sync {
+                    if keep_index && is_key && !indexed_sync {
                         result.entries[ti].push(TfraEntry {
                             time: dts,
                             moof_offset: moof.start,
@@ -339,7 +341,7 @@ mod tests {
             seeks: 0,
         };
         let limit = reader.data.get_ref().len() as u64;
-        let index = scan(&mut reader, limit, true, &|| Ok(())).unwrap();
+        let index = scan(&mut reader, limit, true, true, &|| Ok(())).unwrap();
         assert_eq!(index.fragments, 2);
         assert_eq!(index.samples[0].len(), 4);
         assert_eq!(index.samples[0][3].dts, 3072);
@@ -352,15 +354,42 @@ mod tests {
         assert_eq!(index.entries[0].len(), 2);
         assert!(reader.reads < 2048);
         assert!(reader.seeks > 8);
-        let recovery = scan(&mut reader, limit, false, &|| Ok(())).unwrap();
+        let recovery = scan(&mut reader, limit, false, true, &|| Ok(())).unwrap();
         assert!(recovery.samples[0].is_empty());
+    }
+
+    #[test]
+    fn scanner_can_skip_index_without_losing_recovery_or_sample_metadata() {
+        let data = fixture();
+        let limit = data.len() as u64;
+        let indexed = scan(&mut Cursor::new(&data), limit, true, true, &|| Ok(())).unwrap();
+        for keep_samples in [false, true] {
+            let index = scan(&mut Cursor::new(&data), limit, keep_samples, false, &|| {
+                Ok(())
+            })
+            .unwrap();
+            assert!(
+                index
+                    .entries
+                    .iter()
+                    .all(|track| track.is_empty() && track.capacity() == 0)
+            );
+            assert_eq!(index.fragments, indexed.fragments);
+            assert_eq!(index.sample_counts, indexed.sample_counts);
+            assert_eq!(index.decode_ends, indexed.decode_ends);
+            assert_eq!(index.presentation_ends, indexed.presentation_ends);
+            assert_eq!(index.last_durations, indexed.last_durations);
+            assert_eq!(index.samples[0].len(), if keep_samples { 4 } else { 0 });
+        }
+        // Skipping retention must not skip checkpoint validation.
+        assert!(scan(&mut Cursor::new(&data), limit - 1, false, false, &|| Ok(())).is_err());
     }
 
     #[test]
     fn invalid_boundaries_sequences_and_sample_ranges_are_rejected() {
         let original = fixture();
         for limit in [0, 7, original.len() as u64 - 1, original.len() as u64 + 1] {
-            assert!(scan(&mut Cursor::new(&original), limit, true, &|| Ok(())).is_err());
+            assert!(scan(&mut Cursor::new(&original), limit, true, true, &|| Ok(())).is_err());
         }
         for (tag, relative, value) in [
             (b"mfhd", 8, 99u32),
@@ -371,7 +400,16 @@ mod tests {
             let mut data = original.clone();
             let pos = data.windows(4).position(|w| w == tag).unwrap() + relative;
             data[pos..pos + 4].copy_from_slice(&value.to_be_bytes());
-            assert!(scan(&mut Cursor::new(&data), data.len() as u64, true, &|| Ok(())).is_err());
+            assert!(
+                scan(
+                    &mut Cursor::new(&data),
+                    data.len() as u64,
+                    true,
+                    true,
+                    &|| Ok(())
+                )
+                .is_err()
+            );
         }
     }
 
@@ -386,6 +424,7 @@ mod tests {
                     &mut Cursor::new(appended),
                     data.len() as u64,
                     false,
+                    true,
                     &|| Ok(())
                 )
                 .unwrap()
@@ -403,20 +442,32 @@ mod tests {
         data[..4].copy_from_slice(&1u32.to_be_bytes());
         data.splice(8..8, (size + 8).to_be_bytes());
         assert_eq!(
-            scan(&mut Cursor::new(&data), data.len() as u64, true, &|| Ok(()))
-                .unwrap()
-                .fragments,
+            scan(
+                &mut Cursor::new(&data),
+                data.len() as u64,
+                true,
+                true,
+                &|| Ok(())
+            )
+            .unwrap()
+            .fragments,
             2
         );
         let calls = Cell::new(0);
-        let result = scan(&mut Cursor::new(&data), data.len() as u64, true, &|| {
-            calls.set(calls.get() + 1);
-            if calls.get() > 8 {
-                Err(Error::Cancelled)
-            } else {
-                Ok(())
-            }
-        });
+        let result = scan(
+            &mut Cursor::new(&data),
+            data.len() as u64,
+            true,
+            true,
+            &|| {
+                calls.set(calls.get() + 1);
+                if calls.get() > 8 {
+                    Err(Error::Cancelled)
+                } else {
+                    Ok(())
+                }
+            },
+        );
         assert!(matches!(result, Err(Error::Cancelled)));
         let mut cursor = Cursor::new([
             0, 0, 0, 1, b'm', b'd', b'a', b't', 255, 255, 255, 255, 255, 255, 255, 255,
@@ -486,7 +537,7 @@ mod tests {
             position: 0,
             length: limit,
         };
-        let index = scan(&mut reader, limit, true, &|| Ok(())).unwrap();
+        let index = scan(&mut reader, limit, true, true, &|| Ok(())).unwrap();
         assert_eq!(index.fragments, 2);
         assert_eq!(index.samples[0][0].source.unwrap().1, u32::MAX);
         assert!(index.samples[0][1].source.unwrap().0 > u64::from(u32::MAX));
@@ -550,7 +601,7 @@ mod tests {
         drop(file);
         let mut input = File::open(&source).unwrap();
         let started = Instant::now();
-        let index = scan(&mut input, limit, true, &|| Ok(())).unwrap();
+        let index = scan(&mut input, limit, true, true, &|| Ok(())).unwrap();
         let scan_seconds = started.elapsed().as_secs_f64();
         let tracks = super::super::file_tracks(&index.init)
             .unwrap()

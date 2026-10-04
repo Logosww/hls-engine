@@ -786,6 +786,7 @@ fn parse_traf(
             output.packets.push(EncodedPacket {
                 kind: track.kind,
                 timing: Some(crate::types::PacketTiming {
+                    edit_offset: track.timeline_offset,
                     timescale: track.timescale,
                     dts: i128::from(dts) + track.timeline_offset,
                     pts: pts + track.timeline_offset,

@@ -44,6 +44,15 @@ jobs:
       - name: Check wasm32 compilation
         run: cargo check --target wasm32-unknown-unknown --no-default-features
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Execute WASM session contracts
+        run: |
+          cargo build --target wasm32-unknown-unknown --no-default-features --example wasm_session
+          node scripts/test_wasm_session.mjs
+
       - name: Verify publish package
         if: matrix.os == 'ubuntu-latest'
         run: cargo publish --dry-run
@@ -63,3 +72,6 @@ jobs:
 
       - name: Verify retained media corpus with FFprobe and FFmpeg
         run: python3 -u scripts/verify_media.py
+
+      - name: Verify dual-input packets and both finalize backends
+        run: python3 -u scripts/verify_multi_input.py --ffmpeg

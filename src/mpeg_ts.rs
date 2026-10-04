@@ -79,6 +79,10 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
                 let parsed = parse_pmt(payload)?;
                 streams = parsed;
                 validate_streams(&streams)?;
+                result.saw_video |= streams
+                    .values()
+                    .any(|kind| matches!(kind, StreamKind::Avc | StreamKind::Hevc));
+                result.saw_audio |= streams.values().any(|kind| matches!(kind, StreamKind::Aac));
             }
             continue;
         }
@@ -134,14 +138,9 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
         flush_pes(accumulator, &mut result)?;
     }
 
-    if !result.saw_video {
+    if !result.saw_video && !result.saw_audio {
         return Err(Error::unsupported(
-            "MPEG-TS segment does not contain an H.264 or HEVC video stream",
-        ));
-    }
-    if !result.saw_audio {
-        return Err(Error::unsupported(
-            "MPEG-TS segment does not contain a Phase 1 AAC audio stream",
+            "MPEG-TS contains no supported media track",
         ));
     }
 

@@ -93,8 +93,8 @@
 //!
 //! # Not yet supported
 //!
-//! Encryption (AES-128 / SAMPLE-AES), live playlists, discontinuities, alternate
-//! audio groups, multi-track streams, and non-AVC/HEVC/AAC-LC codecs return a
+//! Encryption (AES-128 / SAMPLE-AES), live playlists, discontinuities, automatic alternate
+//! audio selection, multi-track containers, and non-AVC/HEVC/AAC-LC codecs return a
 //! structured [`Error::Unsupported`] variant.
 
 mod cancel;
@@ -130,3 +130,6 @@ pub use types::{Codec, TrackInfo, TrackType, TransmuxReport};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use transmux::{finalize_partial_mp4_async, finalize_partial_mp4_async_with_runtime};
+
+pub use source::SourceSessionOptions;
+pub use transmux::session::*;

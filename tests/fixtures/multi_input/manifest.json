@@ -1,0 +1,83 @@
+[
+  {
+    "mode": "ts",
+    "command": [
+      "ffmpeg",
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=880:sample_rate=44100",
+      "-t",
+      "7.3",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "64k",
+      "-f",
+      "hls",
+      "-hls_time",
+      "1.3",
+      "-hls_list_size",
+      "0",
+      "-hls_segment_type",
+      "mpegts",
+      "-hls_segment_filename",
+      "<repo>/tests/fixtures/multi_input/ts/seg%d.ts",
+      "<repo>/tests/fixtures/multi_input/ts/input.m3u8"
+    ],
+    "sha256": {
+      "seg2.ts": "13c3b680c3111cd61510d92106ff5febcbe4c23901f8869facc7a5f80cffb183",
+      "seg3.ts": "06f7965f8647997744a4798111aafd2658ce6ef2d9413d310de4b87f8b18775a",
+      "seg4.ts": "cf7a9c637be7510b66b9176a7f5ef0d76df37d40597a501ef74d2a01e026f25b",
+      "seg0.ts": "f800091c99ae5a980dfd3b0e1433b30c8c94677b4f00a58c2bfe049fff251cf0",
+      "seg1.ts": "061de687fab875b4688dda10cae29fa452559e9f18ecd6d7ae040664f3734676",
+      "seg5.ts": "c5935a96a9e8affe9970f98d78a64464986fd1499061602f8b237491969bc2c8",
+      "input.m3u8": "b91836600ce3474902f141298ddcd8d7040ad99eb2871b2983ea45f83ad78cbc"
+    }
+  },
+  {
+    "mode": "fmp4",
+    "command": [
+      "ffmpeg",
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=880:sample_rate=44100",
+      "-t",
+      "7.3",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "64k",
+      "-f",
+      "hls",
+      "-hls_time",
+      "1.3",
+      "-hls_list_size",
+      "0",
+      "-hls_segment_type",
+      "fmp4",
+      "-hls_fmp4_init_filename",
+      "init.fmp4",
+      "-hls_segment_filename",
+      "<repo>/tests/fixtures/multi_input/fmp4/seg%d.m4s",
+      "<repo>/tests/fixtures/multi_input/fmp4/input.m3u8"
+    ],
+    "sha256": {
+      "init.fmp4": "5dd5422fe0a20bff6a7898ae37b5460dade0ef5cf45d7e64f65a6850512334ae",
+      "seg5.m4s": "ba0677054fcb30d9919aa021cbbe0cf7367cda4a7dc22fa353ce1df993396890",
+      "seg4.m4s": "1131b923c7d6077cee1a2f02a4fefaddc76794f798a68a626af653aab4a9ff60",
+      "seg3.m4s": "b547f086dc40cf455d1a71536ab10f4bc144f83a7ad9f72d1f648be3e2b0239a",
+      "seg2.m4s": "361b4ff23379ec7bd5aea64d3d3551842246fad6e4fe445be9e15cc80cad18e3",
+      "seg0.m4s": "a3cccc1686e8a14748f9e65b36d4f64f5413f6d102e75aaf7bb23144e75587b9",
+      "seg1.m4s": "6ef9a1e02291abc0f54f941989f9e84210a3562e60393217152a9afb35777cdf",
+      "input.m3u8": "13f73076dbb584155244a6641d3f370647f5a9d789539f5424a67fad08e49b57"
+    }
+  }
+]

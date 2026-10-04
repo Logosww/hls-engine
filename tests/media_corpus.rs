@@ -4,7 +4,7 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use hls_transmux::{
-    Codec, Error, HlsInput, MemorySource, OutputFormat, SourceLocation, TrackType, TransmuxOptions,
+    Codec, HlsInput, MemorySource, OutputFormat, SourceLocation, TrackType, TransmuxOptions,
     transmux_hls_to_mp4_async,
 };
 use sha2::{Digest, Sha256};
@@ -59,31 +59,6 @@ async fn retained_media_matches_external_reference_and_support_boundaries() {
                 },
             )
             .await;
-            let scenario = case["scenario"].as_str().unwrap();
-            let pure = matches!(scenario, "audio_only" | "video_only");
-            if pure && case["mode"] == "ts" {
-                let error = result.unwrap_err();
-                assert!(matches!(error, Error::Unsupported(_)), "{name}: {error}");
-                assert!(error.to_string().contains(if scenario == "audio_only" {
-                    "does not contain an H.264 or HEVC video stream"
-                } else {
-                    "does not contain a Phase 1 AAC audio stream"
-                }));
-                assert!(fs::metadata(&output).map_or(true, |metadata| metadata.len() == 0));
-                continue;
-            }
-            if pure && format == OutputFormat::Mp4 {
-                let error = result.unwrap_err();
-                if scenario == "audio_only" {
-                    assert!(matches!(error, Error::Bitstream(_)), "{name}: {error}");
-                    assert!(error.to_string().contains("H.264 SPS was not found"));
-                } else {
-                    assert!(matches!(error, Error::Unsupported(_)), "{name}: {error}");
-                    assert!(error.to_string().contains("AAC audio is required"));
-                }
-                assert!(fs::metadata(&output).map_or(true, |metadata| metadata.len() == 0));
-                continue;
-            }
             let report = result.unwrap_or_else(|error| panic!("{name}/{format:?}: {error}"));
             let reference = case["reference"].as_object().unwrap();
             assert_eq!(report.segment_count, segments, "{name}");

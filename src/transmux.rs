@@ -1,3 +1,4 @@
+pub(crate) mod session;
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use crate::hls::{HlsPlaylist, MasterPlaylist, MediaPlaylist, parse_hls_playlist_
 use crate::isobmff::demux_isobmff;
 use crate::mp4::{
     FragmentedMp4Muxer, FragmentedTrack, Mp4Muxer, Mp4Sample, TfraEntry, assign_delta_durations,
-    make_audio_track, make_hevc_video_track, make_video_track, mfra_box,
+    mfra_box,
 };
 use crate::mpeg_ts::demux_ts;
 use crate::resume::{
@@ -2355,12 +2356,12 @@ fn mux_collected_packets_checked(
     let PacketCollector {
         packets,
         config,
-        vps,
-        sps,
-        pps,
-        audio_specific_config,
-        sample_rate,
-        channel_count,
+        vps: _,
+        sps: _,
+        pps: _,
+        audio_specific_config: _,
+        sample_rate: _,
+        channel_count: _,
     } = collector;
 
     if packets.is_empty() {
@@ -2374,63 +2375,38 @@ fn mux_collected_packets_checked(
         .map(|packet| packet.dts_90k)
         .min()
         .ok_or_else(|| Error::invalid("HLS playlist did not produce any encoded packets"))?;
-    let sample_rate = sample_rate
-        .ok_or_else(|| Error::unsupported("AAC audio is required for non-fragmented MP4"))?;
-    let channel_count = channel_count
-        .ok_or_else(|| Error::unsupported("AAC audio is required for non-fragmented MP4"))?;
-
+    let config = config.ok_or_else(|| Error::invalid("missing track configuration"))?;
+    let tracks = build_fragmented_tracks(&config)?;
     let origin = packets
         .iter()
         .filter_map(|p| p.timing)
         .min_by(|a, b| (a.dts * i128::from(b.timescale)).cmp(&(b.dts * i128::from(a.timescale))))
         .map(|t| (t.dts, t.timescale));
-    let video_timescale = config
-        .as_ref()
-        .and_then(|c| c.video_timescale)
-        .unwrap_or(90_000);
-    let audio_timescale = config
-        .as_ref()
-        .and_then(|c| c.audio_timescale)
-        .unwrap_or(sample_rate);
-    let mut video_samples = Vec::new();
-    let mut audio_samples = Vec::new();
+    let layout = TrackLayout::from_tracks(&tracks);
+    let mut samples: Vec<Vec<Mp4Sample>> = tracks.iter().map(|_| Vec::new()).collect();
     for packet in packets {
         check()?;
-        if matches!(packet.kind, StreamKind::Aac) {
-            audio_samples.push(packet_sample(packet, audio_timescale, base_dts, origin)?);
+        let index = if matches!(packet.kind, StreamKind::Aac) {
+            layout.audio_index
         } else {
-            video_samples.push(packet_sample(packet, video_timescale, base_dts, origin)?);
+            layout.video_index
         }
+        .ok_or_else(|| Error::invalid("packet has no configured track"))?;
+        samples[index].push(packet_sample(
+            packet,
+            tracks[index].timescale,
+            base_dts,
+            origin,
+        )?);
     }
-
-    let audio_specific_config = audio_specific_config
-        .ok_or_else(|| Error::bitstream("AAC AudioSpecificConfig was not found"))?;
-
-    let video_track = if let Some(vps) = vps {
-        let sps = sps.ok_or_else(|| Error::bitstream("HEVC SPS was not found"))?;
-        let pps = pps.ok_or_else(|| Error::bitstream("HEVC PPS was not found"))?;
-        make_hevc_video_track(video_samples, &vps, &sps, &pps)?
-    } else {
-        let sps = sps.ok_or_else(|| Error::bitstream("H.264 SPS was not found"))?;
-        let pps = pps.ok_or_else(|| Error::bitstream("H.264 PPS was not found"))?;
-        make_video_track(video_samples, &sps, &pps)?
-    };
-
-    let mut tracks = vec![
-        video_track,
-        make_audio_track(
-            audio_samples,
-            sample_rate,
-            channel_count,
-            audio_specific_config,
-        )?,
-    ];
-    if let crate::mp4::Mp4Track::Video { timescale, .. } = &mut tracks[0] {
-        *timescale = video_timescale;
+    if let Some(index) = layout.video_index {
+        assign_delta_durations(&mut samples[index])?;
     }
-    if let crate::mp4::Mp4Track::Audio { timescale, .. } = &mut tracks[1] {
-        *timescale = audio_timescale;
-    }
+    let tracks = tracks
+        .into_iter()
+        .zip(samples)
+        .map(|(t, s)| t.into_classic(s))
+        .collect();
     let (mp4, track_infos) = Mp4Muxer::new(tracks).write_checked(check)?;
 
     let duration = track_infos
@@ -2650,6 +2626,7 @@ mod tests {
     fn native_timescale_duration_and_negative_cts_survive_conversion() {
         let mut input = packet(StreamKind::Avc, 0, 0);
         input.timing = Some(crate::types::PacketTiming {
+            edit_offset: 0,
             timescale: 12800,
             dts: 101,
             pts: 99,

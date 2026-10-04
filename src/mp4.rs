@@ -307,76 +307,6 @@ fn mdat_header(payload: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub(crate) fn make_video_track(
-    mut raw_samples: Vec<Mp4Sample>,
-    sps: &[u8],
-    pps: &[u8],
-) -> Result<Mp4Track> {
-    if raw_samples.is_empty() {
-        return Err(Error::muxing("video track contains no samples"));
-    }
-    let info = avc::parse_sps(sps)?;
-    let avcc = avc::avcc(sps, pps)?;
-    assign_delta_durations(&mut raw_samples)?;
-
-    Ok(Mp4Track::Video {
-        samples: raw_samples,
-        timescale: 90_000,
-        width: info.width,
-        height: info.height,
-        codec: VideoCodec::Avc { avcc },
-    })
-}
-
-pub(crate) fn make_hevc_video_track(
-    mut raw_samples: Vec<Mp4Sample>,
-    vps: &[u8],
-    sps: &[u8],
-    pps: &[u8],
-) -> Result<Mp4Track> {
-    use crate::codecs::hevc;
-    if raw_samples.is_empty() {
-        return Err(Error::muxing("video track contains no samples"));
-    }
-    let info = hevc::parse_sps(sps)?;
-    let hvcc = hevc::hvcc(vps, sps, pps)?;
-    assign_delta_durations(&mut raw_samples)?;
-
-    Ok(Mp4Track::Video {
-        samples: raw_samples,
-        timescale: 90_000,
-        width: info.width,
-        height: info.height,
-        codec: VideoCodec::Hevc { hvcc },
-    })
-}
-
-pub(crate) fn make_audio_track(
-    mut samples: Vec<Mp4Sample>,
-    sample_rate: u32,
-    channel_count: u8,
-    audio_specific_config: Vec<u8>,
-) -> Result<Mp4Track> {
-    if samples.is_empty() {
-        return Err(Error::muxing("audio track contains no samples"));
-    }
-    for sample in &mut samples {
-        if sample.duration == 0 {
-            sample.duration = 1024;
-        }
-    }
-
-    Ok(Mp4Track::Audio {
-        samples,
-        timescale: sample_rate,
-        sample_rate,
-        channel_count,
-        audio_specific_config,
-    })
-}
-
-/// MP4 sample tables and one trun describe a contiguous decode timeline.
-/// Absorb a single rescaling tick; reject gaps instead of silently retiming media.
 pub(crate) fn normalize_sample_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
     let Some(first) = samples.first() else {
         return Ok(());
@@ -1334,7 +1264,6 @@ pub(crate) enum FragmentedTrackKind {
 }
 
 impl FragmentedTrack {
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_classic(self, samples: Vec<Mp4Sample>) -> Mp4Track {
         match self.kind {
             FragmentedTrackKind::Video {

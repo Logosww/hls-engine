@@ -391,16 +391,8 @@ def verify_source(case, playlist):
 
 
 def expected_failure(case, flag):
-    # Pure-track expansion belongs to C4. Freeze the current support boundary.
-    if case['mode'] == 'ts' and case['scenario'] == 'audio_only':
-        return 'MPEG-TS segment does not contain an H.264 or HEVC video stream'
-    if case['mode'] == 'ts' and case['scenario'] == 'video_only':
-        return 'MPEG-TS segment does not contain a Phase 1 AAC audio stream'
-    if flag == '--batch' and case['scenario'] == 'audio_only':
-        return 'H.264 SPS was not found'
-    if flag == '--batch' and case['scenario'] == 'video_only':
-        return 'AAC audio is required for non-fragmented MP4'
     return None
+
 
 
 def main():

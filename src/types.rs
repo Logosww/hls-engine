@@ -61,6 +61,7 @@ pub(crate) enum StreamKind {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PacketTiming {
+    pub edit_offset: i128,
     pub timescale: u32,
     pub dts: i128,
     pub pts: i128,

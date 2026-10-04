@@ -124,3 +124,26 @@ CTS, VFR, delayed audio, one/two-byte multi-run AVC fMP4; HEVC fMP4. Each compar
 input directly against fragmented, Native and batch output (counts, rational timing
 within one destination tick, normalized NAL/AAC payload), followed by FFmpeg decoding
 and seeking. Released v0.4.0 checkpoint fixtures complement the v0.3.0 fixtures.
+
+## v0.5.0 prepared-session bounds
+
+New sessions disable autonomous Reqwest prefetch. The scheduler issues at most
+`min(max_in_flight_reads, input_count)` reads, default two in total. Each input
+holds at most a current and one lookahead segment during normal execution;
+preparation retains up to `max_probe_segments_per_input` segments (default two).
+A blocked writer prevents new reads. Demuxed samples, normalized NAL copies and
+one assembled fragment add a constant number of segment-sized buffers. This is
+a segment-count bound, not a strict byte bound or a total process-memory claim.
+
+Playlist metadata grows with segment count. Classic bytes output retains the
+samples and final result. Native file finalize keeps per-sample metadata plus
+a 1 MiB payload copy buffer. `write_mfra=false` (new default only) retains no
+per-fragment random-access entries; enabling it adds O(fragment count) entries.
+Custom Sources own their read-time allocations and must respect demand-driven
+session settings, stop/drop semantics and configured resource caps.
+
+`tests/prepared_session.rs` compares short and long synthetic operations with
+both mfra settings, records downloaded-minus-processed segment windows and
+maximum pending write size, and uses controlled Source futures to measure active
+reads and verify cancellation/drop cleanup. It does not substitute RSS for
+these lifecycle and queue assertions.

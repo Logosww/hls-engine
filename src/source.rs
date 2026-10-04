@@ -56,6 +56,21 @@ pub struct TextResource {
     pub location: SourceLocation,
 }
 
+/// Settings for an isolated operation-owned resource reader.
+#[derive(Debug, Clone, Default)]
+pub struct SourceSessionOptions {
+    pub(crate) demand_driven: bool,
+    pub(crate) max_resource_bytes: Option<u64>,
+}
+impl SourceSessionOptions {
+    pub fn demand_driven(&self) -> bool {
+        self.demand_driven
+    }
+    pub fn max_resource_bytes(&self) -> Option<u64> {
+        self.max_resource_bytes
+    }
+}
+
 /// Abstracts how the transmuxer reads playlists and segment bytes.
 ///
 /// The crate ships a built-in reqwest-backed implementation (`ReqwestSource`,
@@ -68,6 +83,17 @@ pub struct TextResource {
 /// The trait uses boxed futures (no `async-trait` dependency) so it is
 /// object-safe and can be used as `Arc<dyn Source>`.
 pub trait Source: Send + Sync + std::fmt::Debug {
+    /// Creates an isolated session. Demand-driven sessions must not perform
+    /// autonomous prefetch. Dropping read futures must stop visible effects.
+    /// Implementations allocating whole resources must enforce the optional
+    /// byte limit themselves during reads; the caller also checks the result.
+    fn create_session_with_options(
+        &self,
+        _options: &SourceSessionOptions,
+    ) -> Option<Arc<dyn Source>> {
+        self.create_session()
+    }
+
     /// Creates an isolated task session. Returning `None` uses this source
     /// directly. Custom sources owning background work should return a session
     /// whose Drop stops that work; sessions must not cancel other tasks.
@@ -391,6 +417,25 @@ impl Drop for ReqwestSource {
 
 #[cfg(feature = "default-source")]
 impl Source for ReqwestSource {
+    fn create_session_with_options(
+        &self,
+        options: &SourceSessionOptions,
+    ) -> Option<Arc<dyn Source>> {
+        let mut session = self.clone();
+        if options.demand_driven {
+            session.concurrency = 1;
+        }
+        if let Some(limit) = options.max_resource_bytes {
+            session.policy.max_resource_bytes = Some(
+                session
+                    .policy
+                    .max_resource_bytes
+                    .map_or(limit, |old| old.min(limit)),
+            );
+        }
+        Some(Arc::new(session))
+    }
+
     fn create_session(&self) -> Option<Arc<dyn Source>> {
         Some(Arc::new(self.clone()))
     }

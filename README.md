@@ -36,6 +36,41 @@ of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
 with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
+## v0.5.0 prepared sessions and pure tracks
+
+`prepare_hls(HlsInputs::new(primary).with_audio(audio), PrepareOptions::default())`
+accepts selected VOD media playlists. Inspect `session.info().timeline()` before
+output, then consume the session with `into_mp4_bytes()`, `write_to(&mut writer)`
+or native `write_to_file(path, FileOutputOptions::default())`.
+
+- TS/fMP4 in either combination, AVC/HEVC video and one selected AAC-LC track.
+  External audio replaces embedded audio; no language/master selection is performed.
+- Independent video-only and audio-only inputs also work through legacy APIs.
+- Shared exact decode origin, retained track offsets, TS wrap handling and signed CTS.
+- Demand-driven reads: at most two concurrent reads by default, current plus one
+  lookahead segment per input, one pending output fragment. No autonomous prefetch
+  while a prepared session is idle or a writer is blocked. Limits depend on segment
+  size; bytes output and native finalize sample indexes still grow with duration.
+- New events and structured `SessionError` context have no checkpoint. Legacy APIs,
+  exhaustive error matches and checkpoint schema v1 are unchanged. Prepared sessions
+  do not support resume; new sessions default to `write_mfra=false`.
+- The same fixture contracts execute in native Rust and actual WASM/Node.
+
+See [prepared sessions](PREPARED_SESSIONS.md) for API examples, timestamp
+mapping, resource bounds and lifecycle rules. Run `python3 scripts/verify_multi_input.py
+--ffmpeg` for independent selected-payload/timestamp checks across output modes.
+
+### v0.5.0 双路合流与纯轨输出
+
+新增 prepared session：先有界探测并取得精确时间映射，再选择 MP4 bytes、fMP4
+writer 或 native 文件输出。支持 TS/fMP4 混合输入；外置 AAC 替换主路内嵌音频，
+保留音画偏移和各轨完整尾部。单独纯视频、纯音频也支持所有现有输出格式。
+选轨策略和 WebVTT 解析仍由 SDK 负责。
+
+新进度不带 checkpoint，错误提供输入角色和分片上下文；旧 API 与 schema v1
+保持兼容。新接口不支持续传，默认关闭 mfra；原有接口默认值不变。媒体缓冲按
+并发数与分片数限制，不是严格字节预算。详见[接入文档](PREPARED_SESSIONS.md)。
+
 ## v0.4.2 streaming index memory fix
 
 Setting `write_mfra=false` now skips per-fragment random-access index retention
@@ -104,21 +139,21 @@ and bytes downloaded by earlier invocations. Finalize-only recovery reports zero
 
 Unsupported boundaries: dependent implicit cross-traf offsets, multiple sample
 entries/parameter-set configurations, complex edit lists, decode gaps requiring
-additional edits/runs, encryption, discontinuities, alternate audio and live.
+additional edits/runs, encryption, discontinuities, automatic alternate-audio selection and live.
 
 The retained [media corpus](tests/fixtures/media/README.md) covers 14 continuous
 FFmpeg inputs, including HEVC, B frames, VFR and pure-track support boundaries.
 Run `cargo test --test media_corpus` for fixture regressions and
 `python3 scripts/verify_media.py` for independent FFprobe/FFmpeg verification.
 
-Pure-track expansion remains roadmap C4. Legacy partial files retain their
+Pure-track output is supported in v0.5.0. Legacy partial files retain their
 existing media/timescale interpretation; recovery does not rewrite history.
 
 ## Installation
 
 ```toml
 [dependencies]
-hls-transmux = "0.4"
+hls-transmux = "0.5"
 ```
 
 The `default-source` feature is enabled by default (built-in reqwest-backed HTTP
@@ -126,7 +161,7 @@ client). To drop reqwest entirely and supply your own HTTP reader:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", default-features = false }
+hls-transmux = { version = "0.5", default-features = false }
 ```
 
 Optionally enable `ffmpeg-finalize` to remux via ffmpeg (through `ffmpeg-next`)
@@ -135,7 +170,7 @@ FFmpeg 9 shared libraries and pkg-config on the system:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.5", features = ["ffmpeg-finalize"] }
 ```
 
 Optionally enable `serde` to derive `Serialize`/`Deserialize` for
@@ -143,7 +178,7 @@ Optionally enable `serde` to derive `Serialize`/`Deserialize` for
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", features = ["serde"] }
+hls-transmux = { version = "0.5", features = ["serde"] }
 ```
 
 ## Custom Source
@@ -491,7 +526,7 @@ Enable `serde` to derive `Serialize`/`Deserialize` on `TransmuxResumeState`:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", features = ["serde"] }
+hls-transmux = { version = "0.5", features = ["serde"] }
 ```
 
 ```rust
@@ -732,7 +767,7 @@ in-browser HLS → MP4 transmuxing without file system or network dependencies.
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", default-features = false }
+hls-transmux = { version = "0.5", default-features = false }
 ```
 
 `default-features = false` drops `reqwest` (which requires `tokio/net` and is
@@ -883,7 +918,7 @@ MP4，**不解码、不编码、不转码**。
 
 ```toml
 [dependencies]
-hls-transmux = "0.4"
+hls-transmux = "0.5"
 ```
 
 默认启用 `default-source` feature（内置 reqwest-backed HTTP
@@ -891,7 +926,7 @@ hls-transmux = "0.4"
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", default-features = false }
+hls-transmux = { version = "0.5", default-features = false }
 ```
 
 可选启用 `ffmpeg-finalize` feature，在 `StreamingMp4` finalization 阶段用
@@ -900,7 +935,7 @@ ffmpeg（via `ffmpeg-next`）做 remux，替代自研 defrag 路径。需要系�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.5", features = ["ffmpeg-finalize"] }
 ```
 
 可选启用 `serde` feature，为 `TransmuxResumeState` 派生
@@ -908,7 +943,7 @@ hls-transmux = { version = "0.4", features = ["ffmpeg-finalize"] }
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", features = ["serde"] }
+hls-transmux = { version = "0.5", features = ["serde"] }
 ```
 
 ### 自定义 Source
@@ -1281,7 +1316,7 @@ TS 视频用下一分片首帧确定当前末帧 duration，最多保留一个�
 的首片复核，不含 init、失败重试流量和历史下载。仅收尾恢复为零。
 
 复杂 edit list、依赖跨 traf 隐式偏移、多 sample entry/参数集配置、需要额外 edit/run
-的 decode gap，以及 C4 的加密、discontinuity、alternate audio、live 仍不支持。
+的 decode gap，以及 C4 的加密、discontinuity、自动音轨选择、live 仍不支持。
 旧 partial 保留其既有时间解释，续传不重写历史媒体。
 
 #### `serde` feature
@@ -1291,7 +1326,7 @@ TS 视频用下一分片首帧确定当前末帧 duration，最多保留一个�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", features = ["serde"] }
+hls-transmux = { version = "0.5", features = ["serde"] }
 ```
 
 ```rust
@@ -1532,7 +1567,7 @@ pump.await.ok();
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.4", default-features = false }
+hls-transmux = { version = "0.5", default-features = false }
 ```
 
 `default-features = false` 移除 `reqwest`（需要 `tokio/net`，与 `wasm32-unknown-unknown`
@@ -1626,7 +1661,7 @@ CI 管道包含 `cargo check --target wasm32-unknown-unknown
 
 - 加密：AES-128 / SAMPLE-AE
 - Live playlist、`#EXT-X-DISCONTINUITY`
-- Alternate audio group、多视频 / 多音频 track
+- 自动选择 alternate audio group、多视频 / 多音频 track（已选外置音轨可用 prepared API）
 - 非 AVC / HEVC / AAC-LC 的 codec（如 MP3、AC-3、E-AC-3、AV1）
 
 ### 设计说明

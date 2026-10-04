@@ -18,15 +18,12 @@ repository's MIT license and contain no downloaded third-party media.
 | `fmp4_avc_nal2_multirun` | avc3, two-byte NAL lengths, multiple trun | pass / pass / pass |
 | `fmp4_avc_nal1_multirun` | avc3, one-byte NAL lengths, multiple trun | pass / pass / pass |
 | `fmp4_hevc_regular` | External HEVC/AAC fMP4, hev1 | pass / pass / pass |
-| `ts_aac_audio_only` | Pure AAC TS | reject / reject / reject |
-| `ts_avc_video_only` | Pure AVC TS | reject / reject / reject |
-| `fmp4_aac_audio_only` | Pure AAC fMP4 | pass / pass / reject |
-| `fmp4_avc_video_only` | Pure AVC fMP4 | pass / pass / reject |
+| `ts_aac_audio_only` | Pure AAC TS | pass / pass / pass |
+| `ts_avc_video_only` | Pure AVC TS | pass / pass / pass |
+| `fmp4_aac_audio_only` | Pure AAC fMP4 | pass / pass / pass |
+| `fmp4_avc_video_only` | Pure AVC fMP4 | pass / pass / pass |
 
-Pure-track cases freeze the current C4 boundary: rejected operations must return
-an expected diagnostic and write no media to the target (a zero-byte fragmented
-target is allowed). They do not claim pure TS/batch support. Failed streaming
-runs may retain a partial file under the existing recovery contract.
+Pure-track cases are supported in all three modes starting in v0.5.0.
 
 `manifest.json` contains the generator's FFmpeg/FFprobe versions, portable command
 arguments, derived-fixture transformations, SHA-256 hashes of every input file,
@@ -55,8 +52,7 @@ The external check asserts segment uniqueness, monotonic input DTS, track types,
 codec selection, B-frame/VFR/signed-offset/audio-delay properties; compares packet
 counts, DTS/PTS and duration within one output tick and normalized NAL/AAC content;
 checks faststart or fragmented top-level layouts; decodes and seeks every present
-track. The current suite expects 34 successful outputs and eight explicit
-rejections. Inputs are decoded and seeked even when the crate rejects them.
+track. The current suite expects 42 successful outputs.
 The FFmpeg CI job runs this retained corpus through the existing script entry.
 No target player is required or invoked.
 

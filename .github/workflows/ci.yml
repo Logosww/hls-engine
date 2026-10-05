@@ -109,5 +109,8 @@ jobs:
       - name: Verify keyed prepared output packets and decodes
         run: python3 scripts/verify_keyed.py --ffmpeg
 
+      - name: Verify keyed B-frame tails against independent clear decodes
+        run: python3 -u scripts/verify_keyed_decode.py
+
       - name: Verify native keyed SDK example
         run: python3 scripts/verify_keyed_examples.py

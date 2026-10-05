@@ -38,6 +38,15 @@ of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
 with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
+## v0.6.1 B-frame presentation fix
+
+Classic MP4 edit lists now select the complete media-local presentation interval,
+preserving the HEVC/AVC B-frame tail in bytes and native file output. Signed CTS,
+initial audio/video offsets and audio tails are retained. The regression gate
+compares every decoded frame against independently generated clear inputs for
+clear/AES-128 TS/fMP4 across all three keyed output APIs.
+See [the verification record](docs/release-0.6.1.md).
+
 ## v0.6.0 typed playlists and keyed prepared sessions
 
 Version 0.6.0 extends the existing `hls-transmux` crate. The package name, Rust

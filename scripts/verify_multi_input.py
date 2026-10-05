@@ -6,7 +6,7 @@ import json
 import pathlib
 import tempfile
 from fractions import Fraction
-from verify_media import ROOT, packets, normalized_payload, run, decode_and_seek
+from verify_media import ROOT, packets, normalized_payload, run, decode_and_seek, frame_hashes
 
 CORPUS = ROOT / 'tests/fixtures/media'
 EXTRA = ROOT / 'tests/fixtures/multi_input'
@@ -46,6 +46,7 @@ def verify(video, audio, output, vm, am):
                 duration = (int(rows[i+1][0]['dts']) - int(p['dts'])) * Fraction(s['time_base'])
             assert abs(int(q['duration']) * tick - duration) <= tick, (kind, i, 'duration')
     decode_and_seek(output)
+    assert frame_hashes(output) == frame_hashes(video), (output.name, 'decoded video tail differs')
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

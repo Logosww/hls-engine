@@ -268,6 +268,17 @@ CASES = [
 ]
 
 
+def frame_hashes(path, kind='video'):
+    """Decode every frame with normal edits and without frame-rate duplication."""
+    args = ['ffmpeg', '-v', 'error', '-xerror', '-i', str(path),
+            '-map', '0:v:0' if kind == 'video' else '0:a:0']
+    if kind == 'video':
+        args += ['-fps_mode', 'passthrough']
+    args += ['-f', 'framemd5', '-']
+    return [line.rsplit(',', 1)[-1].strip() for line in run(*args).splitlines()
+            if line and not line.startswith('#')]
+
+
 def decode_and_seek(path):
     # Fail on decoder errors; exercise every present audio/video stream.
     run('ffmpeg', '-v', 'error', '-xerror', '-err_detect', 'explode',

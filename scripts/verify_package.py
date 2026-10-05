@@ -37,6 +37,8 @@ def main():
         'docs/aes-resources.md', 'docs/keyed-sessions.md', 'docs/keyed-contracts.md',
         'docs/keyed-wasm.md', 'docs/prepared-sessions.md', 'docs/benchmarks.md',
         'docs/release-0.6.0.md', 'docs/release-0.6.0-evidence.json',
+        'docs/release-0.6.1.md', 'examples/keyed_decode_export.rs',
+        'scripts/verify_keyed_decode.py',
         'docs/runtime-tests.md', 'docs/writer-streaming-api.md', 'examples/keyed_export.rs', 'examples/keyed_demo.rs', 'examples/keyed_wasm.rs',
         'scripts/test_keyed_wasm.mjs',
     }

@@ -1,8 +1,8 @@
 # Documentation
 
 The [root README](../README.md) is the introduction and quick start for the
-`hls-transmux` crate. Version 0.6.0 is an update to that same crate; its release
-verification record is [release-0.6.0.md](release-0.6.0.md).
+`hls-transmux` crate. Version 0.6.1 fixes classic MP4 B-frame presentation;
+its verification record is [release-0.6.1.md](release-0.6.1.md).
 
 ## Choose an entry point
 
@@ -22,6 +22,7 @@ verification record is [release-0.6.0.md](release-0.6.0.md).
 ## Verification
 
 - [Native/Node/Chrome runtime regression](runtime-tests.md)
+- [v0.6.1 B-frame fix verification](release-0.6.1.md)
 - [v0.6.0 verification record](release-0.6.0.md)
 - [Machine-readable v0.6.0 evidence](release-0.6.0-evidence.json)
 

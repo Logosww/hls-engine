@@ -92,3 +92,11 @@ comparison (only MP4 creation/modification timestamps excluded), native file tes
 actual Node/Chrome WASM with asynchronous providers and a non-Send short writer,
 and FFprobe packet/payload/timing plus FFmpeg decode/seek checks. This integration
 does not implement live, sample encryption, subtitles or multi-track selection.
+
+Run `python3 scripts/verify_keyed_decode.py` for the Issue #1 regression gate.
+It generates local HEVC/AVC B-frame inputs with FFmpeg, encrypts complete TS/fMP4
+resources (including MAPs) with OpenSSL, and compares every decoded video/audio
+frame against the independent clear input across bytes, file and writer APIs.
+It also checks signed CTS, delayed audio, the longer audio tail and packet timing.
+Normal edit-list handling is required; successful decoding and sample counts alone
+do not establish that every displayed frame survived.

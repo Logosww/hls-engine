@@ -490,11 +490,19 @@ fn trak_box(
 
     boxed_result(b"trak", |out| {
         out.extend_from_slice(&tkhd_box(track, track_id, tkhd_duration)?);
-        // elst is only needed when the first sample's PTS > 0 (e.g. an HLS
-        // segment that doesn't start at PTS 0). The standard "empty edit +
-        // real edit" pair shifts the movie timeline past the initial gap.
+        // Keep the initial movie offset, but select the actual presentation
+        // interval in media-local time. stts starts decoding at zero, so the
+        // first DTS must be subtracted from the minimum PTS. A real edit from
+        // zero with only `span_movie` duration would cut off the B-frame tail.
         if offset_movie > 0 {
-            out.extend_from_slice(&edts_box(offset_movie, span_movie)?);
+            let media_time = track.samples().iter().map(|s| s.pts).min().unwrap_or(0)
+                - i128::from(track.samples().first().map_or(0, |s| s.dts));
+            out.extend_from_slice(&edts_box(
+                offset_movie,
+                span_movie,
+                i64::try_from(media_time)
+                    .map_err(|_| Error::muxing("edit media time exceeds i64"))?,
+            )?);
         }
         out.extend_from_slice(&mdia_box(track, span, chunks)?);
         Ok(())
@@ -502,19 +510,11 @@ fn trak_box(
 }
 
 /// Edit list box. Two entries: an empty edit (media_time = -1) covering the
-/// initial PTS gap, followed by the real edit (media_time = 0) for the
-/// presentation span. Per ISO/IEC 14496-12.
-fn edts_box(empty_duration: u64, real_duration: u64) -> Result<Vec<u8>> {
-    edts_box_with_media_time(empty_duration, real_duration, 0)
-}
-
-fn edts_box_with_media_time(
-    empty_duration: u64,
-    real_duration: u64,
-    media_time: i64,
-) -> Result<Vec<u8>> {
-    let wide =
-        empty_duration.max(real_duration) > u64::from(u32::MAX) || media_time > i64::from(i32::MAX);
+/// initial PTS gap, followed by the real edit for the presentation span.
+/// Durations use the movie timescale; media_time uses the track timescale.
+fn edts_box(empty_duration: u64, real_duration: u64, media_time: i64) -> Result<Vec<u8>> {
+    let wide = empty_duration.max(real_duration) > u64::from(u32::MAX)
+        || i32::try_from(media_time).is_err();
     let elst = full_box_result(b"elst", u8::from(wide), 0, |out| {
         be_u32(out, 2); // entry_count
         // Empty edit: hold for empty_duration, media_time = -1 (no media).
@@ -526,7 +526,7 @@ fn edts_box_with_media_time(
             be_i32(out, -1);
         }
         be_u32(out, 0x0001_0000); // media_rate 1.0
-        // Real edit: play the media for real_duration starting at media_time 0.
+        // Real edit: play the selected presentation interval.
         if wide {
             be_u64(out, real_duration);
             be_u64(out, media_time as u64);
@@ -1862,6 +1862,87 @@ mod tests {
     }
 
     #[test]
+    fn edit_selects_entire_reordered_presentation_interval() {
+        // Positive CTS, signed CTS, and a delayed track. Movie and media
+        // timescales deliberately differ to catch accidental unit mixing.
+        for (first_dts, pts) in [
+            (0, [200, 500, 300, 400]),
+            (0, [0, 300, 100, 200]),
+            (700, [900, 1200, 1000, 1100]),
+        ] {
+            let samples: Vec<_> = pts
+                .into_iter()
+                .enumerate()
+                .map(|(i, pts)| sample(first_dts + i as u64 * 100, pts, 100))
+                .collect();
+            let track = Mp4Track::Video {
+                samples,
+                timescale: 1000,
+                width: 160,
+                height: 90,
+                codec: VideoCodec::Hevc { hvcc: vec![1] },
+            };
+            let bytes = trak_box(&track, 1, 10_000, &split_chunks(&track)).unwrap();
+            let elst = bytes.windows(4).position(|w| w == b"elst").unwrap();
+            assert_eq!(bytes[elst + 4], 0);
+            let u32_at = |n| u32::from_be_bytes(bytes[elst + n..elst + n + 4].try_into().unwrap());
+            assert_eq!(u32_at(8), 2);
+            assert_eq!(u32_at(12), start_offset(track.samples()) as u32 * 10);
+            assert_eq!(u32_at(16), u32::MAX); // empty edit
+            let duration = u32_at(24) / 10;
+            let media_time = i128::from(u32_at(28));
+            let local_start = i128::from(*pts.iter().min().unwrap() - first_dts);
+            assert_eq!(media_time, local_start);
+            assert_eq!(duration, 400);
+            for s in track.samples() {
+                let local_pts = s.pts - i128::from(first_dts);
+                assert!(local_pts >= media_time);
+                assert!(local_pts + i128::from(s.duration) <= media_time + i128::from(duration));
+            }
+            let ctts = ctts_box(track.samples()).unwrap();
+            assert_eq!(ctts[8], 1);
+            let (entries, remainder) = ctts[16..].as_chunks::<8>();
+            assert!(remainder.is_empty());
+            let offsets: Vec<_> = entries
+                .iter()
+                .flat_map(|entry| {
+                    let count = u32::from_be_bytes(entry[..4].try_into().unwrap());
+                    let offset = i32::from_be_bytes(entry[4..].try_into().unwrap());
+                    std::iter::repeat_n(i128::from(offset), count as usize)
+                })
+                .collect();
+            assert_eq!(
+                offsets,
+                track
+                    .samples()
+                    .iter()
+                    .map(|s| s.pts - i128::from(s.dts))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn edit_media_time_uses_signed_version_boundaries() {
+        for media_time in [
+            i64::from(i32::MIN) - 1,
+            i64::from(i32::MIN),
+            i64::from(i32::MAX),
+            i64::from(i32::MAX) + 1,
+        ] {
+            let bytes = edts_box(100, 400, media_time).unwrap();
+            let wide = i32::try_from(media_time).is_err();
+            assert_eq!(bytes[16], u8::from(wide));
+            let actual = if wide {
+                i64::from_be_bytes(bytes[52..60].try_into().unwrap())
+            } else {
+                i64::from(i32::from_be_bytes(bytes[40..44].try_into().unwrap()))
+            };
+            assert_eq!(actual, media_time);
+        }
+    }
+
+    #[test]
     fn wide_offsets_mdat_and_duration_boundaries() {
         for offset in [
             u64::from(u32::MAX) - 1,
@@ -1912,7 +1993,7 @@ mod tests {
             assert_eq!(mvhd_box(1000, duration, 1).unwrap()[8], version);
             assert_eq!(tkhd_box(&track, 1, duration).unwrap()[8], version);
             assert_eq!(mdhd_box(48000, duration).unwrap()[8], version);
-            let edits = edts_box(duration, duration).unwrap();
+            let edits = edts_box(duration, duration, 0).unwrap();
             assert_eq!(edits[16], version);
         }
         assert!(rescale(u64::MAX, 1, 1000).is_err());

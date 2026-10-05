@@ -26,7 +26,7 @@ def generate():
                          'sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in folder.iterdir()}})
     (EXTRA / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
-def verify(video, audio, output, vm, am):
+def verify(video, audio, output, vm, am, origin_tolerance=0):
     selected = {'video': packets(video)['video'], 'audio': packets(audio)['audio']}
     actual = packets(output)
     assert actual.keys() == selected.keys()
@@ -39,7 +39,7 @@ def verify(video, audio, output, vm, am):
             for field in ('dts', 'pts'):
                 expected = int(p[field]) * Fraction(s['time_base']) - origin
                 found = int(q[field]) * tick
-                assert abs(expected - found) <= tick, (output.name, kind, i, field, expected, found, tick)
+                assert abs(expected - found) <= tick + origin_tolerance, (output.name, kind, i, field, expected, found, tick)
             assert normalized_payload(p, s, mode) == normalized_payload(q, t, 'fmp4'), (kind, i, 'payload')
             duration = int(p['duration']) * Fraction(s['time_base'])
             if kind == 'video' and mode == 'ts' and i + 1 < len(rows):

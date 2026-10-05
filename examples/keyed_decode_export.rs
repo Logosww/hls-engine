@@ -1,6 +1,9 @@
-//! Export all keyed output APIs for scripts/verify_keyed_decode.py.
+//! Export keyed output APIs, optionally with external audio, for media regressions.
 use hls_transmux::{crypto::key::*, playlist::*, *};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 struct Provider;
 impl KeyProvider for Provider {
@@ -25,32 +28,16 @@ async fn main() -> Result<()> {
     let input = PathBuf::from(&args[0]);
     let output = PathBuf::from(&args[1]);
     std::fs::create_dir_all(&output)?;
-    let text = std::fs::read_to_string(input.join("media.m3u8"))?;
-    let mut source = MemorySource::new();
-    for entry in std::fs::read_dir(&input)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            source = source.segment(
-                format!(
-                    "https://fixture.invalid/{}",
-                    entry.file_name().to_string_lossy()
-                ),
-                std::fs::read(entry.path())?,
-            );
+    let modes: &[&str] = if args.len() > 2 {
+        &["bytes", "file", "stream", "stream-indexed"]
+    } else {
+        &["bytes", "file", "stream"]
+    };
+    for &mode in modes {
+        let mut inputs = KeyedInputs::new(load(&input, "primary")?);
+        if let Some(audio) = args.get(2) {
+            inputs = inputs.with_audio(load(Path::new(audio), "audio")?);
         }
-    }
-    let source = Arc::new(source);
-    for mode in ["bytes", "file", "stream"] {
-        let snapshot = parse_playlist_snapshot(
-            &TextResource {
-                content: text.clone(),
-                location: SourceLocation::Url(
-                    "https://fixture.invalid/media.m3u8".parse().unwrap(),
-                ),
-            },
-            PlaylistContext::new(InputId::new("primary").unwrap(), 0),
-        )
-        .unwrap();
         let keys = KeySession::new(
             "decode-test",
             "isolated",
@@ -60,9 +47,9 @@ async fn main() -> Result<()> {
         )
         .unwrap();
         let session = prepare_hls_with_keys(
-            KeyedInputs::new(KeyedInput::new(snapshot, source.clone())),
+            inputs,
             keys,
-            KeyedPrepareOptions::default(),
+            KeyedPrepareOptions::default().with_write_mfra(mode == "stream-indexed"),
         )
         .await
         .unwrap();
@@ -83,4 +70,34 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn load(input: &Path, role: &str) -> Result<KeyedInput> {
+    let text = std::fs::read_to_string(input.join("media.m3u8"))?;
+    let mut source = MemorySource::new();
+    for entry in std::fs::read_dir(input)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            source = source.segment(
+                format!(
+                    "https://fixture.invalid/{role}/{}",
+                    entry.file_name().to_string_lossy()
+                ),
+                std::fs::read(entry.path())?,
+            );
+        }
+    }
+    let snapshot = parse_playlist_snapshot(
+        &TextResource {
+            content: text,
+            location: SourceLocation::Url(
+                format!("https://fixture.invalid/{role}/media.m3u8")
+                    .parse()
+                    .unwrap(),
+            ),
+        },
+        PlaylistContext::new(InputId::new(role).unwrap(), 0),
+    )
+    .unwrap();
+    Ok(KeyedInput::new(snapshot, Arc::new(source)))
 }

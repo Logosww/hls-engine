@@ -1369,11 +1369,17 @@ impl FragmentedMp4Muxer {
     }
 
     pub(crate) fn write_header(&self) -> Result<Vec<u8>> {
+        self.write_header_with_offsets(&vec![0; self.tracks.len()])
+    }
+
+    /// Samples supplied to this header use track-local decode times. The edits
+    /// restore their offsets on the shared movie timeline.
+    pub(crate) fn write_header_with_offsets(&self, offsets: &[u64]) -> Result<Vec<u8>> {
         let ftyp = fragmented_ftyp_box();
         // Fragmented moov uses duration=0; the real timeline is carried by
         // per-fragment tfdt/trun. Writing a non-zero duration here makes some
         // players (QuickTime) treat it as a hard cap and stall on seek.
-        let moov = fragmented_moov_box(&self.tracks)?;
+        let moov = fragmented_moov_box(&self.tracks, offsets)?;
         let mut out = Vec::with_capacity(ftyp.len() + moov.len());
         out.extend_from_slice(&ftyp);
         out.extend_from_slice(&moov);
@@ -1497,21 +1503,51 @@ fn styp_box() -> Vec<u8> {
     })
 }
 
-fn fragmented_moov_box(tracks: &[FragmentedTrack]) -> Result<Vec<u8>> {
-    let movie_timescale = 1000_u32;
+fn fragmented_moov_box(tracks: &[FragmentedTrack], offsets: &[u64]) -> Result<Vec<u8>> {
+    if offsets.len() != tracks.len() {
+        return Err(Error::muxing("track offset count mismatch"));
+    }
+    // An exact common timescale prevents an empty edit from rounding away an
+    // audio tick (e.g. 48 kHz audio paired with 90 kHz TS video).
+    let mut movie_timescale = 1000_u32;
+    for (track, offset) in tracks.iter().zip(offsets) {
+        if *offset == 0 {
+            continue;
+        }
+        let (mut a, mut b) = (movie_timescale, track.timescale);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        movie_timescale = (movie_timescale / a)
+            .checked_mul(track.timescale)
+            .ok_or_else(|| Error::muxing("movie timescale overflow"))?;
+    }
     boxed_result(b"moov", |out| {
         out.extend_from_slice(&mvhd_box(movie_timescale, 0, tracks.len())?);
-        for track in tracks {
-            out.extend_from_slice(&fragmented_trak_box(track)?);
+        for (track, offset) in tracks.iter().zip(offsets) {
+            out.extend_from_slice(&fragmented_trak_box(track, *offset, movie_timescale)?);
         }
         out.extend_from_slice(&mvex_box(tracks)?);
         Ok(())
     })
 }
 
-fn fragmented_trak_box(track: &FragmentedTrack) -> Result<Vec<u8>> {
+fn fragmented_trak_box(
+    track: &FragmentedTrack,
+    offset: u64,
+    movie_timescale: u32,
+) -> Result<Vec<u8>> {
     boxed_result(b"trak", |out| {
         out.extend_from_slice(&fragmented_tkhd_box(track)?);
+        if offset > 0 {
+            // Zero real-edit duration extends through subsequent fragments.
+            // tfdt starts at zero; the initial gap is represented only here.
+            out.extend_from_slice(&edts_box(
+                rescale(offset, track.timescale, movie_timescale)?,
+                0,
+                0,
+            )?);
+        }
         out.extend_from_slice(&fragmented_mdia_box(track)?);
         Ok(())
     })

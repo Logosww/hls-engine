@@ -65,6 +65,20 @@ that shared origin; tracks are never independently zeroed. Conversion uses check
 integer arithmetic, rounding toward zero by less than one destination tick.
 Negative PTS/CTS remain legal even though output DTS must be nonnegative.
 
+Since 0.6.2, prepared fMP4 represents each track's initial decode offset with a
+leading empty edit and writes track-local `tfdt` values. Apply the edit to recover
+the shared movie clock; demuxed packet PTS/DTS and session reports retain the
+mapping above. This prevents file players from counting the initial offset twice
+in the duration. The real edit is open-ended, and optional `tfra` entries use the
+same media-local clock as `tfdt`.
+
+Chrome file/Blob playback applies these edits. Chromium's MSE parser ignores
+leading empty edits ([Chromium issue](https://issues.chromium.org/issues/537235698));
+offset prepared fMP4 therefore requires separate per-track timestamp mapping in
+an MSE host and should not be appended unchanged to one multiplexed SourceBuffer.
+Legacy single-input writer output is unchanged. Use bytes or native classic MP4
+for file downloads, or a file/Blob URL for prepared fMP4 playback.
+
 `TimelineMapping::tracks()` records role, track type, original timescale, edit
 offset (in that scale), and optional unwrapped TS 90 kHz anchor.
 `to_output(MediaTime, destination_timescale)` accepts **already unwrapped and

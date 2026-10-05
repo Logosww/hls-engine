@@ -173,6 +173,8 @@ pub(crate) fn scan<R: Read + Seek>(
             let mut dts = parse_tfdt(
                 find_box(traf, b"tfdt")?.ok_or_else(|| Error::invalid("missing tfdt"))?,
             )?;
+            dts = u64::try_from(i128::from(dts) + track.timeline_offset)
+                .map_err(|_| Error::invalid("edited decode timestamp exceeds u64"))?;
             if result.sample_counts[ti] > 0 && dts < result.decode_ends[ti] {
                 return Err(Error::invalid(
                     "fragment decode timeline overlaps committed samples",
@@ -204,7 +206,9 @@ pub(crate) fn scan<R: Read + Seek>(
                         matches!(track.kind, StreamKind::Aac) || sample.flags & 0x0001_0000 == 0;
                     if keep_index && is_key && !indexed_sync {
                         result.entries[ti].push(TfraEntry {
-                            time: dts,
+                            time: u64::try_from(i128::from(dts) - track.timeline_offset).map_err(
+                                |_| Error::invalid("media decode timestamp exceeds u64"),
+                            )?,
                             moof_offset: moof.start,
                             traf_number,
                             trun_number: run_number,
@@ -259,6 +263,49 @@ mod tests {
     use crate::mp4::{FragmentedMp4Muxer, FragmentedTrack};
     use std::cell::Cell;
     use std::io::Cursor;
+
+    #[test]
+    fn edited_fragments_restore_movie_time_but_index_media_time() {
+        // Includes fractional movie milliseconds and a version-1 edit duration.
+        for offset in [1, 66_179, u64::from(u32::MAX) + 1] {
+            let mut mux = FragmentedMp4Muxer::new(vec![FragmentedTrack::audio(
+                1,
+                48000,
+                2,
+                vec![0x11, 0x90],
+            )]);
+            let mut data = mux.write_header_with_offsets(&[offset]).unwrap();
+            for dts in [0, 1024] {
+                data.extend(
+                    mux.write_fragment(&[vec![Mp4Sample {
+                        data: vec![1; 16],
+                        source: None,
+                        dts,
+                        pts: i128::from(dts) - 1,
+                        duration: 1024,
+                        is_key: true,
+                        offset: 0,
+                    }]])
+                    .unwrap(),
+                );
+            }
+            let index = scan(
+                &mut Cursor::new(&data),
+                data.len() as u64,
+                true,
+                true,
+                &|| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(index.samples[0][0].dts, offset);
+            assert_eq!(index.samples[0][0].pts, i128::from(offset) - 1);
+            assert_eq!(index.samples[0][1].dts, offset + 1024);
+            assert_eq!(index.decode_ends[0], offset + 2048);
+            assert_eq!(index.presentation_ends[0], i128::from(offset) + 2047);
+            assert_eq!(index.entries[0][0].time, 0);
+            assert_eq!(index.entries[0][1].time, 1024);
+        }
+    }
 
     fn fixture() -> Vec<u8> {
         let track = FragmentedTrack::audio(1, 48000, 2, vec![0x11, 0x90]);

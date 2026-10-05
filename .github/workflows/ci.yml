@@ -112,5 +112,8 @@ jobs:
       - name: Verify keyed B-frame tails against independent clear decodes
         run: python3 -u scripts/verify_keyed_decode.py
 
+      - name: Verify fragmented duration with offset external audio
+        run: python3 -u scripts/verify_fragmented_timeline.py
+
       - name: Verify native keyed SDK example
         run: python3 scripts/verify_keyed_examples.py

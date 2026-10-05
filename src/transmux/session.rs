@@ -898,6 +898,7 @@ pub struct PreparedTransmux {
     options: PrepareOptions,
     info: PreparedInfo,
     tracks: Vec<FragmentedTrack>,
+    decode_offsets: Vec<u64>,
     ends: Vec<Option<u64>>,
     reports: Vec<crate::TrackInfo>,
     bytes: u64,
@@ -973,7 +974,11 @@ async fn prepare_cursors(
         }
     }
     let mut tracks = Vec::new();
-    let mut mappings = Vec::new();
+    let mut decode_offsets = Vec::new();
+    let mut timeline = TimelineMapping {
+        origin,
+        tracks: Vec::new(),
+    };
     for cursor in &cursors {
         let config = cursor
             .config
@@ -988,7 +993,14 @@ async fn prepare_cursors(
                 .flat_map(|b| &b.data.packets)
                 .find(|p| matches!(p.kind, StreamKind::Aac) == audio)
                 .ok_or_else(|| failure(Error::invalid("configured track has no samples")))?;
-            mappings.push(TrackTimeline {
+            let offset = timeline
+                .to_output(packet_time(packet, cursor.shift), track.timescale)
+                .map_err(failure)?;
+            decode_offsets.push(
+                u64::try_from(offset)
+                    .map_err(|_| failure(Error::muxing("track decode offset exceeds u64")))?,
+            );
+            timeline.tracks.push(TrackTimeline {
                 role: cursor.role,
                 track_type: if audio {
                     crate::TrackType::Audio
@@ -1011,15 +1023,13 @@ async fn prepare_cursors(
         ends: vec![None; tracks.len()],
         info: PreparedInfo {
             tracks: reports.clone(),
-            timeline: TimelineMapping {
-                origin,
-                tracks: mappings,
-            },
+            timeline,
         },
         reports,
         inputs: cursors,
         options,
         tracks,
+        decode_offsets,
         bytes: 0,
     };
     result.emit(SessionPhase::Preparing, None, None)?;
@@ -1269,11 +1279,24 @@ impl PreparedTransmux {
     async fn writer_impl<W: AsyncWrite + Unpin>(&mut self, writer: &mut W) -> SessionResult<()> {
         let mut muxer = FragmentedMp4Muxer::new(self.tracks.clone());
         let header = muxer
-            .write_header()
+            .write_header_with_offsets(&self.decode_offsets)
             .map_err(|e| SessionError::new(e, SessionPhase::Writing))?;
         self.write_bytes(writer, &header).await?;
         let mut entries: Vec<Vec<TfraEntry>> = self.tracks.iter().map(|_| Vec::new()).collect();
-        while let Some((input, index, samples)) = self.next_samples().await? {
+        while let Some((input, index, mut samples)) = self.next_samples().await? {
+            // Reports and validation use the shared clock. Only the container
+            // samples/index use media-local time, paired with the header edits.
+            for (samples, offset) in samples.iter_mut().zip(&self.decode_offsets) {
+                for sample in samples {
+                    sample.dts = sample.dts.checked_sub(*offset).ok_or_else(|| {
+                        SessionError::new(
+                            Error::muxing("sample precedes track decode origin"),
+                            SessionPhase::Writing,
+                        )
+                    })?;
+                    sample.pts -= i128::from(*offset);
+                }
+            }
             if samples.iter().any(|s| !s.is_empty()) {
                 let bytes = muxer
                     .write_fragment(&samples)

@@ -38,6 +38,14 @@ of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
 with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
+## v0.6.2 fragmented timeline fix
+
+Prepared clear/AES-128 sessions with delayed external audio or video now report
+the same presentation end in fragmented and classic MP4. Track-local fragment
+clocks and exact movie edits preserve the shared timeline without counting the
+initial offset twice. Native finalization and optional random-access indexes
+retain the same packet timestamps. See [the verification record](docs/release-0.6.2.md).
+
 ## v0.6.1 B-frame presentation fix
 
 Classic MP4 edit lists now select the complete media-local presentation interval,

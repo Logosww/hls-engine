@@ -9,6 +9,10 @@ HTTP dependencies are required.
 
 Documentation: [integration guides](docs/README.md).
 
+Version 0.7.0 adds finite presentation ranges, epoch mapping, gap policies and
+split outputs through `prepare_hls_timeline`. See [timeline sessions](docs/timeline-sessions.md)
+and the [release verification](docs/release-0.7.0.md).
+
 ## Features
 
 **Input**
@@ -197,7 +201,7 @@ existing media/timescale interpretation; recovery does not rewrite history.
 
 ```toml
 [dependencies]
-hls-transmux = "0.6"
+hls-transmux = "0.7"
 ```
 
 The `default-source` feature is enabled by default (built-in reqwest-backed HTTP
@@ -205,7 +209,7 @@ client). To drop reqwest entirely and supply your own HTTP reader:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", default-features = false }
+hls-transmux = { version = "0.7", default-features = false }
 ```
 
 Optionally enable `ffmpeg-finalize` to remux via ffmpeg (through `ffmpeg-next`)
@@ -214,7 +218,7 @@ FFmpeg 9 shared libraries and pkg-config on the system:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.7", features = ["ffmpeg-finalize"] }
 ```
 
 Optionally enable `serde` to derive `Serialize`/`Deserialize` for
@@ -222,7 +226,7 @@ Optionally enable `serde` to derive `Serialize`/`Deserialize` for
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", features = ["serde"] }
+hls-transmux = { version = "0.7", features = ["serde"] }
 ```
 
 ## Custom Source
@@ -570,7 +574,7 @@ Enable `serde` to derive `Serialize`/`Deserialize` on `TransmuxResumeState`:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", features = ["serde"] }
+hls-transmux = { version = "0.7", features = ["serde"] }
 ```
 
 ```rust
@@ -811,7 +815,7 @@ in-browser HLS → MP4 transmuxing without file system or network dependencies.
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", default-features = false }
+hls-transmux = { version = "0.7", default-features = false }
 ```
 
 `default-features = false` drops `reqwest` (which requires `tokio/net` and is
@@ -902,11 +906,13 @@ Full docs: `cargo doc --open`.
 
 ## Not supported yet
 
-These cases return structured `Error::Unsupported`:
+Unsupported profiles are rejected by the corresponding API's typed errors.
+AES-128 finite input uses keyed/timeline sessions; discontinuities and presentation
+ranges use the timeline API. Legacy entry points keep their original restrictions.
 
-- Encryption: AES-128 / SAMPLE-AE
-- Live playlists, `#EXT-X-DISCONTINUITY`
-- Alternate audio groups, multiple video / audio tracks
+- SAMPLE-AES, cenc/cbcs and AES-GCM execution
+- Live/EVENT inputs and LL-HLS
+- Automatic rendition selection, multiple video/audio tracks (one selected external audio track is supported)
 - Codecs other than AVC / HEVC / AAC-LC (e.g. MP3, AC-3, E-AC-3, AV1)
 
 ## Design notes
@@ -930,6 +936,10 @@ HTTP/HTTPS），把底层的 MPEG-TS 或 fMP4/CMAF 分片解封装后直接重�
 MP4，**不解码、不编码、不转码**。
 
 核心 HLS / TS / ISOBMFF 逻辑全部自研，仅依赖少量基础异步与 HTTP 库。
+
+v0.7.0 新增 `prepare_hls_timeline`：可解码范围、epoch 映射、缺口策略、配置变化
+拆分输出，以及有界 sample 游标。接入、内存边界和验证见
+[timeline 文档](docs/timeline-sessions.md) 与 [0.7.0 验收记录](docs/release-0.7.0.md)。
 
 ### 特性
 
@@ -962,7 +972,7 @@ MP4，**不解码、不编码、不转码**。
 
 ```toml
 [dependencies]
-hls-transmux = "0.6"
+hls-transmux = "0.7"
 ```
 
 默认启用 `default-source` feature（内置 reqwest-backed HTTP
@@ -970,7 +980,7 @@ hls-transmux = "0.6"
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", default-features = false }
+hls-transmux = { version = "0.7", default-features = false }
 ```
 
 可选启用 `ffmpeg-finalize` feature，在 `StreamingMp4` finalization 阶段用
@@ -979,7 +989,7 @@ ffmpeg（via `ffmpeg-next`）做 remux，替代自研 defrag 路径。需要系�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.7", features = ["ffmpeg-finalize"] }
 ```
 
 可选启用 `serde` feature，为 `TransmuxResumeState` 派生
@@ -987,7 +997,7 @@ hls-transmux = { version = "0.6", features = ["ffmpeg-finalize"] }
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", features = ["serde"] }
+hls-transmux = { version = "0.7", features = ["serde"] }
 ```
 
 ### 自定义 Source
@@ -1370,7 +1380,7 @@ TS 视频用下一分片首帧确定当前末帧 duration，最多保留一个�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", features = ["serde"] }
+hls-transmux = { version = "0.7", features = ["serde"] }
 ```
 
 ```rust
@@ -1611,7 +1621,7 @@ pump.await.ok();
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.6", default-features = false }
+hls-transmux = { version = "0.7", default-features = false }
 ```
 
 `default-features = false` 移除 `reqwest`（需要 `tokio/net`，与 `wasm32-unknown-unknown`
@@ -1701,10 +1711,11 @@ CI 管道包含 `cargo check --target wasm32-unknown-unknown
 
 ### 暂不支持
 
-以下场景会返回结构化的 `Error::Unsupported`：
+不支持的组合由对应入口返回 typed 错误。有限 AES-128 输入使用 keyed/timeline
+session；discontinuity 和 presentation 范围使用 timeline API。旧入口保持原限制。
 
-- 加密：AES-128 / SAMPLE-AE
-- Live playlist、`#EXT-X-DISCONTINUITY`
+- SAMPLE-AES、cenc/cbcs、AES-GCM 执行
+- Live/EVENT 输入及 LL-HLS
 - 自动选择 alternate audio group、多视频 / 多音频 track（已选外置音轨可用 prepared API）
 - 非 AVC / HEVC / AAC-LC 的 codec（如 MP3、AC-3、E-AC-3、AV1）
 

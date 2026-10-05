@@ -1,10 +1,12 @@
 //! Prepared, demand-driven media sessions. Legacy resume stays in the old pipeline.
 mod keyed;
+mod timeline;
 use super::*;
 use crate::source::{ByteRange, Source, SourceSessionOptions, safe_location};
 use crate::types::PacketTiming;
 pub use keyed::*;
 use std::collections::VecDeque;
+pub use timeline::*;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// The role of a selected media playlist (not a language or rendition selector).

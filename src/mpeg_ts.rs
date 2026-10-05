@@ -1,3 +1,4 @@
+use crate::raw_sample::{RawLayout, RawSampleHook, RawStage};
 use std::collections::HashMap;
 
 use crate::codecs::{aac, avc, hevc};
@@ -23,6 +24,23 @@ struct PesHeader {
 }
 
 pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
+    demux_ts_stage(data, &mut RawStage::Clear, &|| Ok(()))
+}
+pub(crate) async fn demux_ts_with_hook(
+    data: &[u8],
+    hook: &mut dyn RawSampleHook,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<DemuxOutput> {
+    let mut stage = RawStage::Collect(Vec::new());
+    demux_ts_stage(data, &mut stage, check)?;
+    let mut stage = stage.resolve(hook, check).await?;
+    demux_ts_stage(data, &mut stage, check)
+}
+fn demux_ts_stage(
+    data: &[u8],
+    stage: &mut RawStage,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<DemuxOutput> {
     if data.len() < TS_PACKET_SIZE || data[0] != 0x47 {
         return Err(Error::invalid(
             "MPEG-TS segment must start with a 188-byte sync packet",
@@ -40,6 +58,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
     let mut result = DemuxOutput::default();
 
     for packet in data.as_chunks::<TS_PACKET_SIZE>().0 {
+        check()?;
         if packet[0] != 0x47 {
             return Err(Error::bitstream("MPEG-TS sync byte mismatch"));
         }
@@ -119,7 +138,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
                 }
             } else {
                 if let Some(accumulator) = accumulators.remove(&pid) {
-                    flush_pes(accumulator, &mut result)?;
+                    flush_pes(accumulator, &mut result, stage)?;
                 }
                 accumulators.insert(
                     pid,
@@ -135,7 +154,7 @@ pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
     }
 
     for accumulator in accumulators.into_values() {
-        flush_pes(accumulator, &mut result)?;
+        flush_pes(accumulator, &mut result, stage)?;
     }
 
     if !result.saw_video && !result.saw_audio {
@@ -304,9 +323,30 @@ fn check_parameter(previous: &Option<Vec<u8>>, current: &Option<Vec<u8>>) -> Res
     Ok(())
 }
 
-fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()> {
+fn flush_pes(
+    accumulator: PesAccumulator,
+    result: &mut DemuxOutput,
+    stage: &mut RawStage,
+) -> Result<()> {
     let header = parse_pes_header(&accumulator.data)?;
     let payload = &accumulator.data[header.payload_start..];
+    let processed;
+    let payload = if !matches!(accumulator.kind, StreamKind::Aac) {
+        let Some(clear) = stage.sample(
+            accumulator.kind,
+            RawLayout::AnnexB,
+            i128::from(header.dts_90k),
+            90_000,
+            payload,
+        )?
+        else {
+            return Ok(());
+        };
+        processed = clear;
+        processed.as_ref()
+    } else {
+        payload
+    };
     if !matches!(accumulator.kind, StreamKind::Aac) {
         validate_video_parameters(payload, accumulator.kind, result)?;
     }
@@ -399,11 +439,25 @@ fn flush_pes(accumulator: PesAccumulator, result: &mut DemuxOutput) -> Result<()
                     + frame_index * 1024 * 90_000 / u64::from(header_adts.sample_rate);
                 let frame_start = offset + header_adts.header_length;
                 let frame_end = offset + header_adts.frame_length;
+                let Some(frame) = stage.sample(
+                    StreamKind::Aac,
+                    RawLayout::Adts {
+                        offset: frame_start,
+                    },
+                    i128::from(pts),
+                    90_000,
+                    &payload[frame_start..frame_end],
+                )?
+                else {
+                    offset = frame_end;
+                    frame_index += 1;
+                    continue;
+                };
                 result.saw_audio = true;
                 result.packets.push(EncodedPacket {
                     timing: None,
                     kind: StreamKind::Aac,
-                    data: payload[frame_start..frame_end].to_vec(),
+                    data: frame.into_owned(),
                     pts_90k: i128::from(pts),
                     dts_90k: pts,
                     duration: 1024,

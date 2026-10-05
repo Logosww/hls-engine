@@ -610,6 +610,14 @@ impl PlaylistSnapshot {
     /// Manifest-only preflight for the planned v0.6 finite profile. Does NOT enable execution,
     /// validate provider/codec/container support, or fetch resources.
     pub fn validate_finite_vod(&self) -> Result<(), PlaylistRejection> {
+        self.validate_finite_profile(false)
+    }
+    /// Validate the finite timeline profile. GAP and discontinuity are retained
+    /// for the timeline executor; this is not a codec or timeline validation.
+    pub fn validate_timeline_vod(&self) -> Result<(), PlaylistRejection> {
+        self.validate_finite_profile(true)
+    }
+    fn validate_finite_profile(&self, timeline: bool) -> Result<(), PlaylistRejection> {
         if !self.0.end_list {
             return Err(PlaylistRejection::OpenInput);
         }
@@ -636,10 +644,10 @@ impl PlaylistSnapshot {
             if rounded > target {
                 return Err(PlaylistRejection::DurationExceedsTarget);
             }
-            if segment.gap {
+            if segment.gap && !timeline {
                 return Err(PlaylistRejection::Gap);
             }
-            if segment.discontinuity {
+            if segment.discontinuity && !timeline {
                 return Err(PlaylistRejection::Discontinuity);
             }
             for (keys, map) in std::iter::once((&segment.keys, false))

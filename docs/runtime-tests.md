@@ -11,6 +11,12 @@ Promise success/rejection, resource budgets, 96 clear/AES prepared combinations,
 stage counters, capability queries and the exact `examples/keyed_wasm.rs` adapter.
 The adapter includes rejected, unavailable and wrong-length key responses.
 
+The development timeline suite compares clear/AES-128 range output hashes,
+mapping reports and lossless integer transport. It also runs the same 12
+near/far/full-range/long-GOP budget cases on Native, Node WASM and Chrome;
+[planning-state measurements](benchmarks.md) distinguish retained records from
+total memory and quantify reads before the first output write.
+
 Run from the repository root:
 
 ```sh
@@ -38,3 +44,15 @@ phase evidence are archived under `docs/planning/`; the original v0.6 runtime
 results remain in [release evidence](release-0.6.0-evidence.json). Experiments for
 future sample encryption, open input or subtitles do not expand the delivered
 v0.6 scope.
+
+Downstream compatibility can be checked with
+`python3 scripts/verify_sdk.py /path/to/hls-downloader`. It copies the SDK's Rust
+adapters and fixtures into `target/sdk-compat`, patches Cargo to this crate, runs
+the SDK's native prepared/resume tests, and checks the native workspace and
+browser WASM adapter. It also installs the tracked timeline integration extension
+into the isolated SDK copy and compares nine native/real-Chrome timeline cases
+through the SDK host and Promise bridges. The SDK checkout stays unchanged.
+
+Timeline runtime runs include 15 deterministic cursor-budget cases plus actual
+allocation, first-write, WASM-page and JS-heap measurements. Timing/allocation
+measurements live outside the cross-runtime semantic equality report.

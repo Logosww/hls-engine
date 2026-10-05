@@ -14,8 +14,8 @@ use progress::{ProgressState, SharedProgress};
 
 /// A selected immutable media snapshot and the source used for its resources.
 pub struct KeyedInput {
-    snapshot: PlaylistSnapshot,
-    source: Arc<dyn Source>,
+    pub(super) snapshot: PlaylistSnapshot,
+    pub(super) source: Arc<dyn Source>,
 }
 impl KeyedInput {
     pub fn new(snapshot: PlaylistSnapshot, source: Arc<dyn Source>) -> Self {
@@ -26,8 +26,8 @@ impl KeyedInput {
     }
 }
 pub struct KeyedInputs {
-    primary: KeyedInput,
-    audio: Option<KeyedInput>,
+    pub(super) primary: KeyedInput,
+    pub(super) audio: Option<KeyedInput>,
 }
 impl KeyedInputs {
     pub fn new(primary: KeyedInput) -> Self {

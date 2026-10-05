@@ -44,7 +44,7 @@ def verify_browser():
         thread.start()
         try:
             with tempfile.TemporaryDirectory(prefix='hls-runtime-chrome-') as profile, tempfile.TemporaryFile(mode='w+') as log:
-                command = [chrome, '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+                command = [chrome, '--headless', '--enable-precise-memory-info', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
                            '--disable-background-networking', '--disable-component-update', '--disable-extensions',
                            '--user-data-dir=' + profile, '--remote-debugging-port=0',
                            f'http://127.0.0.1:{server.server_port}/tests/runtime/browser.html']

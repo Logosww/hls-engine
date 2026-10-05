@@ -1,3 +1,4 @@
+use crate::raw_sample::{RawLayout, RawSampleHook, RawStage};
 use std::collections::HashMap;
 
 use crate::codecs::{avc, hevc};
@@ -589,6 +590,25 @@ pub(crate) fn demux_isobmff_checked(
     segment: &[u8],
     check: &dyn Fn() -> Result<()>,
 ) -> Result<DemuxOutput> {
+    demux_isobmff_stage(init, segment, check, &mut RawStage::Clear)
+}
+pub(crate) async fn demux_isobmff_with_hook(
+    init: &[u8],
+    segment: &[u8],
+    hook: &mut dyn RawSampleHook,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<DemuxOutput> {
+    let mut stage = RawStage::Collect(Vec::new());
+    demux_isobmff_stage(init, segment, check, &mut stage)?;
+    let mut stage = stage.resolve(hook, check).await?;
+    demux_isobmff_stage(init, segment, check, &mut stage)
+}
+fn demux_isobmff_stage(
+    init: &[u8],
+    segment: &[u8],
+    check: &dyn Fn() -> Result<()>,
+    stage: &mut RawStage,
+) -> Result<DemuxOutput> {
     check()?;
     let tracks = parse_init_segment(init)?;
     let mut output = DemuxOutput::default();
@@ -620,7 +640,7 @@ pub(crate) fn demux_isobmff_checked(
         }
     }
 
-    parse_media_segment(segment, &tracks, &mut output, check)?;
+    parse_media_segment(segment, &tracks, &mut output, check, stage)?;
     Ok(output)
 }
 
@@ -629,6 +649,7 @@ fn parse_media_segment(
     tracks: &[InitTrack],
     output: &mut DemuxOutput,
     check: &dyn Fn() -> Result<()>,
+    stage: &mut RawStage,
 ) -> Result<()> {
     let mut offset = 0;
     while offset + 8 <= segment.len() {
@@ -642,7 +663,7 @@ fn parse_media_segment(
         }
         if &header.box_type == b"moof" {
             let moof_payload = &segment[offset + header.header_size..offset + header.total_size];
-            parse_moof(moof_payload, offset, segment, tracks, output, check)?;
+            parse_moof(moof_payload, offset, segment, tracks, output, check, stage)?;
         }
         offset += header.total_size;
     }
@@ -656,6 +677,7 @@ fn parse_moof(
     tracks: &[InitTrack],
     output: &mut DemuxOutput,
     check: &dyn Fn() -> Result<()>,
+    stage: &mut RawStage,
 ) -> Result<()> {
     // A moof may contain multiple traf boxes (one per track). Iterate all
     // top-level children of moof and process each traf. Using find_box here
@@ -675,7 +697,15 @@ fn parse_moof(
             saw_traf = true;
             let traf_payload =
                 &moof_payload[offset + header.header_size..offset + header.total_size];
-            parse_traf(traf_payload, moof_offset, segment, tracks, output, check)?;
+            parse_traf(
+                traf_payload,
+                moof_offset,
+                segment,
+                tracks,
+                output,
+                check,
+                stage,
+            )?;
         }
         offset += header.total_size;
     }
@@ -692,6 +722,7 @@ fn parse_traf(
     tracks: &[InitTrack],
     output: &mut DemuxOutput,
     check: &dyn Fn() -> Result<()>,
+    stage: &mut RawStage,
 ) -> Result<()> {
     let tfhd_data = find_box(traf, b"tfhd")?
         .ok_or_else(|| Error::bitstream("traf does not contain a tfhd box"))?;
@@ -755,6 +786,30 @@ fn parse_traf(
                 })
                 .ok_or_else(|| Error::bitstream("sample data extends past segment"))?;
             let raw = &segment[sample_data_offset as usize..end as usize];
+            let raw_dts = base_decode_time
+                .checked_add(cumulative_duration)
+                .ok_or_else(|| Error::bitstream("raw DTS overflow"))?;
+            let Some(raw) = stage.sample(
+                track.kind,
+                RawLayout::Fragment {
+                    offset: sample_data_offset,
+                    prefix: track.length_size,
+                },
+                i128::from(raw_dts),
+                track.timescale,
+                raw,
+            )?
+            else {
+                if sample.duration == 0 {
+                    return Err(Error::bitstream("zero fMP4 sample duration"));
+                }
+                cumulative_duration = cumulative_duration
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or_else(|| Error::bitstream("duration overflow"))?;
+                sample_data_offset = end;
+                continue;
+            };
+            let raw = raw.as_ref();
             let is_key = is_key_sample(sample.flags, raw, track);
             let data = if matches!(track.kind, StreamKind::Avc | StreamKind::Hevc) {
                 normalize_nals(raw, track)?
@@ -1349,6 +1404,7 @@ mod tests {
             &parse_init_segment(&init).unwrap(),
             &mut output,
             &|| Ok(()),
+            &mut RawStage::Clear,
         )
         .unwrap();
         assert_eq!(output.packets.len(), 2);
@@ -1369,7 +1425,8 @@ mod tests {
                 &segment,
                 &parse_init_segment(&init).unwrap(),
                 &mut DemuxOutput::default(),
-                &|| Ok(())
+                &|| Ok(()),
+                &mut RawStage::Clear,
             )
             .is_err()
         );

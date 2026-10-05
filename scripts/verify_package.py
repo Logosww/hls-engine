@@ -42,6 +42,14 @@ def main():
         'docs/release-0.6.2.md', 'scripts/verify_fragmented_timeline.py',
         'docs/runtime-tests.md', 'docs/writer-streaming-api.md', 'examples/keyed_export.rs', 'examples/keyed_demo.rs', 'examples/keyed_wasm.rs',
         'scripts/test_keyed_wasm.mjs',
+        'docs/timeline-sessions.md', 'examples/timeline_export.rs', 'scripts/verify_timeline.py',
+        'examples/timeline_budget.rs', 'tests/support/timeline_budget.rs',
+        'tests/support/timeline_lifecycle.rs',
+        'tests/support/timeline_combinations.rs', 'src/raw_sample/protection.rs',
+        'scripts/verify_sdk.py', 'scripts/sdk_timeline_cases.py', 'scripts/verify_sdk_browser.py',
+        'tests/support/sdk/shared.rs', 'tests/support/sdk/native.rs', 'tests/support/sdk/browser.rs', 'tests/support/sdk/browser.mjs',
+        'src/transmux/session/timeline/catalog.rs', 'tests/support/allocation.rs', 'tests/support/timeline_profile.rs',
+        'docs/release-0.7.0.md', 'docs/release-0.7.0-evidence.json',
     }
     with tempfile.TemporaryDirectory(prefix='hls-package-') as temporary:
         with tarfile.open(archive) as tar:
@@ -64,8 +72,10 @@ def main():
                     assert (guide.parent / link.split('#')[0]).exists(), (guide, link)
         # A separate output directory avoids relying on repository build products.
         target = ROOT / 'target/package-examples'
-        run('cargo', 'build', '--offline', '--locked', '--example', 'keyed_demo', '--example', 'keyed_export',
+        run('cargo', 'build', '--offline', '--locked', '--example', 'keyed_demo', '--example', 'keyed_export', '--example', 'timeline_export', '--example', 'timeline_budget',
             '--target-dir', str(target), cwd=crate)
+        run('cargo', 'test', '--offline', '--locked', '--features', 'serde',
+            '--test', 'timeline_session', '--target-dir', str(target), cwd=crate)
         run('cargo', 'build', '--offline', '--locked', '--no-default-features',
             '--target', 'wasm32-unknown-unknown', '--example', 'keyed_wasm',
             '--target-dir', str(target), cwd=crate)

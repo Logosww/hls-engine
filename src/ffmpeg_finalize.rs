@@ -52,6 +52,9 @@ pub(crate) fn remux_blocking(
             .add_stream(codec)
             .map_err(|e| Error::muxing(format!("ffmpeg add_stream: {e}")))?;
         ostream.set_parameters(stream.parameters());
+        // Keep the already-normalized track grid. Choosing an unrelated muxer
+        // default here introduces a second rounding step at range origins.
+        ostream.set_time_base(stream.time_base());
         stream_map.insert(stream.index(), ostream.index());
     }
 

@@ -5,6 +5,7 @@ pub mod keys;
 pub mod playlist;
 pub mod prepared;
 pub mod resources;
+pub mod timeline;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_report() -> serde_json::Value {
@@ -17,5 +18,14 @@ pub fn native_report() -> serde_json::Value {
         "resources": json(resources::native_suite()),
         "prepared": json(prepared::native_suite()),
         "contracts": json(contracts::native_suite()),
+        "timeline": json(timeline::native_suite()),
     })
 }
+
+#[path = "../../support/allocation.rs"]
+pub mod allocation;
+#[path = "../../support/timeline_profile.rs"]
+pub mod timeline_profile;
+
+#[path = "../../support/timeline_budget.rs"]
+pub mod timeline_budget;

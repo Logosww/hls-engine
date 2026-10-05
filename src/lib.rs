@@ -111,6 +111,7 @@ mod isobmff;
 mod mp4;
 mod mpeg_ts;
 pub mod playlist;
+mod raw_sample;
 mod resume;
 mod source;
 mod transmux;

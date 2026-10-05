@@ -394,3 +394,93 @@ pub fn query_keyed_capability(query: &KeyedCapabilityQuery) -> KeyedCapabilityDe
         requirements,
     }
 }
+
+/// Timeline execution has its own capability profile; old keyed queries remain unchanged.
+#[derive(Debug, Clone)]
+pub struct TimelineCapabilityQuery {
+    media: KeyedCapabilityQuery,
+    presentation_range: bool,
+    gaps: crate::GapPolicy,
+    changes: crate::TimelineChangePolicy,
+    split_outputs: bool,
+    known_internal_gaps: bool,
+}
+impl TimelineCapabilityQuery {
+    pub fn new(media: KeyedCapabilityQuery) -> Self {
+        Self {
+            media,
+            presentation_range: false,
+            gaps: crate::GapPolicy::Preserve,
+            changes: crate::TimelineChangePolicy::Fail,
+            split_outputs: false,
+            known_internal_gaps: false,
+        }
+    }
+    pub fn with_presentation_range(mut self, value: bool) -> Self {
+        self.presentation_range = value;
+        self
+    }
+    pub fn with_gap_policy(mut self, value: crate::GapPolicy) -> Self {
+        self.gaps = value;
+        self
+    }
+    pub fn with_change_policy(mut self, value: crate::TimelineChangePolicy) -> Self {
+        self.changes = value;
+        self
+    }
+    pub fn with_split_outputs(mut self, value: bool) -> Self {
+        self.split_outputs = value;
+        self
+    }
+    pub fn with_known_internal_gaps(mut self, value: bool) -> Self {
+        self.known_internal_gaps = value;
+        self
+    }
+    pub fn media(&self) -> &KeyedCapabilityQuery {
+        &self.media
+    }
+    pub fn presentation_range(&self) -> bool {
+        self.presentation_range
+    }
+    pub fn gap_policy(&self) -> crate::GapPolicy {
+        self.gaps
+    }
+    pub fn change_policy(&self) -> crate::TimelineChangePolicy {
+        self.changes
+    }
+    pub fn split_outputs(&self) -> bool {
+        self.split_outputs
+    }
+    pub fn known_internal_gaps(&self) -> bool {
+        self.known_internal_gaps
+    }
+}
+/// A declaration, not proof of RAP, clock alignment or common-gap coverage.
+pub fn query_timeline_capability(query: &TimelineCapabilityQuery) -> KeyedCapabilityDecision {
+    let mut base = query.media.clone().with_timeline_changes(false);
+    if base.range == KeyedRange::PresentationRange {
+        base.range = KeyedRange::WholeResources;
+    }
+    let mut decision = query_keyed_capability(&base);
+    if query.changes == crate::TimelineChangePolicy::Split && !query.split_outputs {
+        decision.rejections.push(CapabilityRejection {
+            dimension: CapabilityDimension::Output,
+            role: None,
+        });
+    }
+    let classic = !matches!(
+        query.media.output,
+        KeyedOutput::FragmentedWriter | KeyedOutput::FragmentedFile
+    );
+    if classic
+        && query.known_internal_gaps
+        && query.gaps == crate::GapPolicy::Preserve
+        && query.changes != crate::TimelineChangePolicy::Split
+    {
+        decision.rejections.push(CapabilityRejection {
+            dimension: CapabilityDimension::Timeline,
+            role: None,
+        });
+    }
+    decision
+}

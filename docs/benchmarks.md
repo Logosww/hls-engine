@@ -147,3 +147,54 @@ both mfra settings, records downloaded-minus-processed segment windows and
 maximum pending write size, and uses controlled Source futures to measure active
 reads and verify cancellation/drop cleanup. It does not substitute RSS for
 these lifecycle and queue assertions.
+
+
+## v0.7.0 finite timeline cursor measurements
+
+`cargo run --offline --release --example timeline_budget` generates 8, 64 and
+256 logical two-second TS resources from the retained 60-frame video fixture,
+then discards output through an instrumented writer. These are deterministic
+resource/state vectors, not independently encoded long recordings. The long-GOP
+vector removes later IDR indicators solely to test selection metadata.
+
+All 15 cases run in native, actual Node WASM and real Chrome. With a 240-sample /
+4-resource cursor budget, near, far, full and long-GOP selections now succeed.
+A 59-sample budget rejects the 60-frame resource before output. In all successful
+cases the scan/cursor high-water marks are 120 sample records and 2 resources,
+including the 15,360-sample full export. The finite catalog and reports have
+separate growth; `indexed_resources` exposes catalog size.
+
+| Segments | Near: reads before first write / total | Far: reads before first write / total | Full: reads before first write / total |
+| --- | --- | --- | --- |
+| 8 | 3 / 4 | 9 / 10 | 16 / 24 |
+| 64 | 3 / 4 | 65 / 66 | 128 / 192 |
+| 256 | 3 / 4 | 257 / 258 | 512 / 768 |
+
+Near requests `[0.1,0.4)` seconds; far starts 0.1 seconds into the penultimate
+segment. Each retains one GOP. Full export uses one clock/catalog pass, one
+bounded validation pass and one verified output replay. This trades additional
+reads for bounded sample state and complete, validated split-provider requests.
+First output still waits for finite validation; this is not an open-input/live
+latency claim.
+
+Native measurements below use the release build on macOS arm64. The instrumented
+global allocator counts requested live bytes and total requested allocations,
+including manifests, catalogs, reports and demux/mux temporaries. It does not
+measure RSS, allocator overhead or reserved pages. Cases discard output; retaining
+MP4 bytes or classic-finalization indexes has additional cost. First-write time
+starts before snapshot construction. Timings are observations, not thresholds.
+
+| Full segments | Peak additional live allocation | Total allocated bytes | First write (ms) | Total (ms) |
+| --- | --- | --- | --- | --- |
+| 8 | 279,663 | 21,446,959 | 13.9 | 22.0 |
+| 64 | 363,239 | 170,719,933 | 106.7 | 165.8 |
+| 256 | 650,213 | 682,532,721 | 445.9 | 680.2 |
+
+WASM debug-build allocator measurements and JS/linear-memory observations are
+recorded in the release evidence and `target/runtime/*-evidence.json`. Semantic
+results match native; allocation sizes differ with pointer width. JS heap readings
+are process/page observations affected by garbage collection, and linear memory
+reports allocated pages rather than live allocations. Each allocation delta uses
+wrapping subtraction for WASM's 32-bit cumulative counter; each case allocates
+less than 4 GiB. No retained-media or constant-total-memory claim is derived from
+those measurements.

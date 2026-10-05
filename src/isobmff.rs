@@ -1178,6 +1178,107 @@ fn rescale_to_90k(value: u64, timescale: u32) -> Result<u64> {
         .map_err(|_| Error::bitstream("timestamp exceeds checkpoint time domain"))
 }
 
+/// Strict resource framing for the new AES path only. Existing demux behavior is unchanged.
+/// Sample offsets/codecs are validated by demux after a matching MAP is available.
+pub(crate) fn validate_resource_envelope(data: &[u8], init: bool) -> Result<()> {
+    let (mut ftyp, mut moov, mut moof, mut mdat) = (0, 0, 0, 0);
+    let mut awaiting_data = false;
+    for_each_box(data, |kind, payload| {
+        match kind {
+            b"ftyp" => {
+                ftyp += 1;
+                if payload.len() < 8 || payload.len() % 4 != 0 {
+                    return Err(Error::bitstream("invalid ftyp"));
+                }
+            }
+            b"moov" => {
+                moov += 1;
+                if !init {
+                    return Err(Error::unsupported(
+                        "media resource contains a new initialization",
+                    ));
+                }
+                for_each_box(payload, |_, _| Ok(()))?;
+                if find_box(payload, b"mvex")?.is_none() {
+                    return Err(Error::bitstream("fMP4 initialization missing mvex"));
+                }
+            }
+            b"moof" => {
+                if init || awaiting_data {
+                    return Err(Error::bitstream("unexpected moof"));
+                }
+                moof += 1;
+                awaiting_data = true;
+                let (mut headers, mut tracks) = (0, 0);
+                for_each_box(payload, |kind, payload| {
+                    match kind {
+                        b"mfhd" => {
+                            headers += 1;
+                            if payload.len() != 8 || payload[..4] != [0; 4] {
+                                return Err(Error::bitstream("invalid mfhd"));
+                            }
+                        }
+                        b"traf" => {
+                            tracks += 1;
+                            let (mut tfhd, mut runs) = (0, 0);
+                            for_each_box(payload, |kind, payload| {
+                                match kind {
+                                    b"tfhd" => {
+                                        tfhd += 1;
+                                        parse_tfhd(payload)?;
+                                    }
+                                    b"tfdt" => {
+                                        parse_tfdt(payload)?;
+                                    }
+                                    b"trun" => {
+                                        runs += 1;
+                                        if payload.len() < 8 {
+                                            return Err(Error::bitstream("truncated trun"));
+                                        }
+                                    }
+                                    b"senc" | b"saiz" | b"saio" | b"sgpd" | b"sbgp" => {
+                                        return Err(Error::unsupported(
+                                            "sample protection/group metadata is not supported in resource-only profile",
+                                        ));
+                                    }
+                                    _ => {}
+                                }
+                                Ok(())
+                            })?;
+                            if tfhd != 1 || runs == 0 {
+                                return Err(Error::bitstream("traf missing unique tfhd or runs"));
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })?;
+                if headers != 1 || tracks == 0 {
+                    return Err(Error::bitstream("moof missing unique mfhd or tracks"));
+                }
+            }
+            b"mdat" => {
+                if init || !awaiting_data || payload.is_empty() {
+                    return Err(Error::bitstream("unexpected or empty mdat"));
+                }
+                mdat += 1;
+                awaiting_data = false;
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    if init {
+        if ftyp != 1 || moov != 1 {
+            return Err(Error::bitstream("initialization missing unique ftyp/moov"));
+        }
+        parse_init_segment(data)?;
+    } else if moof == 0 || moof != mdat || awaiting_data {
+        return Err(Error::bitstream("incomplete fMP4 resource"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,6 +9,37 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  runtime-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WASM bindings CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - name: Test and lint production runtime bindings
+        run: |
+          cargo test --locked --manifest-path tests/runtime/Cargo.toml --target-dir target --lib
+          cargo fmt --manifest-path tests/runtime/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path tests/runtime/Cargo.toml --target-dir target --all-targets -- -D warnings
+      - name: Verify independent AES fixtures
+        run: python3 scripts/verify_crypto.py --openssl
+      - name: Compare native, actual Node WASM and real Chrome
+        run: python3 scripts/verify_runtime.py --browser
+      - name: Lint the WASM host adapter
+        run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --example keyed_wasm -- -D warnings
+      - name: Verify packaged docs and WASM example
+        run: python3 scripts/verify_package.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-contract-evidence
+          path: target/runtime/*-evidence.json
+
   test:
     strategy:
       matrix:
@@ -53,10 +84,6 @@ jobs:
           cargo build --target wasm32-unknown-unknown --no-default-features --example wasm_session
           node scripts/test_wasm_session.mjs
 
-      - name: Verify publish package
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo publish --dry-run
-
   ffmpeg:
     runs-on: macos-latest
     steps:
@@ -75,3 +102,12 @@ jobs:
 
       - name: Verify dual-input packets and both finalize backends
         run: python3 -u scripts/verify_multi_input.py --ffmpeg
+
+      - name: Verify AES resource corpus independently
+        run: python3 scripts/verify_crypto.py --openssl --ffmpeg
+
+      - name: Verify keyed prepared output packets and decodes
+        run: python3 scripts/verify_keyed.py --ffmpeg
+
+      - name: Verify native keyed SDK example
+        run: python3 scripts/verify_keyed_examples.py

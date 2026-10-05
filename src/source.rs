@@ -489,8 +489,12 @@ impl Source for ReqwestSource {
         Box::pin(async move {
             match location {
                 SourceLocation::File(path) => {
-                    let bytes = tokio::fs::read(path).await?;
-                    apply_range(bytes, range)
+                    if let Some(limit) = self.policy.max_resource_bytes {
+                        read_limited_file(path, range, limit).await
+                    } else {
+                        let bytes = tokio::fs::read(path).await?;
+                        apply_range(bytes, range)
+                    }
                 }
                 SourceLocation::Url(url) => {
                     // Fast path: prefetch slot exists for this (url, range).
@@ -709,6 +713,7 @@ impl SourceReader {
     }
 }
 
+#[cfg(feature = "default-source")]
 fn apply_range(bytes: Vec<u8>, range: Option<&ByteRange>) -> Result<Vec<u8>> {
     let Some(range) = range else {
         return Ok(bytes);
@@ -779,8 +784,9 @@ fn apply_range(bytes: Vec<u8>, range: Option<&ByteRange>) -> Result<Vec<u8>> {
 /// ```
 #[derive(Debug, Default, Clone)]
 pub struct MemorySource {
-    texts: HashMap<String, String>,
-    bytes: HashMap<String, Vec<u8>>,
+    texts: Arc<HashMap<String, String>>,
+    bytes: Arc<HashMap<String, Vec<u8>>>,
+    max_resource_bytes: Option<u64>,
 }
 
 impl MemorySource {
@@ -794,23 +800,36 @@ impl MemorySource {
     /// bytes. Both maps are keyed by absolute URL string (or filesystem path
     /// string for `SourceLocation::File`).
     pub fn with_data(texts: HashMap<String, String>, bytes: HashMap<String, Vec<u8>>) -> Self {
-        Self { texts, bytes }
+        Self {
+            texts: Arc::new(texts),
+            bytes: Arc::new(bytes),
+            max_resource_bytes: None,
+        }
     }
 
     /// Adds a playlist text keyed by its absolute URL (builder style).
     pub fn text(mut self, url: impl Into<String>, content: impl Into<String>) -> Self {
-        self.texts.insert(url.into(), content.into());
+        Arc::make_mut(&mut self.texts).insert(url.into(), content.into());
         self
     }
 
     /// Adds segment bytes keyed by the segment's absolute URL (builder style).
     pub fn segment(mut self, url: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
-        self.bytes.insert(url.into(), data.into());
+        Arc::make_mut(&mut self.bytes).insert(url.into(), data.into());
         self
     }
 }
 
 impl Source for MemorySource {
+    fn create_session_with_options(
+        &self,
+        options: &SourceSessionOptions,
+    ) -> Option<Arc<dyn Source>> {
+        let mut session = self.clone();
+        session.max_resource_bytes = options.max_resource_bytes;
+        Some(Arc::new(session))
+    }
+
     fn read_text<'a>(
         &'a self,
         location: &'a SourceLocation,
@@ -839,7 +858,28 @@ impl Source for MemorySource {
                 .bytes
                 .get(&key)
                 .ok_or_else(|| Error::invalid(format!("MemorySource: no bytes found for {key}")))?;
-            apply_range(bytes.clone(), range)
+            let data = if let Some(range) = range {
+                let end = range
+                    .offset
+                    .checked_add(range.length)
+                    .ok_or_else(|| Error::invalid("byterange overflow"))?;
+                let start = usize::try_from(range.offset)
+                    .map_err(|_| Error::invalid("byterange exceeds address space"))?;
+                let end = usize::try_from(end)
+                    .map_err(|_| Error::invalid("byterange exceeds address space"))?;
+                bytes
+                    .get(start..end)
+                    .ok_or_else(|| Error::invalid("byterange extends past resource"))?
+            } else {
+                bytes.as_slice()
+            };
+            if self
+                .max_resource_bytes
+                .is_some_and(|limit| data.len() as u64 > limit)
+            {
+                return Err(resource_limit_error());
+            }
+            Ok(data.to_vec())
         })
     }
 }
@@ -1332,6 +1372,58 @@ async fn fetch_resource(
             Err((error, _)) => return Err(Error::Http(format!("resource {resource}: {error}"))),
         }
     }
+}
+
+// Preserve v0.5 budget/HTTP variants while classifying them for the additive resource API.
+fn resource_limit_error() -> Error {
+    Error::invalid("resource exceeds configured byte limit")
+}
+pub(crate) fn is_resource_limit(error: &Error) -> bool {
+    match error {
+        Error::InvalidInput(message) => message == "resource exceeds configured byte limit",
+        Error::Http(message) => {
+            message == "response exceeds resource size limit"
+                || message.ends_with(": HTTP error: response exceeds resource size limit")
+        }
+        _ => false,
+    }
+}
+#[cfg(feature = "default-source")]
+async fn read_limited_file(
+    path: &std::path::Path,
+    range: Option<&ByteRange>,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await?;
+    let length = file.metadata().await?.len();
+    let expected = if let Some(range) = range {
+        let end = range
+            .offset
+            .checked_add(range.length)
+            .ok_or_else(|| Error::invalid("file range overflow"))?;
+        if end > length {
+            return Err(Error::invalid("file range exceeds resource"));
+        }
+        file.seek(std::io::SeekFrom::Start(range.offset)).await?;
+        range.length
+    } else {
+        length
+    };
+    if expected > limit {
+        return Err(resource_limit_error());
+    }
+    let mut bytes = Vec::new();
+    // For full files, also catch growth after metadata; range reads stop at the requested end.
+    let take = range.map_or(limit.saturating_add(1), |r| r.length);
+    file.take(take).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > limit {
+        return Err(resource_limit_error());
+    }
+    if range.is_some_and(|r| bytes.len() as u64 != r.length) {
+        return Err(Error::invalid("short file range"));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

@@ -9,8 +9,10 @@
 *.swo
 .DS_Store
 
-# Internal planning docs (not part of the public package)
-/docs
+docs/planning/
+
+# Former standalone WASM example build artifacts
+/examples/keyed-wasm/
 
 # Trae workspace state
 /.trae

@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Runtime contract regression</title>
+<pre id="result">RUNNING</pre>
+<script type="module">
+import { verify } from './harness.mjs';
+const unhandled = [];
+let report;
+window.addEventListener('unhandledrejection', event => unhandled.push(String(event.reason)));
+try {
+  const result = await verify();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  if (unhandled.length) throw new Error(unhandled.join('\n'));
+  report = { status: 'PASS', runtime: navigator.userAgent, ...result };
+} catch (error) {
+  report = { status: 'FAIL', message: String(error), stack: error.stack };
+}
+document.querySelector('#result').textContent = JSON.stringify(report);
+await fetch('/result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) });
+</script>

@@ -7,6 +7,8 @@ them into a single MP4 — **no decoding, no encoding, no transcoding**.
 All core HLS / TS / ISOBMFF logic is self-contained; only a few basic async and
 HTTP dependencies are required.
 
+Documentation: [integration guides](docs/README.md).
+
 ## Features
 
 **Input**
@@ -36,6 +38,31 @@ of segment/prefetch buffers, sample indexes, and the copy buffer; it still grows
 with sample count. The temp file `<output>.partial.<ext>` is a valid,
 playable fMP4; you can play the downloaded portion after interruption.
 
+## v0.6.0 typed playlists and keyed prepared sessions
+
+Version 0.6.0 extends the existing `hls-transmux` crate. The package name, Rust
+import name (`hls_transmux`) and this README remain the entry points for the crate.
+The new APIs are available alongside the legacy clear APIs.
+
+The additive `playlist` API parses immutable metadata and supports lossless serde
+archives. `crypto::key` provides bounded asynchronous provider resolution,
+version/expiry-aware caching and cancellation. The resource layer adds bounded
+complete-resource AES-128 decryption and container checks. `prepare_hls_with_keys`
+uses the shared prepared media/output core and version-aware MAP reuse. See
+[typed playlists](docs/typed-playlists.md), [key sessions](docs/key-sessions.md),
+[AES resources](docs/aes-resources.md), [keyed prepared sessions](docs/keyed-sessions.md),
+and [diagnostics, progress, capability queries and examples](docs/keyed-contracts.md).
+Package version 0.6.0 extends the existing crate; release acceptance is documented
+in [the verification record](docs/release-0.6.0.md).
+Legacy clear APIs and schema v1 checkpoints remain compatible; AES resume,
+live/EVENT and sample encryption are outside this release.
+
+| Input and workflow | Entry point | Guide |
+| --- | --- | --- |
+| Clear HLS, including legacy single-input resume | `transmux_hls_to_mp4_async` and writer/bytes variants | Quick start and resume sections below |
+| Selected clear VOD, with optional replacement audio | `prepare_hls` | [Prepared sessions](docs/prepared-sessions.md) |
+| Selected finite clear/AES-128 snapshots with an external key provider | `prepare_hls_with_keys` | [Keyed sessions](docs/keyed-sessions.md) |
+
 ## v0.5.0 prepared sessions and pure tracks
 
 `prepare_hls(HlsInputs::new(primary).with_audio(audio), PrepareOptions::default())`
@@ -56,7 +83,7 @@ or native `write_to_file(path, FileOutputOptions::default())`.
   do not support resume; new sessions default to `write_mfra=false`.
 - The same fixture contracts execute in native Rust and actual WASM/Node.
 
-See [prepared sessions](PREPARED_SESSIONS.md) for API examples, timestamp
+See [prepared sessions](docs/prepared-sessions.md) for API examples, timestamp
 mapping, resource bounds and lifecycle rules. Run `python3 scripts/verify_multi_input.py
 --ffmpeg` for independent selected-payload/timestamp checks across output modes.
 
@@ -69,7 +96,7 @@ writer 或 native 文件输出。支持 TS/fMP4 混合输入；外置 AAC 替换
 
 新进度不带 checkpoint，错误提供输入角色和分片上下文；旧 API 与 schema v1
 保持兼容。新接口不支持续传，默认关闭 mfra；原有接口默认值不变。媒体缓冲按
-并发数与分片数限制，不是严格字节预算。详见[接入文档](PREPARED_SESSIONS.md)。
+并发数与分片数限制，不是严格字节预算。详见[接入文档](docs/prepared-sessions.md)。
 
 ## v0.4.2 streaming index memory fix
 
@@ -124,7 +151,7 @@ size cap. Exponential backoff is capped by `backoff_max`; cancellation interrupt
 reads and backoff. Policies cover playlists, initialization and media, including
 prefetch. Diagnostic URLs omit credentials, query strings and fragments.
 A resource cap is not a total memory budget; measurements and the proposed byte
-budget are in [BENCHMARKS.md](BENCHMARKS.md).
+budget are in [benchmarks.md](docs/benchmarks.md).
 
 For finer progress, use `TransmuxRuntimeOptions::on_event` with
 `transmux_hls_to_mp4_async_with_runtime`, `transmux_hls_to_writer_async_with_runtime`,
@@ -153,7 +180,7 @@ existing media/timescale interpretation; recovery does not rewrite history.
 
 ```toml
 [dependencies]
-hls-transmux = "0.5"
+hls-transmux = "0.6"
 ```
 
 The `default-source` feature is enabled by default (built-in reqwest-backed HTTP
@@ -161,7 +188,7 @@ client). To drop reqwest entirely and supply your own HTTP reader:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", default-features = false }
+hls-transmux = { version = "0.6", default-features = false }
 ```
 
 Optionally enable `ffmpeg-finalize` to remux via ffmpeg (through `ffmpeg-next`)
@@ -170,7 +197,7 @@ FFmpeg 9 shared libraries and pkg-config on the system:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.6", features = ["ffmpeg-finalize"] }
 ```
 
 Optionally enable `serde` to derive `Serialize`/`Deserialize` for
@@ -178,7 +205,7 @@ Optionally enable `serde` to derive `Serialize`/`Deserialize` for
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", features = ["serde"] }
+hls-transmux = { version = "0.6", features = ["serde"] }
 ```
 
 ## Custom Source
@@ -516,7 +543,7 @@ do not provide resumable checkpoints.
 Since v0.4, Native finalize and resume validation skip media payload during scans.
 Classic MP4 supports `co64`, extended-size `mdat`, and 64-bit duration headers.
 The bytes API and batch `Mp4` remain in-memory. Schema v1 checkpoints from v0.3
-remain compatible. See [BENCHMARKS.md](BENCHMARKS.md) for measurements and limits.
+remain compatible. See [benchmarks.md](docs/benchmarks.md) for measurements and limits.
 Finalization uses cooperative CPU cancellation;
 filesystem commit and FFmpeg header/trailer operations finish before returning.
 
@@ -526,7 +553,7 @@ Enable `serde` to derive `Serialize`/`Deserialize` on `TransmuxResumeState`:
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", features = ["serde"] }
+hls-transmux = { version = "0.6", features = ["serde"] }
 ```
 
 ```rust
@@ -767,7 +794,7 @@ in-browser HLS → MP4 transmuxing without file system or network dependencies.
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", default-features = false }
+hls-transmux = { version = "0.6", default-features = false }
 ```
 
 `default-features = false` drops `reqwest` (which requires `tokio/net` and is
@@ -918,7 +945,7 @@ MP4，**不解码、不编码、不转码**。
 
 ```toml
 [dependencies]
-hls-transmux = "0.5"
+hls-transmux = "0.6"
 ```
 
 默认启用 `default-source` feature（内置 reqwest-backed HTTP
@@ -926,7 +953,7 @@ hls-transmux = "0.5"
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", default-features = false }
+hls-transmux = { version = "0.6", default-features = false }
 ```
 
 可选启用 `ffmpeg-finalize` feature，在 `StreamingMp4` finalization 阶段用
@@ -935,7 +962,7 @@ ffmpeg（via `ffmpeg-next`）做 remux，替代自研 defrag 路径。需要系�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", features = ["ffmpeg-finalize"] }
+hls-transmux = { version = "0.6", features = ["ffmpeg-finalize"] }
 ```
 
 可选启用 `serde` feature，为 `TransmuxResumeState` 派生
@@ -943,7 +970,7 @@ hls-transmux = { version = "0.5", features = ["ffmpeg-finalize"] }
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", features = ["serde"] }
+hls-transmux = { version = "0.6", features = ["serde"] }
 ```
 
 ### 自定义 Source
@@ -1269,7 +1296,7 @@ Batch 回调只提供信息，不产生可续传 checkpoint。
 
 v0.4 的 Native 收尾及续传校验扫描跳过媒体 payload；经典 MP4 支持 `co64`、
 大尺寸 `mdat` 和 64 位 duration header。bytes API 和 batch `Mp4` 仍在内存中输出，
-v0.3 的 schema v1 checkpoint 保持兼容。测量与限制见 [BENCHMARKS.md](BENCHMARKS.md)。
+v0.3 的 schema v1 checkpoint 保持兼容。测量与限制见 [benchmarks.md](docs/benchmarks.md)。
 取消为协作式；文件提交以及
 FFmpeg 的 header/trailer 操作完成后才返回。
 
@@ -1307,7 +1334,7 @@ TS 视频用下一分片首帧确定当前末帧 duration，最多保留一个�
 超时、有限重试、指数退避与单响应大小上限，统一覆盖 playlist/init/media 和预取；
 读取与退避均可取消。默认沿用客户端超时、不额外重试、不设大小上限。错误保留
 分类并补充阶段、资源和分片序号，URL 去除凭据、query 和 fragment。单资源限制
-不是总内存预算；测量和后续字节预算设计见 [BENCHMARKS.md](BENCHMARKS.md)。
+不是总内存预算；测量和后续字节预算设计见 [benchmarks.md](docs/benchmarks.md)。
 
 新增 `TransmuxRuntimeOptions::on_event` 和四类 `*_with_runtime` 入口，最后一个
 参数为 runtime options，事件区分 Downloading/Processing/Finalizing/Completed。
@@ -1326,7 +1353,7 @@ TS 视频用下一分片首帧确定当前末帧 duration，最多保留一个�
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", features = ["serde"] }
+hls-transmux = { version = "0.6", features = ["serde"] }
 ```
 
 ```rust
@@ -1567,7 +1594,7 @@ pump.await.ok();
 
 ```toml
 [dependencies]
-hls-transmux = { version = "0.5", default-features = false }
+hls-transmux = { version = "0.6", default-features = false }
 ```
 
 `default-features = false` 移除 `reqwest`（需要 `tokio/net`，与 `wasm32-unknown-unknown`

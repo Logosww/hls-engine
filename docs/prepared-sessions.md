@@ -106,7 +106,7 @@ must isolate sessions from other operations. Built-in Reqwest sessions disable
 internal prefetch and retain their headers, retry and timeout policies. The
 optional resource byte cap is enforced during built-in HTTP reads and checked
 on every returned body/text; custom readers own allocations before returning.
-This is not a total byte budget. See `BENCHMARKS.md` for remaining growing buffers.
+This is not a total byte budget. See `benchmarks.md` for remaining growing buffers.
 
 One cancellation token covers both inputs, writer waits and finalize. Dropping
 preparation/execution drops pending reads and stops both sessions. Native blocking

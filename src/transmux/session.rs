@@ -1,7 +1,9 @@
 //! Prepared, demand-driven media sessions. Legacy resume stays in the old pipeline.
+mod keyed;
 use super::*;
 use crate::source::{ByteRange, Source, SourceSessionOptions, safe_location};
 use crate::types::PacketTiming;
+pub use keyed::*;
 use std::collections::VecDeque;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -32,6 +34,7 @@ pub struct SessionError {
     segment_index: Option<usize>,
     resource: Option<String>,
     byte_range: Option<ByteRange>,
+    keyed_cause: Option<Box<crate::crypto::resource::ResourceError>>,
 }
 impl SessionError {
     fn new(error: Error, phase: SessionPhase) -> Self {
@@ -42,6 +45,7 @@ impl SessionError {
             segment_index: None,
             resource: None,
             byte_range: None,
+            keyed_cause: None,
         }
     }
     pub fn error(&self) -> &Error {
@@ -199,10 +203,14 @@ impl SessionEvent {
         self.bytes
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
+type CoreEventCallback = dyn Fn(SessionEvent) + Send + Sync;
+#[cfg(target_arch = "wasm32")]
+type CoreEventCallback = dyn Fn(SessionEvent);
 #[derive(Clone, Default)]
 pub struct PrepareOptions {
     cancel: Option<Arc<dyn CancelToken>>,
-    on_event: Option<Arc<dyn Fn(SessionEvent) + Send + Sync>>,
+    on_event: Option<Arc<CoreEventCallback>>,
     budget: ResourceBudget,
     write_mfra: bool,
 }
@@ -414,16 +422,103 @@ impl Drop for SessionSource {
         self.0.stop_session();
     }
 }
+impl ClearInputResources {
+    async fn read(
+        &mut self,
+        index: usize,
+        role: InputRole,
+        options: &PrepareOptions,
+    ) -> SessionResult<(DemuxOutput, SourceLocation, Option<ByteRange>, u64)> {
+        let segment = &self.media.segments[index];
+        let context = |error, phase, location: Option<&SourceLocation>, byte_range| SessionError {
+            error,
+            role: Some(role),
+            phase,
+            segment_index: Some(index),
+            resource: location.map(safe_location),
+            byte_range,
+            keyed_cause: None,
+        };
+        let location = self
+            .location
+            .resolve(&segment.uri)
+            .map_err(|e| context(e, SessionPhase::Downloading, None, segment.byte_range))?;
+        let range = segment.byte_range;
+        if segment.init_segment.is_some() != self.media.segments[0].init_segment.is_some() {
+            return Err(context(
+                Error::unsupported("input container changes mid-playlist"),
+                SessionPhase::Processing,
+                Some(&location),
+                range,
+            ));
+        }
+        if let Some(spec) = &segment.init_segment {
+            let init_location = self
+                .location
+                .resolve(&spec.uri)
+                .map_err(|e| context(e, SessionPhase::Initialization, None, spec.byte_range))?;
+            let key = (init_location.clone(), spec.byte_range);
+            if self.init.as_ref().is_none_or(|(old, _)| old != &key) {
+                let bytes = crate::cancel::wait(
+                    options.cancel.as_ref(),
+                    self.source
+                        .0
+                        .read_bytes(&init_location, spec.byte_range.as_ref()),
+                )
+                .await
+                .map_err(|e| {
+                    context(
+                        e,
+                        SessionPhase::Initialization,
+                        Some(&init_location),
+                        spec.byte_range,
+                    )
+                })?;
+                check_size(bytes.len(), options.budget.bytes).map_err(|e| {
+                    context(
+                        e,
+                        SessionPhase::Initialization,
+                        Some(&init_location),
+                        spec.byte_range,
+                    )
+                })?;
+                self.init = Some((key, bytes));
+            }
+        }
+        let bytes = crate::cancel::wait(
+            options.cancel.as_ref(),
+            self.source.0.read_bytes(&location, range.as_ref()),
+        )
+        .await
+        .map_err(|e| context(e, SessionPhase::Downloading, Some(&location), range))?;
+        check_size(bytes.len(), options.budget.bytes)
+            .map_err(|e| context(e, SessionPhase::Downloading, Some(&location), range))?;
+        let data = if segment.init_segment.is_some() {
+            demux_isobmff(&self.init.as_ref().unwrap().1, &bytes)
+        } else {
+            demux_ts(&bytes)
+        }
+        .map_err(|e| context(e, SessionPhase::Processing, Some(&location), range))?;
+        Ok((data, location, range, bytes.len() as u64))
+    }
+}
 struct SegmentBatch {
     index: usize,
     data: DemuxOutput,
 }
-struct InputCursor {
-    role: InputRole,
+struct ClearInputResources {
     source: SessionSource,
     location: SourceLocation,
     media: MediaPlaylist,
     init: InitCache,
+}
+enum InputResources {
+    Clear(Box<ClearInputResources>),
+    Keyed(Box<keyed::KeyedCursor>),
+}
+struct InputCursor {
+    role: InputRole,
+    resources: InputResources,
     clock: TimestampClock,
     config: Option<DemuxOutput>,
     pending: VecDeque<SegmentBatch>,
@@ -444,25 +539,31 @@ impl InputCursor {
         location: Option<&SourceLocation>,
         range: Option<ByteRange>,
     ) -> SessionError {
-        let segment = index.and_then(|i| self.media.segments.get(i));
-        let resolved = if phase == SessionPhase::Processing {
-            segment.and_then(|s| self.location.resolve(&s.uri).ok())
-        } else {
-            None
-        };
+        let resolved = index.and_then(|i| match &self.resources {
+            InputResources::Clear(clear) => clear.media.segments.get(i).and_then(|s| {
+                clear
+                    .location
+                    .resolve(&s.uri)
+                    .ok()
+                    .map(|l| (l, s.byte_range))
+            }),
+            InputResources::Keyed(keyed) => keyed.snapshot.segments().get(i).map(|s| {
+                (
+                    s.location().location().clone(),
+                    s.range().map(|r| r.byte_range()),
+                )
+            }),
+        });
         SessionError {
             error,
             role: Some(self.role),
             phase,
             segment_index: index,
-            resource: location.or(resolved.as_ref()).map(safe_location),
-            byte_range: range.or_else(|| {
-                if phase == SessionPhase::Processing {
-                    segment.and_then(|s| s.byte_range)
-                } else {
-                    None
-                }
-            }),
+            resource: location
+                .or(resolved.as_ref().map(|r| &r.0))
+                .map(safe_location),
+            byte_range: range.or_else(|| resolved.and_then(|r| r.1)),
+            keyed_cause: None,
         }
     }
     async fn open(
@@ -492,6 +593,7 @@ impl InputCursor {
             segment_index: None,
             resource: Some(safe_location(&root)),
             byte_range: None,
+            keyed_cause: None,
         };
         let text = crate::cancel::wait(options.cancel.as_ref(), source.0.read_text(&root))
             .await
@@ -511,10 +613,12 @@ impl InputCursor {
         let total = media.segments.len();
         Ok(Self {
             role,
-            source,
-            location: text.location,
-            media,
-            init: None,
+            resources: InputResources::Clear(Box::new(ClearInputResources {
+                source,
+                location: text.location,
+                media,
+                init: None,
+            })),
             clock: TimestampClock::default(),
             config: None,
             pending: VecDeque::new(),
@@ -533,91 +637,18 @@ impl InputCursor {
             ts_last: [None, None],
         })
     }
-    async fn bytes(
-        &self,
-        location: &SourceLocation,
-        range: Option<ByteRange>,
-        phase: SessionPhase,
-        options: &PrepareOptions,
-    ) -> SessionResult<Vec<u8>> {
-        let data = crate::cancel::wait(
-            options.cancel.as_ref(),
-            self.source.0.read_bytes(location, range.as_ref()),
-        )
-        .await
-        .map_err(|e| self.error(e, phase, Some(self.next), Some(location), range))?;
-        check_size(data.len(), options.budget.bytes)
-            .map_err(|e| self.error(e, phase, Some(self.next), Some(location), range))?;
-        Ok(data)
-    }
     async fn read(&mut self, options: &PrepareOptions) -> SessionResult<()> {
-        if self.next == self.media.segments.len() {
+        if self.next == self.progress.total {
             return Ok(());
         }
-        let segment = &self.media.segments[self.next];
-        let location = self.location.resolve(&segment.uri).map_err(|e| {
-            self.error(
-                e,
-                SessionPhase::Downloading,
-                Some(self.next),
-                None,
-                segment.byte_range,
-            )
-        })?;
-        let init_spec = segment.init_segment.clone();
-        let range = segment.byte_range;
-        if init_spec.is_some() != self.media.segments[0].init_segment.is_some() {
-            return Err(self.error(
-                Error::unsupported("input container changes mid-playlist"),
-                SessionPhase::Processing,
-                Some(self.next),
-                Some(&location),
-                range,
-            ));
-        }
-        if let Some(spec) = &init_spec {
-            let init_location = self.location.resolve(&spec.uri).map_err(|e| {
-                self.error(
-                    e,
-                    SessionPhase::Initialization,
-                    Some(self.next),
-                    None,
-                    spec.byte_range,
-                )
-            })?;
-            let key = (init_location.clone(), spec.byte_range);
-            if self.init.as_ref().is_none_or(|(old, _)| old != &key) {
-                let bytes = self
-                    .bytes(
-                        &init_location,
-                        spec.byte_range,
-                        SessionPhase::Initialization,
-                        options,
-                    )
-                    .await?;
-                self.init = Some((key, bytes));
-            }
-        }
-        let bytes = self
-            .bytes(&location, range, SessionPhase::Downloading, options)
-            .await?;
-        let mut data = if init_spec.is_some() {
-            demux_isobmff(&self.init.as_ref().unwrap().1, &bytes)
-        } else {
-            demux_ts(&bytes)
-        }
-        .map_err(|e| {
-            self.error(
-                e,
-                SessionPhase::Processing,
-                Some(self.next),
-                Some(&location),
-                range,
-            )
-        })?;
+        let role = self.role;
+        let index = self.next;
+        let (mut data, location, range, size) = match &mut self.resources {
+            InputResources::Clear(clear) => clear.read(index, role, options).await?,
+            InputResources::Keyed(keyed) => keyed.read(index, role, options).await?,
+        };
         self.progress.downloaded += 1;
-        self.progress.downloaded_bytes += bytes.len() as u64;
-        drop(bytes);
+        self.progress.downloaded_bytes += size;
         if self.external {
             select_track(&mut data, self.role);
         }
@@ -702,7 +733,7 @@ impl InputCursor {
                 return Ok(());
             }
             // Empty segments own no samples, but remain for progress accounting.
-            if self.next == self.media.segments.len() {
+            if self.next == self.progress.total {
                 break;
             }
         }
@@ -733,7 +764,7 @@ impl InputCursor {
                 .iter()
                 .any(|p| p.timing.is_none() && !matches!(p.kind, StreamKind::Aac))
         });
-        if needs_next && self.pending.len() == 1 && self.next < self.media.segments.len() {
+        if needs_next && self.pending.len() == 1 && self.next < self.progress.total {
             self.read(options).await?;
         }
         Ok(())
@@ -888,6 +919,12 @@ pub async fn prepare_hls(
     if let Some(audio) = inputs.audio {
         cursors.push(InputCursor::open(audio, InputRole::Audio, true, &options).await?);
     }
+    prepare_cursors(cursors, options).await
+}
+async fn prepare_cursors(
+    mut cursors: Vec<InputCursor>,
+    options: PrepareOptions,
+) -> SessionResult<PreparedTransmux> {
     if cursors.len() == 2 && options.budget.reads >= 2 {
         let (left, right) = cursors.split_at_mut(1);
         tokio::try_join!(left[0].probe(&options), right[0].probe(&options))?;
@@ -1070,7 +1107,10 @@ impl PreparedTransmux {
         };
         let input = &mut self.inputs[selected];
         let index = input.pending.front().unwrap().index;
-        let is_ts = input.media.segments[index].init_segment.is_none();
+        let is_ts = match &input.resources {
+            InputResources::Clear(clear) => clear.media.segments[index].init_segment.is_none(),
+            InputResources::Keyed(keyed) => keyed.snapshot.segments()[index].map().is_none(),
+        };
         let batch = input
             .take()
             .map_err(|e| input.error(e, SessionPhase::Processing, Some(index), None, None))?

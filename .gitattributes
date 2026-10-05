@@ -3,3 +3,10 @@ tests/fixtures/media/**/*.m3u8 text eol=lf
 tests/fixtures/media/**/*.ts -text
 tests/fixtures/media/**/*.m4s -text
 tests/fixtures/media/**/*.fmp4 -text
+
+# Independent AES-128 ciphertext must never undergo newline conversion.
+tests/fixtures/crypto/**/*.cbc -text
+tests/fixtures/crypto/**/*.bin -text
+tests/fixtures/crypto/*.cbc -text
+tests/fixtures/crypto/**/*.m3u8 text eol=lf
+tests/runtime/playlist.m3u8 text eol=lf

@@ -93,12 +93,16 @@
 //!
 //! # Not yet supported
 //!
-//! Encryption (AES-128 / SAMPLE-AES), live playlists, discontinuities, automatic alternate
+//! Legacy entry points reject encryption; the additive [`prepare_hls_with_keys`] supports
+//! finite clear/AES-128 snapshots. See [`capabilities`] for combination queries.
+//! SAMPLE-AES, live playlists, discontinuities, automatic alternate
 //! audio selection, multi-track containers, and non-AVC/HEVC/AAC-LC codecs return a
 //! structured [`Error::Unsupported`] variant.
 
 mod cancel;
+pub mod capabilities;
 mod codecs;
+pub mod crypto;
 mod error;
 #[cfg(feature = "ffmpeg-finalize")]
 mod ffmpeg_finalize;
@@ -106,6 +110,7 @@ mod hls;
 mod isobmff;
 mod mp4;
 mod mpeg_ts;
+pub mod playlist;
 mod resume;
 mod source;
 mod transmux;
@@ -113,6 +118,7 @@ mod types;
 
 pub use cancel::CancelToken;
 pub use error::{Error, Result};
+pub use playlist::parse_playlist_snapshot;
 pub use resume::{
     CHECKPOINT_SCHEMA_VERSION, CheckpointDurability, TransmuxResumeState, TransmuxStage,
 };

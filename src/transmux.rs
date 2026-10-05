@@ -457,10 +457,10 @@ async fn transmux_file_impl(
     #[cfg(target_arch = "wasm32")]
     {
         let _ = (&input, &output, &options, runtime);
-        return Err(Error::unsupported(
+        Err(Error::unsupported(
             "transmux_hls_to_mp4_async is not available on wasm32 (requires file system); \
              use transmux_hls_to_writer_async or transmux_hls_to_mp4_bytes instead",
-        ));
+        ))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -1,0 +1,24 @@
+[package]
+name = "hls-transmux-runtime-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+ffmpeg-finalize = ["hls-transmux/ffmpeg-finalize"]
+
+[dependencies]
+hls-transmux = { path = "../..", default-features = false, features = ["serde"] }
+futures = "=0.3.32"
+sha2 = "0.10"
+serde_json = "1"
+url = "2"
+tokio = { version = "1", default-features = false, features = ["io-util", "sync"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.100"
+wasm-bindgen-futures = "=0.4.50"
+js-sys = "=0.3.77"

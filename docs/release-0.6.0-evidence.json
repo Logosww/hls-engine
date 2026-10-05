@@ -1,0 +1,1753 @@
+{
+  "date": "2026-10-05",
+  "scope": "P6 local release acceptance; no publication or remote CI claim",
+  "version": "0.6.0",
+  "feature_tests": {
+    "default": {
+      "passed": 191,
+      "failed": 0,
+      "ignored": 3
+    },
+    "serde": {
+      "passed": 195,
+      "failed": 0,
+      "ignored": 3
+    },
+    "no-default": {
+      "passed": 160,
+      "failed": 0,
+      "ignored": 3
+    },
+    "no-default-serde": {
+      "passed": 164,
+      "failed": 0,
+      "ignored": 3
+    },
+    "all-features": {
+      "passed": 196,
+      "failed": 0,
+      "ignored": 3
+    }
+  },
+  "runtimes": {
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "node": "v26.10.0",
+    "wasm-bindgen": "wasm-bindgen 0.2.100",
+    "ffmpeg": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+    "openssl": "LibreSSL 3.3.6"
+  },
+  "node": {
+    "p0": {
+      "runtime": "v26.10.0",
+      "nativeWasmEqual": true,
+      "bridge": {
+        "promises": 24,
+        "reentries": 24,
+        "lateCompletions": 2,
+        "aborts": [
+          [
+            10,
+            1
+          ],
+          [
+            21,
+            1
+          ],
+          [
+            23,
+            1
+          ],
+          [
+            22,
+            1
+          ],
+          [
+            20,
+            1
+          ]
+        ],
+        "unhandledRejections": 0
+      },
+      "report_sha256": "5762bb0a1b8af3854785d1740732eef6188f9e47cb8ecca7ce12722ebfd50021"
+    },
+    "p1": {
+      "runtime": "v26.10.0",
+      "nativeWasmArchiveEqual": true,
+      "jsRoundtripEqual": true,
+      "rejectedArchives": 9,
+      "archiveSha256": "c20675cf7d5935064ab22c362bd4de3fe0643e4dc79879f88f72c8032c1955f8"
+    },
+    "p2": {
+      "runtime": "v26.10.0",
+      "nativeWasmEqual": true,
+      "bridge": {
+        "promises": 16,
+        "reentries": 21,
+        "lateCompletions": 4,
+        "aborts": [
+          [
+            "cancel:1",
+            1
+          ],
+          [
+            "drop:1",
+            1
+          ],
+          [
+            "last:1",
+            1
+          ],
+          [
+            "reject-late:1",
+            1
+          ]
+        ],
+        "unhandledRejections": 0
+      },
+      "report_sha256": "9ef043ace8ce4c3695d1016755f012993b6bd0b642538204ec7f29c3af488f90"
+    },
+    "p3": {
+      "runtime": "v26.10.0",
+      "nativeWasmEqual": true,
+      "bridge": {
+        "promises": 31,
+        "aborts": 1,
+        "lateCompletions": 1,
+        "cancelledResourceReleased": true,
+        "unhandledRejections": 0
+      },
+      "report_sha256": "f4c1bfc114b2e11135734510e4da6adf2d4496944dfd7f8ac1cda8b4a27ad69a"
+    },
+    "p4": {
+      "runtime": "v26.10.0",
+      "nativeWasmEqual": true,
+      "bridge": {
+        "promises": 401,
+        "aborts": 1,
+        "lateCompletions": 1,
+        "cancelledPreparationReleased": true,
+        "unhandledRejections": 0
+      },
+      "report_sha256": "04287acf60a53d2b761b85f5a67fff31ee4700054187031b8a1e3310a4fbceec"
+    },
+    "p5": {
+      "runtime": "v26.10.0",
+      "nativeWasmEqual": true,
+      "bridge": {
+        "promises": 12,
+        "exampleBytes": 275048,
+        "jsCallbackEvents": 17,
+        "providerFailureCases": 3,
+        "unhandledRejections": 0
+      },
+      "report_sha256": "34ef74166edcc0285d5b049ac38067abb63678be6f7218149d68303ce3e9af78"
+    }
+  },
+  "browser": {
+    "p0": {
+      "status": "PASS",
+      "runtime": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+      "report": {
+        "keys": {
+          "cache_entries": 8,
+          "cancel_drop": true,
+          "coalesced": true,
+          "max_in_flight": 2,
+          "operation_isolation": true,
+          "reject": true,
+          "waiter_drop": true
+        },
+        "lifecycle": {
+          "blocked_reads": 1,
+          "cancel_final_flush": true,
+          "drop": true,
+          "end_reasons": [
+            "Stop",
+            "Cancelled"
+          ],
+          "flush_failure": true,
+          "independent_eof": true,
+          "queue_capacity": 2,
+          "writer_closed": false
+        },
+        "media": {
+          "aac-cbcs": "c89dbd2e9252fe0999f63d218ededfb881f8cea4d7ade79a73c6c5c77c9a9245",
+          "aac-cenc": "c89dbd2e9252fe0999f63d218ededfb881f8cea4d7ade79a73c6c5c77c9a9245",
+          "avc-cbcs": "331dc0ef5145eed1a20a40ee72cc1a258e5ee257051ddb01a06df8a1a70578b4",
+          "avc-cenc": "331dc0ef5145eed1a20a40ee72cc1a258e5ee257051ddb01a06df8a1a70578b4",
+          "hevc-cbcs": "dce0d3e790cea4f402b700331c2afe2b98846f3bdab52aabce2cec31983eb096",
+          "hevc-cenc": "dce0d3e790cea4f402b700331c2afe2b98846f3bdab52aabce2cec31983eb096",
+          "resource": "fb0201bbf7aa14dae95749359830f248eeae70ff82d7a83b331ccd44a9fb08be",
+          "ts-aac": "d4b1cfda34eaae34f1f87cdbd3fdd142eb0d42613b902354577cc841a4f01f73",
+          "ts-avc": "e312f5f9239f3976fb1fc434acb9e5ec616ae16a3eed40f58edcfe20215e8ceb"
+        },
+        "protocol": {
+          "atomic_accept": true,
+          "dedup": true,
+          "generation": true,
+          "lossless_wire": true,
+          "rewrite": true
+        },
+        "timeline": {
+          "audio_90k": [
+            9000,
+            234000
+          ],
+          "cue_ms": [
+            [
+              1800,
+              2000
+            ],
+            [
+              2500,
+              2700
+            ]
+          ],
+          "epoch_ids": [
+            7,
+            8
+          ],
+          "negative_cts": -900,
+          "video_90k": [
+            0,
+            225000
+          ]
+        }
+      },
+      "bridge": {
+        "promises": 24,
+        "reentries": 24,
+        "lateCompletions": 2,
+        "aborts": [
+          [
+            10,
+            1
+          ],
+          [
+            21,
+            1
+          ],
+          [
+            23,
+            1
+          ],
+          [
+            22,
+            1
+          ],
+          [
+            20,
+            1
+          ]
+        ],
+        "unhandledRejections": 0
+      },
+      "nativeWasmBrowserEqual": true
+    },
+    "p2": {
+      "status": "PASS",
+      "runtime": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+      "report": {
+        "bounded": true,
+        "cancelDrop": true,
+        "coalesced": true,
+        "expiry": true,
+        "invalidation": true,
+        "lastWaiterAbort": true,
+        "lateGeneration": true,
+        "operationIsolation": true,
+        "productionKeySession": true,
+        "singleWaiterDrop": true,
+        "strictKeyBytes": true,
+        "typedRejection": true
+      },
+      "bridge": {
+        "promises": 16,
+        "reentries": 21,
+        "lateCompletions": 4,
+        "aborts": [
+          [
+            "cancel:1",
+            1
+          ],
+          [
+            "drop:1",
+            1
+          ],
+          [
+            "last:1",
+            1
+          ],
+          [
+            "reject-late:1",
+            1
+          ]
+        ],
+        "unhandledRejections": 0
+      },
+      "nativeWasmBrowserEqual": true
+    },
+    "p3": {
+      "status": "PASS",
+      "runtime": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+      "report": {
+        "cases": [
+          {
+            "name": "ts_avc_regular",
+            "ranges": false,
+            "sha256": "754e99493f006ac57a3488156989dc11923446900d2d59aa3e28b89500ada8de"
+          },
+          {
+            "name": "ts_avc_regular",
+            "ranges": true,
+            "sha256": "754e99493f006ac57a3488156989dc11923446900d2d59aa3e28b89500ada8de"
+          },
+          {
+            "name": "ts_hevc_regular",
+            "ranges": false,
+            "sha256": "60116463b23864d9818d0f2732d33e0f651efb9f11f36586af528ca6a5c5ac4d"
+          },
+          {
+            "name": "ts_hevc_regular",
+            "ranges": true,
+            "sha256": "60116463b23864d9818d0f2732d33e0f651efb9f11f36586af528ca6a5c5ac4d"
+          },
+          {
+            "name": "ts_aac_audio_only",
+            "ranges": false,
+            "sha256": "071eae82c7ae04ca38dbc04fef6f86c12a8b2d35fe14d132dead91beaf94bbe6"
+          },
+          {
+            "name": "ts_aac_audio_only",
+            "ranges": true,
+            "sha256": "071eae82c7ae04ca38dbc04fef6f86c12a8b2d35fe14d132dead91beaf94bbe6"
+          },
+          {
+            "name": "fmp4_avc_regular",
+            "ranges": false,
+            "sha256": "4dd9bacc7d7bfc48447980b8aef34b96b242c1a2b7e88a62e02aeffa1854723f"
+          },
+          {
+            "name": "fmp4_avc_regular",
+            "ranges": true,
+            "sha256": "4dd9bacc7d7bfc48447980b8aef34b96b242c1a2b7e88a62e02aeffa1854723f"
+          },
+          {
+            "name": "fmp4_hevc_regular",
+            "ranges": false,
+            "sha256": "f626454b1575b6d1dd590b3327a03056e552a36b278454fc1e5f21bf4a7a8f02"
+          },
+          {
+            "name": "fmp4_hevc_regular",
+            "ranges": true,
+            "sha256": "f626454b1575b6d1dd590b3327a03056e552a36b278454fc1e5f21bf4a7a8f02"
+          },
+          {
+            "name": "fmp4_aac_audio_only",
+            "ranges": false,
+            "sha256": "89112b81550bdb684004b26fc47efc1da9abe73d87b997bf0b0c869588875de7"
+          },
+          {
+            "name": "fmp4_aac_audio_only",
+            "ranges": true,
+            "sha256": "89112b81550bdb684004b26fc47efc1da9abe73d87b997bf0b0c869588875de7"
+          }
+        ],
+        "clearSwitch": true,
+        "completeResourceDecryption": true,
+        "mapIv": true,
+        "originalSequenceIv": true,
+        "sameUriKeyRotation": true
+      },
+      "bridge": {
+        "promises": 31,
+        "aborts": 1,
+        "lateCompletions": 1,
+        "cancelledResourceReleased": true,
+        "unhandledRejections": 0
+      },
+      "nativeWasmBrowserEqual": true
+    },
+    "p4": {
+      "status": "PASS",
+      "runtime": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+      "report": {
+        "cases": [
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "bcd8095bf8c81325fb8138a9969bdcbcb3171659ccbe70b1948f1e096907eb44",
+            "mp4": "c285b47718119916d7b915fd47fd7641ff79a847c92adad12e03717aa3fd7438",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "bcd8095bf8c81325fb8138a9969bdcbcb3171659ccbe70b1948f1e096907eb44",
+            "mp4": "c285b47718119916d7b915fd47fd7641ff79a847c92adad12e03717aa3fd7438",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "bcd8095bf8c81325fb8138a9969bdcbcb3171659ccbe70b1948f1e096907eb44",
+            "mp4": "c285b47718119916d7b915fd47fd7641ff79a847c92adad12e03717aa3fd7438",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "bcd8095bf8c81325fb8138a9969bdcbcb3171659ccbe70b1948f1e096907eb44",
+            "mp4": "c285b47718119916d7b915fd47fd7641ff79a847c92adad12e03717aa3fd7438",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "2aeda426fbf4ed00b7fc4448a1ec3aa45954976219204d94700b6dc2fc0ce898",
+            "mp4": "e40f88aac6b297799da869810ade8e4264e8cf651789970f4464d011c8b8ae2a",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "2aeda426fbf4ed00b7fc4448a1ec3aa45954976219204d94700b6dc2fc0ce898",
+            "mp4": "e40f88aac6b297799da869810ade8e4264e8cf651789970f4464d011c8b8ae2a",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "2aeda426fbf4ed00b7fc4448a1ec3aa45954976219204d94700b6dc2fc0ce898",
+            "mp4": "e40f88aac6b297799da869810ade8e4264e8cf651789970f4464d011c8b8ae2a",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "2aeda426fbf4ed00b7fc4448a1ec3aa45954976219204d94700b6dc2fc0ce898",
+            "mp4": "e40f88aac6b297799da869810ade8e4264e8cf651789970f4464d011c8b8ae2a",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "89429fbecad0ff77572076797ed4f2d0d5e52d631b647202dcbf3c1d77049a9b",
+            "mp4": "6b575a61db56835a173910f49c5d5796b0d4fc5e0b40dc85ffbca80f999482dc",
+            "primary": "ts_aac_audio_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "89429fbecad0ff77572076797ed4f2d0d5e52d631b647202dcbf3c1d77049a9b",
+            "mp4": "6b575a61db56835a173910f49c5d5796b0d4fc5e0b40dc85ffbca80f999482dc",
+            "primary": "ts_aac_audio_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "89429fbecad0ff77572076797ed4f2d0d5e52d631b647202dcbf3c1d77049a9b",
+            "mp4": "6b575a61db56835a173910f49c5d5796b0d4fc5e0b40dc85ffbca80f999482dc",
+            "primary": "ts_aac_audio_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "89429fbecad0ff77572076797ed4f2d0d5e52d631b647202dcbf3c1d77049a9b",
+            "mp4": "6b575a61db56835a173910f49c5d5796b0d4fc5e0b40dc85ffbca80f999482dc",
+            "primary": "ts_aac_audio_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "d44e723d800f4596e896c7e5381a7db7fccc74e6df1e66493a0b3da73e0c2894",
+            "mp4": "ab11a03fadfb98e5243e9d30a56a89e0a4f20732a5f1784d88f9f01682c9859e",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "d44e723d800f4596e896c7e5381a7db7fccc74e6df1e66493a0b3da73e0c2894",
+            "mp4": "ab11a03fadfb98e5243e9d30a56a89e0a4f20732a5f1784d88f9f01682c9859e",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "d44e723d800f4596e896c7e5381a7db7fccc74e6df1e66493a0b3da73e0c2894",
+            "mp4": "ab11a03fadfb98e5243e9d30a56a89e0a4f20732a5f1784d88f9f01682c9859e",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "d44e723d800f4596e896c7e5381a7db7fccc74e6df1e66493a0b3da73e0c2894",
+            "mp4": "ab11a03fadfb98e5243e9d30a56a89e0a4f20732a5f1784d88f9f01682c9859e",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "ff0de4ed8a908107c83200b47c112e5fa926492c9504fbd3cf17dcac8374daeb",
+            "mp4": "9a377d7a7b11cf974d475cd1d84fa883b32c9eeee5e16fba5f93dc259bfa9aed",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "ff0de4ed8a908107c83200b47c112e5fa926492c9504fbd3cf17dcac8374daeb",
+            "mp4": "9a377d7a7b11cf974d475cd1d84fa883b32c9eeee5e16fba5f93dc259bfa9aed",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "ff0de4ed8a908107c83200b47c112e5fa926492c9504fbd3cf17dcac8374daeb",
+            "mp4": "9a377d7a7b11cf974d475cd1d84fa883b32c9eeee5e16fba5f93dc259bfa9aed",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "ff0de4ed8a908107c83200b47c112e5fa926492c9504fbd3cf17dcac8374daeb",
+            "mp4": "9a377d7a7b11cf974d475cd1d84fa883b32c9eeee5e16fba5f93dc259bfa9aed",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "35f104b71a1c2cfffc605ffc42ebefd5a8fa03e7374c7fc555d91b0fffb99333",
+            "mp4": "07b3ddccfe12961b3d3988caf820cd01cf42ef17b215d48e8859bc5e357d9fdc",
+            "primary": "fmp4_aac_audio_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "35f104b71a1c2cfffc605ffc42ebefd5a8fa03e7374c7fc555d91b0fffb99333",
+            "mp4": "07b3ddccfe12961b3d3988caf820cd01cf42ef17b215d48e8859bc5e357d9fdc",
+            "primary": "fmp4_aac_audio_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "35f104b71a1c2cfffc605ffc42ebefd5a8fa03e7374c7fc555d91b0fffb99333",
+            "mp4": "07b3ddccfe12961b3d3988caf820cd01cf42ef17b215d48e8859bc5e357d9fdc",
+            "primary": "fmp4_aac_audio_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "35f104b71a1c2cfffc605ffc42ebefd5a8fa03e7374c7fc555d91b0fffb99333",
+            "mp4": "07b3ddccfe12961b3d3988caf820cd01cf42ef17b215d48e8859bc5e357d9fdc",
+            "primary": "fmp4_aac_audio_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "8ac34053443ae707dd1a22e7bad8f18b6b55e0c461e77b3267a7e2e240eac33a",
+            "mp4": "3d48ca9f556d32bcd39a73b1fd4b30a6eb0acdeacc73e3d3dd100d86e120622c",
+            "primary": "ts_avc_video_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "8ac34053443ae707dd1a22e7bad8f18b6b55e0c461e77b3267a7e2e240eac33a",
+            "mp4": "3d48ca9f556d32bcd39a73b1fd4b30a6eb0acdeacc73e3d3dd100d86e120622c",
+            "primary": "ts_avc_video_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "8ac34053443ae707dd1a22e7bad8f18b6b55e0c461e77b3267a7e2e240eac33a",
+            "mp4": "3d48ca9f556d32bcd39a73b1fd4b30a6eb0acdeacc73e3d3dd100d86e120622c",
+            "primary": "ts_avc_video_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "8ac34053443ae707dd1a22e7bad8f18b6b55e0c461e77b3267a7e2e240eac33a",
+            "mp4": "3d48ca9f556d32bcd39a73b1fd4b30a6eb0acdeacc73e3d3dd100d86e120622c",
+            "primary": "ts_avc_video_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "d672b6f21b82ee026c9bba94fbdd4dc7013b37972719be56a93619af0a04c851",
+            "mp4": "07e47809d45e588fff1b71eb52eb6b6265ec328952e9017d9113c93a50a79425",
+            "primary": "fmp4_avc_video_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "d672b6f21b82ee026c9bba94fbdd4dc7013b37972719be56a93619af0a04c851",
+            "mp4": "07e47809d45e588fff1b71eb52eb6b6265ec328952e9017d9113c93a50a79425",
+            "primary": "fmp4_avc_video_only",
+            "ranges": true
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "d672b6f21b82ee026c9bba94fbdd4dc7013b37972719be56a93619af0a04c851",
+            "mp4": "07e47809d45e588fff1b71eb52eb6b6265ec328952e9017d9113c93a50a79425",
+            "primary": "fmp4_avc_video_only",
+            "ranges": false
+          },
+          {
+            "audio": null,
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "d672b6f21b82ee026c9bba94fbdd4dc7013b37972719be56a93619af0a04c851",
+            "mp4": "07e47809d45e588fff1b71eb52eb6b6265ec328952e9017d9113c93a50a79425",
+            "primary": "fmp4_avc_video_only",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "c0b62e5a7fd2a82a62fa41e99926d31a2cf3f08f39084fbb6b1d9199d7c9f5ab",
+            "mp4": "465540cf74d6c5e362b3a6eae6228af064617cce19851afb6461e96f8d851789",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "5edee8087624cd62547df7543b399d9be11d8ebfff83edee91331f68f0b2eaef",
+            "mp4": "ece89e6b646d94428d3e39683bf90ddbaf9d8fb793f89d6c65c35e97ae39e1ef",
+            "primary": "ts_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "a7ff683189f5f9d7e6682115b47903ec013a2f6742d80fd2703d6465af378c84",
+            "mp4": "b05e319aca8414bbc68ac9b183825c64100788d424f7dd429b4af27a6c477ecc",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "4da411bf7f708e525528bd0dc9f4d98abe5cd697e1dc89a91b6b609c0e796b38",
+            "mp4": "3e156269639d112aeb5f4660960b21da4570cafe59e8d80bed13874241d7ad56",
+            "primary": "ts_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "f7e8c7622db36ac934e5d548005f7fc7d971f8d2228cfae70dc6b5a506d1d19e",
+            "mp4": "f49be26f68352bcbb8685e20ce03fe40b3d08aa6b9e80b0b9b452fd08fcf7fa8",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "1c8584ae0b8661fc13f92422ef2588e848e01f26859b6f473bd2c2a16a0b8063",
+            "mp4": "b698f55ec96ca3b14ad39068c6f1149ff0a8d2405d10f854d4c5d3d4f3c12e84",
+            "primary": "fmp4_avc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "ts_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "5266b4011a1d1e4598890cc030f5593e98b4bde2a34db76c8088ba1dfa9fb597",
+            "mp4": "16d1f8745521aa075929794f50c2358ac36371e192a1f7ae443f707ca11e89b3",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              false
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              false,
+              true
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              false
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": false
+          },
+          {
+            "audio": "fmp4_aac_audio_only",
+            "encrypted": [
+              true,
+              true
+            ],
+            "fragmented": "b9aaf789b9cbaf06caba7be500e893ab65ae6ff7352da92f98f51ab896a9685a",
+            "mp4": "e701138281770e8ae5e504bc56c4c9bc2486447f1fc1c7978ca2d30569ea3937",
+            "primary": "fmp4_hevc_regular",
+            "ranges": true
+          }
+        ],
+        "originalSequenceIv": true,
+        "replacementAudio": true,
+        "sharedCore": true
+      },
+      "bridge": {
+        "promises": 401,
+        "aborts": 1,
+        "lateCompletions": 1,
+        "cancelledPreparationReleased": true,
+        "unhandledRejections": 0
+      },
+      "nativeWasmBrowserEqual": true
+    },
+    "p5": {
+      "status": "PASS",
+      "runtime": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+      "report": {
+        "portableQueries": 80,
+        "reports": [
+          {
+            "clearBytes": "305312",
+            "committed": 3,
+            "decryptedBytes": "0",
+            "downloadedBytes": "305312",
+            "encrypted": false,
+            "events": 15,
+            "input": "ts_avc_regular",
+            "mapBytes": "0",
+            "mapReuses": 0
+          },
+          {
+            "clearBytes": "305312",
+            "committed": 3,
+            "decryptedBytes": "204732",
+            "downloadedBytes": "305332",
+            "encrypted": true,
+            "events": 17,
+            "input": "ts_avc_regular",
+            "mapBytes": "0",
+            "mapReuses": 0
+          },
+          {
+            "clearBytes": "273650",
+            "committed": 3,
+            "decryptedBytes": "0",
+            "downloadedBytes": "273650",
+            "encrypted": false,
+            "events": 19,
+            "input": "fmp4_avc_regular",
+            "mapBytes": "1354",
+            "mapReuses": 2
+          },
+          {
+            "clearBytes": "273650",
+            "committed": 3,
+            "decryptedBytes": "182804",
+            "downloadedBytes": "273678",
+            "encrypted": true,
+            "events": 22,
+            "input": "fmp4_avc_regular",
+            "mapBytes": "1360",
+            "mapReuses": 2
+          },
+          {
+            "dualInput": true,
+            "inputs": [
+              {
+                "committed": 3,
+                "decryptedBytes": "140690",
+                "downloadedBytes": "213286",
+                "maps": 1
+              },
+              {
+                "committed": 3,
+                "decryptedBytes": "53392",
+                "downloadedBytes": "79916",
+                "maps": 0
+              }
+            ]
+          }
+        ]
+      },
+      "bridge": {
+        "promises": 12,
+        "exampleBytes": 275048,
+        "jsCallbackEvents": 17,
+        "providerFailureCases": 3,
+        "unhandledRejections": 0
+      },
+      "nativeWasmBrowserEqual": true
+    }
+  },
+  "independent": {
+    "clear_inputs": 14,
+    "clear_outputs": 42,
+    "dual_input_outputs": 48,
+    "crypto_files": 51,
+    "crypto_cases": 8,
+    "independent_decryptions": 20,
+    "crypto_decodes": 8,
+    "keyed_outputs": 64
+  },
+  "commands": [
+    "scripts/verify_media.py",
+    "scripts/verify_multi_input.py --ffmpeg",
+    "scripts/verify_crypto.py --openssl --ffmpeg",
+    "scripts/verify_keyed.py --ffmpeg",
+    "scripts/verify_keyed_examples.py",
+    "scripts/verify_package.py --allow-dirty"
+  ],
+  "source_sha256": {
+    "Cargo.lock": "16e0cb31166e56e3a2b120521a3d0ab21d9fb97431346f450f2101a5c2b97c5c",
+    "Cargo.toml": "f9ff01fb9c4276513ea94b55818ddb899f9504e8544c8509e317da178145d9c7",
+    "examples/keyed_demo.rs": "6e75fb61eb187bee1262fa54d1e8472b1d6f2bd4cbdb45abbf11812ea1b0f4b0",
+    "examples/keyed_wasm.rs": "cc32c2fc6c310ea4c15126a7b8abbe763e7e2d9ab59497fa74d7fde5e5e74728",
+    "src/cancel.rs": "2113e6996ec916057380c5d32df0463022174c576108aaa832952a43a3d657bc",
+    "src/capabilities.rs": "d2e33b498813e874261455d9bbb2975652720fefd70223211df128ba9f8f6eae",
+    "src/codecs.rs": "6a17072ea51ced7ad7a43ac781ca208996f85b9ef2d38a658acc34fabe853d0c",
+    "src/crypto/key.rs": "124d254467adfe61249b498ae19bb8950739cea353f2978e16e378bd6421b01c",
+    "src/crypto/resource.rs": "ee0cb39800a1cffec062dcfc05d3824fdcc8164fd68caac020170eab6512d2e4",
+    "src/crypto.rs": "4549dbf48be850099b4f823db34d54d1aede725d7d5b794ec398f3232660978d",
+    "src/error.rs": "9197976854fdbbd9d8e12cbbc0d7c087d4e0e158da99aa52651ad20ca04b7875",
+    "src/ffmpeg_finalize.rs": "6f81bf521715b65c4f291ef15447cd9399dd7a757e5b7615af31620179d36e66",
+    "src/file_scan.rs": "fe3af2f84e1a916a03981efb46c8f3302403ece52235f108573dac4ff38d2bf7",
+    "src/hls.rs": "7960401420668b9de6fa0a8f0dcf8bf3170aed029cfcd626650cf20c8bbcf5ff",
+    "src/isobmff.rs": "33533c9aabf55c4819c242073d0eb14d9b0d39a61253834d818ff616874a6026",
+    "src/lib.rs": "a8ea1a900ce320401235093fe77e8e30cf65b2d0eea0cbb93180c75a6d78e853",
+    "src/mp4.rs": "a033aa27b974a614becf1bfdeb569da0b60a1908efc43374c9b4e2c716e7761b",
+    "src/mpeg_ts.rs": "786ca0668e1990a27c96743f5de968aca945df0302bf09fb48705a1330b4057f",
+    "src/playlist/parser.rs": "9add94bfc90b328becb451848e6b1934806fabde36330669544d36ea196d001f",
+    "src/playlist/wire.rs": "0d8162e1b7c53a88f5047daca31cba39a869aa3a9683784f2e26acb09858dc09",
+    "src/playlist.rs": "61e393b68f0b83ce829aff833af19db40050a12435647578adbf874090c27cbc",
+    "src/resume.rs": "d36bbbde77fc8cc2ab5b0a3069c3d2240187a7fda09ccba40858286791c2f87d",
+    "src/source.rs": "9a2007b874b333532243b50da9670a9739ce9ecda79ae9f5dd938cda785507a4",
+    "src/transmux/session/keyed/progress.rs": "d34a5d54eeeec1d0fe6426f9380699bdee755aaa4f31834877879b19f2dc051b",
+    "src/transmux/session/keyed.rs": "ad1bcc7ef908c8a967188ce625a722eaeb592e45f5c1fe75df030cd6fe776429",
+    "src/transmux/session.rs": "4bf452935232d9bacdeef1ad5cfc6948eadbdab6f7d550658aa962ab3205faca",
+    "src/transmux.rs": "a4187aa5f3903f251dc52f8dcb0ea497c7e895ab34e2bb9967e7bc6ff6f70022",
+    "src/types.rs": "301c7755f8defbe24a08054292cd45e3c1d7ebdd5101aaa56c3fb9ff73cec44d",
+    "examples/keyed_export.rs": "7feca4874ad13f90422134429ef69144b31b743bbfdfdc3774cef7916a7dd956"
+  },
+  "documentation_update": {
+    "date": "2026-10-05",
+    "scope": "Normalize Markdown names to lowercase kebab-case, retain README entry points, clarify same-crate 0.6.0 upgrade, update links and package requirements",
+    "source_sha256_before_update": {
+      "Cargo.lock": "16e0cb31166e56e3a2b120521a3d0ab21d9fb97431346f450f2101a5c2b97c5c",
+      "Cargo.toml": "a98858c17076895d4f5115708325cec7da919c6016259665719df1be068976e6",
+      "examples/keyed_demo.rs": "6e75fb61eb187bee1262fa54d1e8472b1d6f2bd4cbdb45abbf11812ea1b0f4b0",
+      "examples/keyed_wasm.rs": "cc32c2fc6c310ea4c15126a7b8abbe763e7e2d9ab59497fa74d7fde5e5e74728",
+      "src/cancel.rs": "2113e6996ec916057380c5d32df0463022174c576108aaa832952a43a3d657bc",
+      "src/capabilities.rs": "44af8ab73f19c72f05fce0f701412b97a143915225318c4e262508c81f8a0d6c",
+      "src/codecs.rs": "6a17072ea51ced7ad7a43ac781ca208996f85b9ef2d38a658acc34fabe853d0c",
+      "src/crypto/key.rs": "03ef0fcbbf5a6a1d26f0d3aac6d0d6d2bdd6d559b4a0a3c6577492cdbb83afaf",
+      "src/crypto/resource.rs": "d012f10f055d52fbded039deaa3a77fee320ccb64ade1341055a1c7ada55a5a8",
+      "src/crypto.rs": "4549dbf48be850099b4f823db34d54d1aede725d7d5b794ec398f3232660978d",
+      "src/error.rs": "9197976854fdbbd9d8e12cbbc0d7c087d4e0e158da99aa52651ad20ca04b7875",
+      "src/ffmpeg_finalize.rs": "6f81bf521715b65c4f291ef15447cd9399dd7a757e5b7615af31620179d36e66",
+      "src/file_scan.rs": "fe3af2f84e1a916a03981efb46c8f3302403ece52235f108573dac4ff38d2bf7",
+      "src/hls.rs": "7960401420668b9de6fa0a8f0dcf8bf3170aed029cfcd626650cf20c8bbcf5ff",
+      "src/isobmff.rs": "33533c9aabf55c4819c242073d0eb14d9b0d39a61253834d818ff616874a6026",
+      "src/lib.rs": "a8ea1a900ce320401235093fe77e8e30cf65b2d0eea0cbb93180c75a6d78e853",
+      "src/mp4.rs": "a033aa27b974a614becf1bfdeb569da0b60a1908efc43374c9b4e2c716e7761b",
+      "src/mpeg_ts.rs": "786ca0668e1990a27c96743f5de968aca945df0302bf09fb48705a1330b4057f",
+      "src/playlist/parser.rs": "9add94bfc90b328becb451848e6b1934806fabde36330669544d36ea196d001f",
+      "src/playlist/wire.rs": "0d8162e1b7c53a88f5047daca31cba39a869aa3a9683784f2e26acb09858dc09",
+      "src/playlist.rs": "0a44a3207dd0dee96b3bf01d28a7ab8476f32e38707458cd2a15b54fa006b5e8",
+      "src/resume.rs": "d36bbbde77fc8cc2ab5b0a3069c3d2240187a7fda09ccba40858286791c2f87d",
+      "src/source.rs": "9a2007b874b333532243b50da9670a9739ce9ecda79ae9f5dd938cda785507a4",
+      "src/transmux/session/keyed/progress.rs": "d34a5d54eeeec1d0fe6426f9380699bdee755aaa4f31834877879b19f2dc051b",
+      "src/transmux/session/keyed.rs": "a454c841416cf5d854f5b6231fa8dffde947ac7cbbcab2f61f71f0abf9cefd0f",
+      "src/transmux/session.rs": "4bf452935232d9bacdeef1ad5cfc6948eadbdab6f7d550658aa962ab3205faca",
+      "src/transmux.rs": "a4187aa5f3903f251dc52f8dcb0ea497c7e895ab34e2bb9967e7bc6ff6f70022",
+      "src/types.rs": "301c7755f8defbe24a08054292cd45e3c1d7ebdd5101aaa56c3fb9ff73cec44d"
+    }
+  },
+  "crypto_dependency_review": {
+    "choice": "aes =0.8.4 + cbc =0.1.2 (cipher 0.4.4), zeroize enabled; keeps tested P0 compatibility, not a latest-version assertion",
+    "license": "AES/CBC: MIT OR Apache-2.0",
+    "rustsec_revision": "ef6173cbc5c50ec8166f9a5b28f07834144373ee",
+    "crates_tree": "6030c75425e8b79a1bfe729866fc2d2438d58642",
+    "inventory_truncated": false,
+    "no_advisory_directory": [
+      "aes",
+      "cbc",
+      "cipher",
+      "zeroize",
+      "block-padding",
+      "inout",
+      "crypto-common"
+    ],
+    "generic_array": {
+      "locked": "0.14.7",
+      "advisory": "RUSTSEC-2020-0146",
+      "patched_range": ">=0.13.3",
+      "affected": false,
+      "source": "https://rustsec.org/advisories/RUSTSEC-2020-0146.html"
+    },
+    "limits": "Scoped official advisory inventory, not a full cargo audit or cryptographic security audit."
+  },
+  "prototype_retirement": {
+    "date": "2026-10-05",
+    "production_bindings": "tests/runtime/",
+    "archived_decisions": "docs/planning/m0-decisions.md",
+    "archived_phase_evidence": "docs/planning/phase-evidence/",
+    "native_contract_tests": 4,
+    "native_node_browser_equal": true,
+    "unchanged_semantic_reports": {
+      "keys": "9ef043ace8ce4c3695d1016755f012993b6bd0b642538204ec7f29c3af488f90",
+      "resources": "f4c1bfc114b2e11135734510e4da6adf2d4496944dfd7f8ac1cda8b4a27ad69a",
+      "prepared": "04287acf60a53d2b761b85f5a67fff31ee4700054187031b8a1e3310a4fbceec",
+      "contracts": "34ef74166edcc0285d5b049ac38067abb63678be6f7218149d68303ce3e9af78"
+    },
+    "node_runtime": "v26.10.0",
+    "browser_runtime": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36",
+    "bridge": {
+      "playlist": {
+        "jsRoundtripEqual": true,
+        "rejectedArchives": 9
+      },
+      "keys": {
+        "promises": 16,
+        "reentries": 21,
+        "lateCompletions": 4,
+        "aborts": [
+          [
+            "cancel:1",
+            1
+          ],
+          [
+            "drop:1",
+            1
+          ],
+          [
+            "last:1",
+            1
+          ],
+          [
+            "reject-late:1",
+            1
+          ]
+        ],
+        "unhandledRejections": 0
+      },
+      "resources": {
+        "promises": 31,
+        "aborts": 1,
+        "lateCompletions": 1,
+        "cancelledResourceReleased": true,
+        "unhandledRejections": 0
+      },
+      "prepared": {
+        "promises": 401,
+        "aborts": 1,
+        "lateCompletions": 1,
+        "cancelledPreparationReleased": true,
+        "unhandledRejections": 0
+      },
+      "contracts": {
+        "promises": 12,
+        "exampleBytes": 275048,
+        "jsCallbackEvents": 17,
+        "providerFailureCases": 3,
+        "unhandledRejections": 0
+      }
+    },
+    "independent_keyed_outputs": 64,
+    "runtime_source_sha256": {
+      "examples/keyed_export.rs": "7feca4874ad13f90422134429ef69144b31b743bbfdfdc3774cef7916a7dd956",
+      "scripts/verify_keyed.py": "7a2d49a6b796dcbae13cfcb8faeab252980907a797c4eafe5ed9c986a38ef4c1",
+      "scripts/verify_runtime.py": "5c29c33cb251fc24d6bfd3f244bc8ad6bb34a77e1d7c6f4a60f8e88d729e3f7f",
+      "tests/runtime/Cargo.lock": "c849a3247d05ddb5c985f72b22ebaf39504e20f3843c459860c2e70874d18f13",
+      "tests/runtime/Cargo.toml": "f6b5ff64846f1cb78d5bf0900cc3a832b699b18601d4f2ced89c848bf281c137",
+      "tests/runtime/browser.html": "b863364cb8d9fb3842f173be67e52d6addfdf0dea4283a443fa3e5b5940c222e",
+      "tests/runtime/contracts.mjs": "eb57ea84c3413d88ea12fbde9a398e72694b91761bc819e99aafdb2128b81a82",
+      "tests/runtime/harness.mjs": "02ee1f0040aec4cfdb40420fb6e614db7410ec19258bb3918ac1bbf7b3bb5838",
+      "tests/runtime/keys.mjs": "d1677d044d60a7bb96ce211d9636b37e05f1697f76dbb6fb017f72aabc756d82",
+      "tests/runtime/playlist.m3u8": "1ec7bff6ce1ba811941e9c6482140b6015da1dc1902a64c03ee5b935e89ebe4d",
+      "tests/runtime/playlist.mjs": "3d1932bacfe95fb81bce85cdca7c9b09793cbe940175865c4ce542fc0fc9f9bc",
+      "tests/runtime/prepared.mjs": "77e110afab3228bee7d4b82afd94339f82fba0e5c3bde384a781868a759b3a85",
+      "tests/runtime/resources.mjs": "0ea464569e8a7ae740afaf765ba86a98f25bbc573d069097a678f0c8c922adf2",
+      "tests/runtime/src/bin/probe.rs": "f7efd13c12ed0c10ae5f59c90e2b9836ec0cf9e05fc0532fef7f74ea0fd9f097",
+      "tests/runtime/src/contracts.rs": "d1eeb554059c2eb59dc507bd172bc76dd95376634d54820696d0a56f974d0825",
+      "tests/runtime/src/keys.rs": "69239ef6b5494ddd2168d1611ded19a6608510257f2851cb9a63b96492748366",
+      "tests/runtime/src/lib.rs": "fca6d947638a4bab10f790f2f3c8038c479867e3bf4183625de57e7de610e5a3",
+      "tests/runtime/src/playlist.rs": "ea1515d873737c1c0563e1c98f9899c7e6af9585896fe061a4e25d0a12e54429",
+      "tests/runtime/src/prepared.rs": "1bd8bc70f4f67fda79cdb35f897839009c5a612322a2eb54d543089a797eb92f",
+      "tests/runtime/src/resources.rs": "7f170f1032e91e2fb032910898cb695838d8b2f31d39d3077b1ece4eb11bfda2",
+      "tests/runtime/test_node.mjs": "a03440695b75811ac5580bf38083846af0ce04d15f23e9a23dddf44e20b67712"
+    },
+    "root_source_sha256_before_retirement": {
+      "Cargo.lock": "16e0cb31166e56e3a2b120521a3d0ab21d9fb97431346f450f2101a5c2b97c5c",
+      "Cargo.toml": "a98858c17076895d4f5115708325cec7da919c6016259665719df1be068976e6",
+      "examples/keyed_demo.rs": "6e75fb61eb187bee1262fa54d1e8472b1d6f2bd4cbdb45abbf11812ea1b0f4b0",
+      "examples/keyed_wasm.rs": "cc32c2fc6c310ea4c15126a7b8abbe763e7e2d9ab59497fa74d7fde5e5e74728",
+      "src/cancel.rs": "2113e6996ec916057380c5d32df0463022174c576108aaa832952a43a3d657bc",
+      "src/capabilities.rs": "d2e33b498813e874261455d9bbb2975652720fefd70223211df128ba9f8f6eae",
+      "src/codecs.rs": "6a17072ea51ced7ad7a43ac781ca208996f85b9ef2d38a658acc34fabe853d0c",
+      "src/crypto/key.rs": "124d254467adfe61249b498ae19bb8950739cea353f2978e16e378bd6421b01c",
+      "src/crypto/resource.rs": "ee0cb39800a1cffec062dcfc05d3824fdcc8164fd68caac020170eab6512d2e4",
+      "src/crypto.rs": "4549dbf48be850099b4f823db34d54d1aede725d7d5b794ec398f3232660978d",
+      "src/error.rs": "9197976854fdbbd9d8e12cbbc0d7c087d4e0e158da99aa52651ad20ca04b7875",
+      "src/ffmpeg_finalize.rs": "6f81bf521715b65c4f291ef15447cd9399dd7a757e5b7615af31620179d36e66",
+      "src/file_scan.rs": "fe3af2f84e1a916a03981efb46c8f3302403ece52235f108573dac4ff38d2bf7",
+      "src/hls.rs": "7960401420668b9de6fa0a8f0dcf8bf3170aed029cfcd626650cf20c8bbcf5ff",
+      "src/isobmff.rs": "33533c9aabf55c4819c242073d0eb14d9b0d39a61253834d818ff616874a6026",
+      "src/lib.rs": "a8ea1a900ce320401235093fe77e8e30cf65b2d0eea0cbb93180c75a6d78e853",
+      "src/mp4.rs": "a033aa27b974a614becf1bfdeb569da0b60a1908efc43374c9b4e2c716e7761b",
+      "src/mpeg_ts.rs": "786ca0668e1990a27c96743f5de968aca945df0302bf09fb48705a1330b4057f",
+      "src/playlist/parser.rs": "9add94bfc90b328becb451848e6b1934806fabde36330669544d36ea196d001f",
+      "src/playlist/wire.rs": "0d8162e1b7c53a88f5047daca31cba39a869aa3a9683784f2e26acb09858dc09",
+      "src/playlist.rs": "61e393b68f0b83ce829aff833af19db40050a12435647578adbf874090c27cbc",
+      "src/resume.rs": "d36bbbde77fc8cc2ab5b0a3069c3d2240187a7fda09ccba40858286791c2f87d",
+      "src/source.rs": "9a2007b874b333532243b50da9670a9739ce9ecda79ae9f5dd938cda785507a4",
+      "src/transmux/session/keyed/progress.rs": "d34a5d54eeeec1d0fe6426f9380699bdee755aaa4f31834877879b19f2dc051b",
+      "src/transmux/session/keyed.rs": "ad1bcc7ef908c8a967188ce625a722eaeb592e45f5c1fe75df030cd6fe776429",
+      "src/transmux/session.rs": "4bf452935232d9bacdeef1ad5cfc6948eadbdab6f7d550658aa962ab3205faca",
+      "src/transmux.rs": "a4187aa5f3903f251dc52f8dcb0ea497c7e895ab34e2bb9967e7bc6ff6f70022",
+      "src/types.rs": "301c7755f8defbe24a08054292cd45e3c1d7ebdd5101aaa56c3fb9ff73cec44d"
+    }
+  }
+}

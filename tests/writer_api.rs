@@ -9,6 +9,7 @@
 //!   are processed (via `tokio::io::duplex`).
 
 mod common;
+use common::normalize_moov_timestamps;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -98,45 +99,6 @@ fn mock_input(segment_count: usize) -> HlsInput {
     )
 }
 
-/// Zeros out `creation_time` and `modification_time` fields in `mvhd` and
-/// `mdhd` boxes within the `moov` box. These fields use wall-clock time
-/// (`SystemTime::now()` in `mp4.rs`), so they differ between outputs
-/// produced at different times. Normalizing them allows byte-level
-/// comparison of structurally identical files.
-fn normalize_moov_timestamps(data: &mut [u8]) {
-    walk_and_zero_timestamps(data, 0, data.len());
-}
-
-fn walk_and_zero_timestamps(data: &mut [u8], start: usize, end: usize) {
-    let mut offset = start;
-    while offset + 8 <= end {
-        let size = u32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]) as usize;
-        if size < 8 || offset + size > end {
-            break;
-        }
-        let btype = &data[offset + 4..offset + 8];
-        match btype {
-            b"mvhd" | b"mdhd" => {
-                // version(1) + flags(3) + creation_time(4) + modification_time(4)
-                // For version 0, timestamps are 4 bytes each at offset 12..20.
-                if offset + 20 <= end {
-                    data[offset + 12..offset + 20].fill(0);
-                }
-            }
-            b"moov" | b"trak" | b"mdia" => {
-                walk_and_zero_timestamps(data, offset + 8, offset + size);
-            }
-            _ => {}
-        }
-        offset += size;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Test 1: writer output matches file output byte-for-byte (both write_mfra
 // true and false)
@@ -187,12 +149,8 @@ async fn writer_to_vec_matches_file_output() {
          output after timestamp normalization"
     );
 
-    // (c) Writer version (write_mfra: false) → must NOT contain mfra, and
-    // must equal the file output truncated to the pre-mfra region. Since the
-    // file version always writes mfra (file path hardcodes write_mfra=true),
-    // we compare writer_bytes_false against file_bytes with the trailing
-    // mfra stripped. The mfra box is the last box; find its offset by
-    // scanning from the start for the 'mfra' box type.
+    // (c) Writer version (write_mfra: false) must match the indexed output
+    // after stripping its trailing mfra and normalizing wall-clock metadata.
     let mut writer_bytes_false: Vec<u8> = Vec::new();
     transmux_hls_to_writer_async(
         mock_input(3),
@@ -206,16 +164,14 @@ async fn writer_to_vec_matches_file_output() {
     .await
     .expect("writer transmux (write_mfra=false) should succeed");
 
-    // The write_mfra=true writer output is file_bytes + mfra. So
-    // writer_bytes_false should equal writer_bytes_true with the trailing
-    // mfra removed. Find the mfra box offset in writer_bytes_true.
     let mfra_offset = find_box_offset(&writer_bytes_true, b"mfra")
         .expect("write_mfra=true output should contain an mfra box");
+    normalize_moov_timestamps(&mut writer_bytes_false);
     assert_eq!(
         writer_bytes_false.as_slice(),
-        &writer_bytes_true[..mfra_offset],
+        &writer_norm[..mfra_offset],
         "write_mfra=false output should equal write_mfra=true output with \
-         the trailing mfra box stripped"
+         the trailing mfra box stripped after timestamp normalization"
     );
     // Sanity: write_mfra=false output has no mfra box at all.
     assert!(

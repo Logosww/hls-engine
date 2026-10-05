@@ -65,3 +65,60 @@ pub fn segment_index(location: &hls_transmux::SourceLocation) -> usize {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }
+
+/// Zeros out `creation_time` and `modification_time` fields in `mvhd` and
+/// `mdhd` and `tkhd` boxes within the `moov` box. These fields use wall-clock time
+/// (`SystemTime::now()` in `mp4.rs`), so they differ between outputs
+/// produced at different times. Normalizing them allows byte-level
+/// comparison of structurally identical files.
+pub fn normalize_moov_timestamps(data: &mut [u8]) {
+    walk_and_zero_timestamps(data, 0, data.len());
+}
+
+fn walk_and_zero_timestamps(data: &mut [u8], start: usize, end: usize) {
+    let mut offset = start;
+    while offset + 8 <= end {
+        let size = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+        let (size, header) = if size == 1 {
+            if offset + 16 > end {
+                break;
+            }
+            let Ok(size) = usize::try_from(u64::from_be_bytes(
+                data[offset + 8..offset + 16].try_into().unwrap(),
+            )) else {
+                break;
+            };
+            (size, 16)
+        } else {
+            (size as usize, 8)
+        };
+        let Some(box_end) = offset
+            .checked_add(size)
+            .filter(|&box_end| size >= header && box_end <= end)
+        else {
+            break;
+        };
+        let payload = offset + header;
+        let btype = &data[offset + 4..offset + 8];
+        match btype {
+            b"mvhd" | b"mdhd" | b"tkhd" => {
+                // FullBox fields precede two u32 (v0) or two u64 (v1) timestamps.
+                if payload + 4 <= box_end {
+                    let width = match data[payload] {
+                        0 => 8,
+                        1 => 16,
+                        _ => 0,
+                    };
+                    if payload + 4 + width <= box_end {
+                        data[payload + 4..payload + 4 + width].fill(0);
+                    }
+                }
+            }
+            b"moov" | b"trak" | b"mdia" => {
+                walk_and_zero_timestamps(data, payload, box_end);
+            }
+            _ => {}
+        }
+        offset = box_end;
+    }
+}

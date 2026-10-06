@@ -33,6 +33,10 @@ def main():
     name = f'hls-transmux-{version}'
     archive = ROOT / 'target/package' / f'{name}.crate'
     required = {
+        'docs/continuous-sessions.md', 'docs/release-0.9.0.md', 'docs/release-0.9.0-evidence.json',
+        'examples/continuous_demo.rs', 'examples/continuous_wasm.rs', 'examples/continuous_budget.rs',
+        'scripts/verify_continuous.py', 'scripts/test_continuous_wasm.mjs',
+        'tests/continuous_session.rs', 'tests/support/continuous_runtime.rs', 'tests/support/continuous_profile.rs',
         'docs/README.md', 'docs/typed-playlists.md', 'docs/key-sessions.md',
         'docs/aes-resources.md', 'docs/keyed-sessions.md', 'docs/keyed-contracts.md',
         'docs/keyed-wasm.md', 'docs/prepared-sessions.md', 'docs/benchmarks.md',
@@ -81,7 +85,7 @@ def main():
         run('cargo', 'build', '--offline', '--locked', '--example', 'keyed_demo', '--example', 'keyed_export', '--example', 'timeline_export', '--example', 'timeline_budget',
             '--target-dir', str(target), cwd=crate)
         run('cargo', 'test', '--offline', '--locked', '--features', 'serde',
-            '--test', 'timeline_session', '--test', 'sample_crypto', '--target-dir', str(target), cwd=crate)
+            '--test', 'timeline_session', '--test', 'sample_crypto', '--test', 'continuous_session', '--target-dir', str(target), cwd=crate)
         run('cargo', 'build', '--offline', '--locked', '--no-default-features',
             '--target', 'wasm32-unknown-unknown', '--example', 'keyed_wasm',
             '--target-dir', str(target), cwd=crate)
@@ -90,6 +94,12 @@ def main():
             '--target', 'web', '--out-dir', str(bindings))
         run('node', str(crate / 'scripts/test_keyed_wasm.mjs'),
             str(bindings / 'keyed_wasm.js'), str(crate), cwd=crate)
+        run('cargo', 'build', '--offline', '--locked', '--example', 'continuous_demo', '--target-dir', str(target), cwd=crate)
+        run('cargo', 'build', '--offline', '--locked', '--no-default-features', '--features', 'serde',
+            '--target', 'wasm32-unknown-unknown', '--example', 'continuous_wasm', '--target-dir', str(target), cwd=crate)
+        run('wasm-bindgen', str(target / 'wasm32-unknown-unknown/debug/examples/continuous_wasm.wasm'),
+            '--target', 'web', '--out-dir', str(bindings))
+        run('node', str(crate / 'scripts/test_continuous_wasm.mjs'), str(bindings / 'continuous_wasm.js'), str(crate), cwd=crate)
     print(json.dumps({'package': name, 'requiredFiles': len(required),
                       'publishDryRun': True, 'extractedExamples': True}))
 

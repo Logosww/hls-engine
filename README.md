@@ -9,9 +9,11 @@ HTTP dependencies are required.
 
 Documentation: [integration guides](docs/README.md).
 
-Version 0.8.0 adds finite sample decryption through the existing keyed/timeline APIs:
-TS SAMPLE-AES (AVC/AAC-LC), and fMP4 cenc/cbcs (AVC/HEVC/AAC-LC), producing clear MP4.
-See [sample encryption](docs/sample-encryption.md) and [release verification](docs/release-0.8.0.md).
+Version 0.9.0 adds `ContinuousSession` for selected Live/EVENT input, atomic
+snapshot admission, bounded backpressure, stop/cancel and VOD pause. It connects
+clear, AES-128, TS SAMPLE-AES and fMP4 cenc/cbcs to incremental fMP4 output and
+native classic finalization. See [continuous sessions](docs/continuous-sessions.md)
+and [v0.9 verification](docs/release-0.9.0.md). Existing finite APIs remain available.
 
 ## Features
 
@@ -911,7 +913,7 @@ AES-128 finite input uses keyed/timeline sessions; discontinuities and presentat
 ranges use the timeline API. Legacy entry points keep their original restrictions.
 
 - TS HEVC SAMPLE-AES, TS/Packed AAC SAMPLE-AES-CTR, and AES-GCM execution
-- Live/EVENT inputs and LL-HLS
+- LL-HLS partial segments (selected Live/EVENT uses `ContinuousSession`)
 - Automatic rendition selection, multiple video/audio tracks (one selected external audio track is supported)
 - Codecs other than AVC / HEVC / AAC-LC (e.g. MP3, AC-3, E-AC-3, AV1)
 
@@ -937,9 +939,10 @@ MP4，**不解码、不编码、不转码**。
 
 核心 HLS / TS / ISOBMFF 逻辑全部自研，仅依赖少量基础异步与 HTTP 库。
 
-v0.8.0 通过现有 keyed/timeline 入口支持有限 sample 解密：TS SAMPLE-AES（AVC/AAC-LC）
-及 fMP4 cenc/cbcs（AVC/HEVC/AAC-LC），输出 clear MP4，保留范围、epoch、缺口策略和配置拆分。
-接入与验证见 [sample 加密文档](docs/sample-encryption.md) 和 [0.8.0 验收记录](docs/release-0.8.0.md)。
+v0.9.0 新增 `ContinuousSession`：typed snapshot 原子接收、滚动去重、有界背压、
+stop/cancel 和 VOD pause；将 clear、AES-128、TS SAMPLE-AES、fMP4 cenc/cbcs
+接入 Live/EVENT，支持持续 fMP4 及 native classic 收尾。旧有限入口保持兼容。
+见[持续 session 指南](docs/continuous-sessions.md)和[v0.9 验收](docs/release-0.9.0.md)。
 
 ### 特性
 
@@ -1715,7 +1718,7 @@ CI 管道包含 `cargo check --target wasm32-unknown-unknown
 session；discontinuity 和 presentation 范围使用 timeline API。旧入口保持原限制。
 
 - TS HEVC SAMPLE-AES、TS/Packed AAC SAMPLE-AES-CTR、AES-GCM 执行
-- Live/EVENT 输入及 LL-HLS
+- LL-HLS partial segment（已选 Live/EVENT 使用 `ContinuousSession`）
 - 自动选择 alternate audio group、多视频 / 多音频 track（已选外置音轨可用 prepared API）
 - 非 AVC / HEVC / AAC-LC 的 codec（如 MP3、AC-3、E-AC-3、AV1）
 

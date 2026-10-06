@@ -33,6 +33,8 @@ jobs:
         run: python3 scripts/verify_runtime.py --browser
       - name: Measure native timeline allocations and first-write latency
         run: cargo run --locked --release --example timeline_budget > target/runtime/native-timeline-evidence.json
+      - name: Measure continuous allocations
+        run: cargo run --locked --release --features serde --example continuous_budget > target/runtime/native-continuous-evidence.json
       - name: Lint the WASM host adapter
         run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --example keyed_wasm -- -D warnings
       - name: Verify packaged docs and WASM example
@@ -119,6 +121,9 @@ jobs:
 
       - name: Verify native keyed SDK example
         run: python3 scripts/verify_keyed_examples.py
+
+      - name: Verify continuous clear and encrypted decodes
+        run: python3 -u scripts/verify_continuous.py
 
       - name: Verify timeline packets and decoded frames
         run: python3 -u scripts/verify_timeline.py --ffmpeg

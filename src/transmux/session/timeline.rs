@@ -6,7 +6,7 @@ use crate::playlist::{InputId, SegmentSlot};
 use std::{cmp::Ordering, future::Future, pin::Pin};
 
 mod catalog;
-mod engine;
+pub(super) mod engine;
 mod model;
 mod output;
 #[cfg(feature = "serde")]
@@ -137,7 +137,7 @@ fn resource_error(error: ResourceError) -> TimelineSessionError {
     }
 }
 
-fn cmp(a: MediaTime, b: MediaTime) -> TimelineResult<Ordering> {
+pub(super) fn cmp(a: MediaTime, b: MediaTime) -> TimelineResult<Ordering> {
     let (sa, sb) = (i128::from(a.timescale), i128::from(b.timescale));
     let whole = a.ticks.div_euclid(sa).cmp(&b.ticks.div_euclid(sb));
     if whole != Ordering::Equal {
@@ -145,10 +145,10 @@ fn cmp(a: MediaTime, b: MediaTime) -> TimelineResult<Ordering> {
     }
     Ok((a.ticks.rem_euclid(sa) * sb).cmp(&(b.ticks.rem_euclid(sb) * sa)))
 }
-fn add(a: MediaTime, b: MediaTime) -> TimelineResult<MediaTime> {
+pub(super) fn add(a: MediaTime, b: MediaTime) -> TimelineResult<MediaTime> {
     combine(a, b, false)
 }
-fn sub(a: MediaTime, b: MediaTime) -> TimelineResult<MediaTime> {
+pub(super) fn sub(a: MediaTime, b: MediaTime) -> TimelineResult<MediaTime> {
     combine(a, b, true)
 }
 fn reduced(time: MediaTime) -> MediaTime {
@@ -191,7 +191,7 @@ fn combine(a: MediaTime, b: MediaTime, subtract: bool) -> TimelineResult<MediaTi
         timescale: scale,
     }))
 }
-fn rescale(value: MediaTime, scale: u32) -> TimelineResult<i128> {
+pub(super) fn rescale(value: MediaTime, scale: u32) -> TimelineResult<i128> {
     let value = reduced(value);
     let mut a = value.timescale;
     let mut b = scale;

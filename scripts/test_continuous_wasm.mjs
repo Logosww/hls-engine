@@ -1,0 +1,17 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+const modulePath=process.argv[2]??'target/continuous-example/continuous_wasm.js';
+const root=process.argv[3]??'.';
+const wasm=await import(pathToFileURL(path.resolve(modulePath)));
+await wasm.default({module_or_path:await fs.readFile(modulePath.replace(/\.js$/,'_bg.wasm'))});
+const folder=path.join(root,'tests/fixtures/sample_crypto/fmp4_avc_clear');const resources={};
+for(const file of await fs.readdir(folder))if(file.endsWith('.mp4')||file.endsWith('.m4s'))resources['https://example.test/'+file]=new Uint8Array(await fs.readFile(path.join(folder,file)));
+const recorder=new wasm.Recorder(resources);
+const text=(await fs.readFile(path.join(folder,'input.m3u8'),'utf8')).replace('#EXT-X-ENDLIST','').replace(/#EXT-X-PLAYLIST-TYPE:.*\n/,'');
+await recorder.accept(text,'https://example.test/input.m3u8','9007199254740993');
+let size=0,calls=0;
+const sink=new WritableStream({async write(bytes){calls++;size+=bytes.length;await new Promise(r=>setTimeout(r,0));recorder.stop();}}).getWriter();
+const report=JSON.parse(await recorder.run(bytes=>sink.write(bytes)));await sink.close();
+if(report.end_reason!=='Stop'||BigInt(report.bytes_written)!==BigInt(size)||calls<2)throw new Error('continuous example failed');
+recorder.free();console.log(JSON.stringify({status:'PASS',bytes:size,writes:calls}));

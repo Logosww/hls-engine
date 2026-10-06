@@ -79,13 +79,13 @@ async fn sdk_timeline_host_contract() {
     for case in cases.as_array().unwrap() {
         eprintln!("timeline SDK case: {}", case["name"]);
         let request: wire::Request = serde_json::from_value(case["request"].clone()).unwrap();
-        let selection: wire::timeline::Selection =
+        let selection: wire::fixture_timeline::Selection =
             serde_json::from_value(case["selection"].clone()).unwrap();
         let host = Arc::new(Host {
             files: serde_json::from_value(case["files"].clone()).unwrap(),
             root: root.clone(),
         });
-        let session = wire::timeline::prepare_timeline(&request, host, selection.options())
+        let session = wire::fixture_timeline::prepare_timeline(&request, host, selection.options())
             .await
             .unwrap();
         let (mut outputs, report) = if request.mode == "stream" {
@@ -110,4 +110,24 @@ async fn sdk_timeline_host_contract() {
         serde_json::to_vec_pretty(&results).unwrap(),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn sdk_continuous_host_contract() {
+    use sha2::{Digest,Sha256};
+    let root=std::path::PathBuf::from(std::env::var("HLS_TIMELINE_ROOT").unwrap());
+    let cases:Value=serde_json::from_slice(&std::fs::read(root.join("target/sdk-compat/cases.json")).unwrap()).unwrap();
+    let mut results=Vec::new();
+    for case in cases.as_array().unwrap().iter().filter(|c|c["name"]=="range-False"||c["name"]=="range-True"||(c["name"].as_str().unwrap().starts_with("sample-")&&c["request"]["audio"].is_null())) {
+        let request:wire::Request=serde_json::from_value(case["request"].clone()).unwrap();
+        let host=Arc::new(Host {files:serde_json::from_value(case["files"].clone()).unwrap(),root:root.clone()});
+        let session=wire::fixture_timeline::prepare_continuous(&request,host.clone()).unwrap();
+        let mut bytes=Vec::new();let report=session.write_to(&mut bytes).await.unwrap();canonical(&mut bytes);
+        results.push(json!({"name":case["name"],"hash":format!("{:x}",Sha256::digest(&bytes)),"report":wire::fixture_timeline::continuous_report(report)}));
+        let session=wire::fixture_timeline::prepare_continuous(&request,host).unwrap();
+        let path=root.join("target/sdk-compat").join(format!("continuous-{}.mp4",case["name"].as_str().unwrap()));let _=std::fs::remove_file(&path);
+        let report=session.write_to_file(&path,hls_transmux::FileOutputOptions::default().with_format(hls_transmux::OutputFormat::StreamingMp4)).await.unwrap();
+        assert_eq!(report.bytes_written(),std::fs::metadata(path).unwrap().len());
+    }
+    std::fs::write(root.join("target/sdk-compat/native-continuous.json"),serde_json::to_vec_pretty(&results).unwrap()).unwrap();
 }

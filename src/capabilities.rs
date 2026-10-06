@@ -94,6 +94,7 @@ pub enum CapabilityDimension {
 #[non_exhaustive]
 pub enum CapabilityRequirement {
     FiniteSnapshotValidation,
+    IncrementalSnapshotValidation,
     ContainerAndCodecValidation,
     CompatibleTimelineAndConfiguration,
     ProviderResolution,
@@ -506,4 +507,59 @@ pub fn query_timeline_capability(query: &TimelineCapabilityQuery) -> KeyedCapabi
         });
     }
     decision
+}
+
+/// Open-session declaration. Memory output requires an explicit capacity;
+/// dual-input execution also requires a host-provided timeout implementation.
+#[derive(Debug, Clone)]
+pub struct ContinuousCapabilityQuery {
+    timeline: TimelineCapabilityQuery,
+    memory_capacity: Option<usize>,
+    host_waiter: bool,
+}
+impl ContinuousCapabilityQuery {
+    pub fn new(timeline: TimelineCapabilityQuery) -> Self {
+        Self {
+            timeline,
+            memory_capacity: None,
+            host_waiter: false,
+        }
+    }
+    pub fn with_memory_capacity(mut self, capacity: usize) -> Self {
+        self.memory_capacity = Some(capacity);
+        self
+    }
+    pub fn with_host_waiter(mut self, available: bool) -> Self {
+        self.host_waiter = available;
+        self
+    }
+}
+/// Incremental admission, key resolution and media validation remain runtime requirements.
+pub fn query_continuous_capability(query: &ContinuousCapabilityQuery) -> KeyedCapabilityDecision {
+    let mut timeline = query.timeline.clone();
+    let rewritten = timeline.media.source_mode == KeyedSourceMode::RewrittenSnapshot;
+    timeline.media.source_mode = KeyedSourceMode::FiniteVod;
+    let mut result = query_timeline_capability(&timeline);
+    result
+        .requirements
+        .retain(|r| *r != CapabilityRequirement::FiniteSnapshotValidation);
+    result
+        .requirements
+        .push(CapabilityRequirement::IncrementalSnapshotValidation);
+    if rewritten {
+        result.rejections.push(CapabilityRejection {
+            dimension: CapabilityDimension::SourceMode,
+            role: None,
+        });
+    }
+    if (timeline.media.output == KeyedOutput::Mp4Bytes
+        && query.memory_capacity.is_none_or(|n| n == 0))
+        || (timeline.media.audio.is_some() && !query.host_waiter)
+    {
+        result.rejections.push(CapabilityRejection {
+            dimension: CapabilityDimension::Output,
+            role: None,
+        });
+    }
+    result
 }

@@ -176,6 +176,10 @@ impl ResourceRequest {
             .get(index)
             .ok_or_else(|| ResourceError::new(ResourceErrorKind::InvalidIndex))?
             .clone();
+        Self::from_descriptor(segment, map)
+    }
+    /// Internal admission has already validated and reconciled this descriptor.
+    pub(crate) fn from_descriptor(segment: SegmentDescriptor, map: bool) -> ResourceResult<Self> {
         let resource = if map {
             KeyResource::map(&segment)
                 .ok_or_else(|| ResourceError::new(ResourceErrorKind::MissingMap))?

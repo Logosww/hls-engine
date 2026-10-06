@@ -1,12 +1,12 @@
 # hls-transmux → hls-engine ROADMAP
 
-更新时间：2026-10-06。当前版本：v0.8.0（实现与本地验收完成，随本次提交记录，尚未发布到 registry）；上一版本基线 v0.7.0，commit `24c5ac4`，此前 v0.6.2 为 `2763be4`。原始基线为 v0.5.0，commit `6a2cb3d`。
+更新时间：2026-10-06。当前候选版本：v0.9.0（实现与验收见本版记录，尚未发布到 registry）；上一版本基线 v0.8.0，commit `8d6c54f`，此前 v0.7.0 为 `24c5ac4`。原始基线为 v0.5.0，commit `6a2cb3d`。
 
 本轮根据 hls-downloader v4.0 的下游改造需求，规划在 **v0.6–v0.10 五个 minor**
 逐步交付协议与解密、范围与 epoch、sample 解密、持续 session、多轨与字幕，
 随后在 **v1.0.0** 交付多输入恢复、GCM 实验及完整组合验收，稳定正式契约，
 并正式更名为 **hls-engine**，完成从转封装库到完整 HLS 媒体处理引擎的交付。
-版本号表达交付顺序，不承诺日历工期。v0.6–v0.8 已完成本地实现与验收，v0.8.0 尚未发布；v0.9 及后续版本仍为规划；未发布或未完成项不能作为已发布能力声明。
+版本号表达交付顺序，不承诺日历工期。v0.6–v0.9 的本地实现与验收分别见各版记录，v0.9.0 尚未发布；v0.10 及后续版本仍为规划；未发布或未完成项不能作为已发布能力声明。
 
 需求来源为 [hls-transmux M0 上游改造需求](hls-transmux-m0-requirements.md)
 （2026-10-04 草案，位于下游工作区）。下文保留 U01–U10 编号方便双方追踪，
@@ -79,8 +79,8 @@ prepared 失败 partial 不能直接当作 checkpoint；legacy schema v1 保留�
 | --- | --- | --- | --- | --- |
 | v0.6.0 | typed playlist、资源身份、key provider、AES-128 有限 VOD | U01、U02、U10 基础 | M0 契约与风险原型通过；新增加密路径先不支持持久恢复 | 实现与后续修复已提交，基线至 v0.6.2 |
 | v0.7.0 | 可解码范围、epoch、缺口与拆分输出 | U04；U03/U08 内部 hook | 基于 v0.6 身份/key；SDK 可对齐范围、字幕和章节，hook 原型不声明 sample 解密能力 | 实现与本地门槛完成，已提交 `24c5ac4`；未发布 registry |
-| v0.8.0 | TS SAMPLE-AES 与 fMP4 cbcs/cenc 有限输入 | U03、U10 加密诊断 | hook 顺序、protection metadata 和双运行时 clear sample 对照通过 | 实现与本地验收完成，随本次提交记录，未发布；SDK 隔离联调通过 |
-| v0.9.0 | Live/EVENT、持续 session、背压、stop 与 pause | U05、U01 增量、U10 开放报告 | v0.7 epoch 与 v0.8 解密进入开放输入；慢 sink、轮换、竞态和长期状态有证据 | 规划中 |
+| v0.8.0 | TS SAMPLE-AES 与 fMP4 cbcs/cenc 有限输入 | U03、U10 加密诊断 | hook 顺序、protection metadata 和双运行时 clear sample 对照通过 | 实现与本地验收完成，基线 `8d6c54f`；SDK 隔离联调通过 |
+| v0.9.0 | Live/EVENT、持续 session、背压、stop 与 pause | U05、U01 增量、U10 开放报告 | v0.7 epoch 与 v0.8 解密进入开放输入；慢 sink、轮换、竞态和有界状态有证据 | 本地候选完成；范围与限制见 v0.9 验收记录，未发布 |
 | v0.10.0 | 多音轨、持续字幕 mux、完整 Packed AAC | U06、U07、U08 | 固定多轨集合、统一映射；有限/开放/范围/解密组合和播放器证据通过 | 规划中 |
 | v1.0.0 | hls-engine 正式更名与完整引擎交付；新 checkpoint、多输入恢复、GCM 实验与稳定契约 | U09、U02 实验、U10 完整组合；U01–U10 组合验收及 SDK M5 | 基于全部媒体路径的 committed prefix；全部目标交付、实验认证、RC 联调、长录制、恢复迁移、更名迁移及发布产物验证通过 | 更名决策已确定；实现与发布规划中 |
 
@@ -194,15 +194,15 @@ Packed AAC 的正式输入及 SAMPLE-AES 组合随 v0.10 完成交付。
 
 交付 U05，将 v0.6–v0.8 已验证的 clear/加密路径接入 Live/EVENT，固定 variant 和轨道集合。
 
-- [ ] 接收有序 snapshot/descriptor，媒体由 Source/provider 按需读取；重复去重、同槽改写和 generation 校验覆盖增量更新。
-- [ ] 定义已接受为身份校验后进入有界队列；空窗口不是 EOF，各 input 独立 end/ENDLIST。
-- [ ] EOF/时长限制和幂等 stop 停止接收并完成已接受数据，finalize/flush 后返回 EOF/stop/duration limit 原因；cancel 尽快终止 read/key/demux/write/finalize。
-- [ ] preparing/running/paused/draining/finalizing 和唯一终态可观测；完成边界前 cancel 优先，finalize 不重复输出。
-- [ ] 提供 VOD operation 内 pause/resume；live pause 采集语义由 SDK 明确，不承诺暂停期间无损或跨进程恢复。
-- [ ] 预算覆盖 probe、在途资源/bytes、lookahead、等待 key、多轨 skew 和字幕队列；慢 sink 抑制新增读取与接收。
-- [ ] 缺片默认失败，显式 skip/report/split；一路落后有有界等待/超时，不静默补音或截断其他路。
-- [ ] 支持持续 epoch/拆分 sink 交接；fMP4 默认不累计全程 mfra，公开内存 bytes 与 classic finalize 索引成本。
-- [ ] U10 报告未知 total、录制时长、bytes、各路 discovered/downloaded/decrypted/committed、gap 和 end reason。
+- [x] 原子接收 typed snapshot（descriptor 仅内部表示），媒体由 Source/provider 按需读取；重复去重、同槽改写和 generation 校验覆盖增量更新。
+- [x] 定义已接受为身份校验后进入有界队列；空窗口不是 EOF，各 input 独立 end/ENDLIST。
+- [x] EOF/时长限制和幂等 stop 停止接收并完成已接受数据，finalize/flush 后返回 EOF/stop/duration limit 原因；cancel 尽快终止 read/key/demux/write/finalize。
+- [x] preparing/running/paused/draining/finalizing 和唯一终态可观测；完成边界前 cancel 优先，finalize 不重复输出。
+- [x] 提供 VOD operation 内 pause/resume；live pause 采集语义由 SDK 明确，不承诺暂停期间无损或跨进程恢复。
+- [x] 预算覆盖 probe、在途资源/bytes、lookahead、等待 key、双路 skew 和有界事件历史；慢 sink 抑制新增读取与接收。字幕归属 v0.10。
+- [x] 缺片默认失败，显式 skip/report/split；一路落后有有界等待/超时，不静默补音或截断其他路。
+- [x] 支持持续 epoch/拆分 sink 交接；fMP4 默认不累计全程 mfra，公开内存 bytes 与 classic finalize 索引成本。
+- [x] U10 报告未知 total、录制时长、bytes、各路 discovered/downloaded/decrypted/committed、gap 和 end reason。
 
 验收覆盖滚动窗口/EVENT/ENDLIST、无更新后追加、改写/回退/重启、不同切片周期和独立尾部、
 慢 writer/满队列/key 等待、stop/cancel/EOF 竞态、writer/flush/finalize failure 及 drop 后无迟到事件。
@@ -251,24 +251,23 @@ GCM 另以独立向量验证错误 tag 无明文提交，支持与拒绝组合�
 
 | 需求 | 首次交付 | 完整交付与组合验收 | 当前状态 |
 | --- | --- | --- | --- |
-| U01 协议与资源身份 | v0.6 有限 typed 模型 | v0.9 增量身份；v1.0 恢复校验 | 有限路径已验收并提交；增量身份与新恢复待后续版本 |
-| U02 AES-128 与 key session | v0.6 有限 VOD | v0.7 范围、v0.9 live、v1.0 恢复 | 有限 VOD 与 v0.7 范围组合已验收并提交；live/新恢复待后续版本 |
-| U03 sample 解密 | v0.7 hook 原型、v0.8 TS/fMP4 | v0.9 live、v0.10 Packed AAC/多轨、v1.0 恢复 | v0.7 内部 hook 已提交 `24c5ac4`；正式解密待 v0.8 |
+| U01 协议与资源身份 | v0.6 有限 typed 模型 | v0.9 增量身份；v1.0 恢复校验 | v0.9 增量身份见验收记录；新恢复归属 v1.0 |
+| U02 AES-128 与 key session | v0.6 有限 VOD | v0.7 范围、v0.9 live、v1.0 恢复 | 有限 VOD、范围及 v0.9 live 组合见各版验收；新恢复归属 v1.0 |
+| U03 sample 解密 | v0.7 hook 原型、v0.8 TS/fMP4 | v0.9 live、v0.10 Packed AAC/多轨、v1.0 恢复 | v0.8 正式 sample 解密已验收；v0.9 开放输入见本版记录 |
 | U04 范围与 epoch | v0.7 | v0.9 持续映射、v0.10 字幕/多轨、v1.0 恢复 | v0.7 有限路径验收完成，已提交 `24c5ac4`；未发布 registry |
-| U05 持续 session | v0.9 | v0.10 多轨/字幕；v1.0 恢复与长录制 | 待交付 |
+| U05 持续 session | v0.9 | v0.10 多轨/字幕；v1.0 恢复与长录制 | v0.9 本地候选完成；支持范围见验收记录 |
 | U06 多音轨 | v0.10 | v1.0 恢复、播放器及 SDK 联调 | 待交付 |
 | U07 字幕 mux | v0.10 | v1.0 提交/恢复、播放器及 SDK 联调 | 待交付 |
 | U08 Packed AAC | v0.7 内部 hook、v0.10 完整输入 | v1.0 恢复及组合验证 | v0.7 内部 hook 已提交 `24c5ac4`；正式输入待 v0.10 |
 | U09 多输入恢复 | v0.6 预留契约、v1.0 实现 | v1.0 故障恢复与旧任务验收 | 待交付 |
-| U10 诊断报告与组合描述 | 随每个 minor 增量交付 | v1.0 覆盖完整并冻结正式契约 | v0.6–v0.7 有限路径报告与组合查询已验收并提交；后续增量待交付 |
+| U10 诊断报告与组合描述 | 随每个 minor 增量交付 | v1.0 覆盖完整并冻结正式契约 | v0.6–v0.8 有限路径与 sample 诊断已验收；v0.9 开放报告/组合查询见本版记录 |
 | U02 GCM 实验扩展 | v1.0 独立 experimental profile | v1.0 实验矩阵与认证证据齐备，保持实验标记 | 待交付 |
 
-## 下一阶段：v0.8
+## 下一阶段：v0.10
 
-上游下一开发阶段为 v0.8 的有限输入 sample 解密：TS AVC/AAC SAMPLE-AES，
-fMP4 AVC/HEVC/AAC cbcs/cenc，以及 protection metadata、异步 key 和错误诊断。
-复用 v0.7 已提交的原始字节布局 hook、范围和 epoch 契约；正式能力须在独立密码向量、
-clear sample hash、native/WASM 对照及实际解码验收后开启。v0.8 清单仍保持未完成。
+下一 minor 推进固定多音轨、字幕 mux 和 Packed AAC。持续 session 的实现及本地验收见
+[v0.9 记录](../release-0.9.0.md)、[机器证据](../release-0.9.0-evidence.json)和
+[P0–P4 实现映射](v0.9.0-implementation-plan.md)。SDK 产品上线与 registry 发布另行执行。
 
 ## 每个 minor 的共同发布门槛（后续版本模板）
 
@@ -289,7 +288,7 @@ v0.6–v0.7 上游本地门槛结果见 [v0.6 记录](../release-0.6.0.md) 和 [
 [WASM 契约执行](../../scripts/test_wasm_session.mjs)、
 [独立双路验证](../../scripts/verify_multi_input.py)、
 [媒体 corpus](../../tests/fixtures/media/README.md) 和 [预算测量](../benchmarks.md)。
-有限 AES-128 fixture 已完成；开放输入、多轨、字幕和恢复 fixture 仍需补充，现有用例不代表这些后续路径已通过。
+有限 AES-128 与 v0.9 开放输入 fixture 已有本地验收；多轨、字幕和新恢复 fixture 仍需补充，现有用例不代表这些后续路径已通过。
 
 ## v1.0 hls-engine 完整引擎交付与稳定化
 

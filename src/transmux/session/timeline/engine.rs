@@ -604,7 +604,7 @@ pub(super) fn max_time(mut values: impl Iterator<Item = MediaTime>) -> TimelineR
         })?
         .ok_or_else(|| fail(TimelineErrorKind::EmptyRange))
 }
-pub(super) fn independent(packet: &EncodedPacket) -> TimelineResult<bool> {
+pub(in crate::transmux::session) fn independent(packet: &EncodedPacket) -> TimelineResult<bool> {
     if matches!(packet.kind, StreamKind::Aac) {
         return Ok(true);
     }
@@ -923,7 +923,7 @@ pub(super) fn output_time(
     Ok(result)
 }
 /// Checked RFC3339 mapping, independent of host timezone. No floating-point dates.
-fn parse_pdt(text: &str) -> TimelineResult<MediaTime> {
+pub(in crate::transmux::session) fn parse_pdt(text: &str) -> TimelineResult<MediaTime> {
     let invalid = || fail(TimelineErrorKind::TimelineAmbiguous);
     let n = |start: usize, end: usize| {
         let digits = text.get(start..end).ok_or_else(invalid)?;

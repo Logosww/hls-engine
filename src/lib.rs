@@ -93,11 +93,11 @@
 //!
 //! # Not yet supported
 //!
-//! Legacy entry points reject encryption; the additive [`prepare_hls_with_keys`] supports
-//! finite clear/AES-128 snapshots. See [`capabilities`] for combination queries.
-//! SAMPLE-AES, live playlists, discontinuities, automatic alternate
-//! audio selection, multi-track containers, and non-AVC/HEVC/AAC-LC codecs return a
-//! structured [`Error::Unsupported`] variant.
+//! Legacy entry points retain their restrictions. Additive keyed/timeline sessions
+//! support finite clear/AES-128 and sample-encrypted profiles; [`ContinuousSession`]
+//! accepts selected Live/EVENT input with bounded admission and caller-owned sinks.
+//! See [`capabilities`] for combination queries. Automatic rendition selection,
+//! multiple audio tracks, subtitles, Packed AAC, GCM and LL-HLS remain unsupported.
 
 mod cancel;
 pub mod capabilities;

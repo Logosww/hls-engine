@@ -56,18 +56,20 @@ def main():
     shared = copy / adapters / 'rust/keyed.rs'
     shared_text = shared.read_text()
     # Versioned v0.8 adapter extension, installed only in the disposable copy.
-    shared_text = shared_text.replace('"method":k.method().as_str(),', '"method":k.method().as_str(),"kid":r.resource().kid().map(|kid|kid.iter().map(|b|format!("{b:02x}")).collect::<String>()),', 1)
+    if '"kid":' not in shared_text:
+        shared_text = shared_text.replace('"method":k.method().as_str(),', '"method":k.method().as_str(),"kid":r.resource().kid().map(|kid|kid.iter().map(|b|format!("{b:02x}")).collect::<String>()),', 1)
     shared_text = shared_text.replace('let mut key = AvailableKey::aes128(secret);', '''let mut key = match r.reference().method().as_str() {
                         "SAMPLE-AES" => AvailableKey::sample_aes(secret),
                         "SAMPLE-AES-CTR" => AvailableKey::sample_aes_ctr(secret),
                         _ => AvailableKey::aes128(secret),
                     };
                     if let Some(kid) = r.resource().kid() { key = key.with_kid(kid); }''')
-    shared.write_text(shared_text + '\n#[path = "timeline.rs"]\npub mod timeline;\n')
-    shutil.copyfile(ROOT / 'tests/support/sdk/shared.rs', shared.with_name('timeline.rs'))
+    shared.write_text(shared_text + '\n#[path = "fixture_timeline.rs"]\npub mod fixture_timeline;\n')
+    shutil.copyfile(ROOT / 'tests/support/sdk/shared.rs', shared.with_name('fixture_timeline.rs'))
     browser_source = browser.parent / 'src/keyed.rs'
     browser_source.write_text(browser_source.read_text() + '\n' + (ROOT / 'tests/support/sdk/browser.rs').read_text())
-    browser.write_text(browser.read_text().replace('default-features = false', 'default-features = false, features = ["serde"]', 1))
+    if 'features = ["serde"]' not in browser.read_text():
+        browser.write_text(browser.read_text().replace('default-features = false', 'default-features = false, features = ["serde"]', 1))
     native_test = native.parent / 'crates/core/tests/timeline_upstream.rs'
     shutil.copyfile(ROOT / 'tests/support/sdk/native.rs', native_test)
     run('cargo', 'test', '--manifest-path', str(native), '-p', 'hls-core', '--test', 'timeline_upstream',
@@ -99,11 +101,16 @@ def main():
         'timelineApiIntegratedInHarness': integrated,
         'timelineCases': browser_evidence['cases'],
         'sampleEncryptionAdapterExtension': True,
+        'continuousCases': browser_evidence['continuousCases'],
+        'continuousCloseFailure': browser_evidence['continuousCloseFailure'],
+        'continuousCancellationCases': browser_evidence['cancelledContinuous'],
+        'continuousPromiseFailures': browser_evidence['continuousPromiseFailures'],
+        'nativeBrowserContinuousEqual': True,
         'sampleCancellationCases': browser_evidence['cancelledSamples'],
         'lateSampleCompletions': browser_evidence['lateSampleCompletions'],
         'nativeBrowserTimelineEqual': browser_evidence['nativeBrowserTimelineEqual'],
         'sdkCheckoutModified': False,
-        'scope': 'Real SDK shared host and browser Promise adapter with the tracked timeline integration extension; range, dual input, AES, TS SAMPLE-AES, fMP4 cenc/cbcs, KID Promise transport, reset, gaps and split outputs. SDK application rollout is independent.',
+        'scope': 'Real SDK shared host and browser Promise adapter with isolated timeline and continuous integration extensions; rolling admission/backpressure, stop/drain, caller close failures, native continuous finalization, range, dual input, AES, TS SAMPLE-AES, fMP4 cenc/cbcs, KID Promise transport, reset, gaps and split outputs. SDK application rollout is independent.',
     }
     (output / 'evidence.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(json.dumps(evidence, indent=2))

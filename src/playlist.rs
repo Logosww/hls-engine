@@ -9,6 +9,7 @@ mod parser;
 #[cfg(feature = "serde")]
 mod wire;
 pub use parser::{parse_playlist_snapshot, parse_session_keys};
+pub(crate) mod reconcile;
 
 /// Parser failures never embed raw input, credentials, or signed URLs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -625,6 +626,11 @@ impl PlaylistSnapshot {
     pub fn validate_timeline_sample_vod(&self) -> Result<(), PlaylistRejection> {
         self.validate_finite_profile(true, true)
     }
+    /// Open-input manifest validation. Execution and incremental identity checks
+    /// are performed by `ContinuousSession`; this does not change finite profiles.
+    pub fn validate_continuous(&self) -> Result<(), PlaylistRejection> {
+        self.validate_media_profile(true, true)
+    }
     fn validate_finite_profile(
         &self,
         timeline: bool,
@@ -639,6 +645,13 @@ impl PlaylistSnapshot {
         if self.0.segments.is_empty() {
             return Err(PlaylistRejection::Empty);
         }
+        self.validate_media_profile(timeline, samples)
+    }
+    fn validate_media_profile(
+        &self,
+        timeline: bool,
+        samples: bool,
+    ) -> Result<(), PlaylistRejection> {
         let target = self
             .0
             .target_duration

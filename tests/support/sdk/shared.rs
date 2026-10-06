@@ -84,3 +84,27 @@ pub async fn prepare_timeline(
         .await
         .map_err(timeline_failure)
 }
+
+/// v0.9 integration extension: keep the SDK's actual SourceHost and key provider.
+pub fn prepare_continuous(r:&Request,host:Arc<dyn Host>)->std::result::Result<ContinuousSession,Value> {
+    let source=Arc::new(SourceHost {host:host.clone(),cap:r.limits.resource_bytes,ids:Mutex::new(Vec::new()),next:Arc::new(AtomicU32::new(1))});
+    let keys=KeySession::new(r.operation_id.clone(),r.scope.clone(),Arc::new(Provider(host.clone())),Arc::new(Clock(host)),KeySessionOptions::default()).map_err(|_|error("KEY_INVALID","options"))?;
+    let text=r.primary.text.lines().filter(|l|!l.starts_with("#EXT-X-ENDLIST")&&!l.starts_with("#EXT-X-PLAYLIST-TYPE")).collect::<Vec<_>>().join("\n");
+    let mut initial=String::new();let mut count=0;
+    for line in text.lines() {initial.push_str(line);initial.push('\n');if !line.starts_with('#')&&!line.is_empty(){count+=1;if count==2{break;}}}
+    let id=InputId::new("primary").unwrap();
+    let parse_open=|content:String,revision|parse_playlist_snapshot(&TextResource{location:SourceLocation::Url(url::Url::parse(&r.primary.url).unwrap()),content},PlaylistContext::new(id.clone(),0).with_revision(revision)).unwrap();
+    let first=parse_open(initial,0);let full=parse_open(text,1);
+    let holder=Arc::new(Mutex::new(None::<ContinuousHandle>));let callback=holder.clone();let input=id.clone();
+    let options=ContinuousOptions::default().with_resources(ResourceOptions::default().with_encrypted_ranges(EncryptedRangePolicy::CompleteResources)).with_on_event(Arc::new(move|event| {
+        if let ContinuousEvent::Committed {input:progress,..}=event {
+            let h=callback.lock().unwrap();let h=h.as_ref().unwrap();
+            if progress.committed()==1 {h.accept_snapshot(&input,&full).unwrap();}else{h.stop();}
+        }
+    }));
+    let session=ContinuousSession::new(ContinuousInputs::new(ContinuousInput::new(id.clone(),source)),keys,options).map_err(|_|error("SESSION_INVALID","options"))?;
+    let handle=session.handle();*holder.lock().unwrap()=Some(handle.clone());handle.accept_snapshot(&id,&first).unwrap();Ok(session)
+}
+pub fn continuous_report(report:ContinuousReport)->Value {
+    let mut value=serde_json::to_value(report).unwrap();value.as_object_mut().unwrap().remove("peaks");value
+}

@@ -1,9 +1,11 @@
 //! Prepared, demand-driven media sessions. Legacy resume stays in the old pipeline.
+mod continuous;
 mod keyed;
 mod timeline;
 use super::*;
 use crate::source::{ByteRange, Source, SourceSessionOptions, safe_location};
 use crate::types::PacketTiming;
+pub use continuous::*;
 pub use keyed::*;
 use std::collections::VecDeque;
 pub use timeline::*;

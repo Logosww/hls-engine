@@ -42,7 +42,7 @@ def verify_browser():
                 self.send_response(204)
                 self.end_headers()
                 return
-            if self.path != '/result' or not 0 < length <= 131072:
+            if self.path != '/result' or not 0 < length <= 1048576:
                 self.send_error(400)
                 return
             reports.append(json.loads(self.rfile.read(length)))

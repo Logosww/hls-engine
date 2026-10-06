@@ -17,6 +17,11 @@ near/far/full-range/long-GOP budget cases on Native, Node WASM and Chrome;
 [planning-state measurements](benchmarks.md) distinguish retained records from
 total memory and quantify reads before the first output write.
 
+The v0.9 continuous suite adds 34 open-input output/report comparisons and
+8/64/256-epoch allocation, WASM-page, JS-heap and first-write measurements. The
+real SDK harness also checks rolling admission, stop/drain, close failure and
+continuous Promise cancellation/rejection. See [v0.9 evidence](release-0.9.0.md).
+
 Run from the repository root:
 
 ```sh

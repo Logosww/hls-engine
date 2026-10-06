@@ -13,11 +13,11 @@ mod tests {
     }
 }
 #[cfg(target_arch = "wasm32")]
-mod bridge {
+pub(crate) mod bridge {
     use super::suite;
     use hls_transmux::{crypto::key::*, playlist::EncryptionMethod};
     use wasm_bindgen::prelude::*;
-    struct Provider(js_sys::Function);
+    pub(crate) struct Provider(pub(crate) js_sys::Function);
     impl KeyProvider for Provider {
         fn resolve(&self, r: KeyRequest) -> KeyFuture<KeyResolution> {
             let kid = r.resource().kid();

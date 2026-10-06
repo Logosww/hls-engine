@@ -1,10 +1,12 @@
 # Documentation
 
 The [root README](../README.md) is the introduction and quick start for the
-`hls-transmux` crate. Version 0.8.0 adds finite TS SAMPLE-AES and fMP4 cenc/cbcs;
-its verification record is [release-0.8.0.md](release-0.8.0.md).
+`hls-transmux` crate. Version 0.9.0 adds continuous selected Live/EVENT sessions;
+its verification record is [release-0.9.0.md](release-0.9.0.md).
 
 ## Choose an entry point
+
+- [Continuous Live/EVENT sessions](continuous-sessions.md)
 
 - [Timeline ranges, epochs and split outputs](timeline-sessions.md)
 - [Clear prepared sessions](prepared-sessions.md)
@@ -21,6 +23,9 @@ its verification record is [release-0.8.0.md](release-0.8.0.md).
 - [Benchmarks and memory bounds](benchmarks.md)
 
 ## Verification
+
+- [v0.9.0 verification record](release-0.9.0.md)
+- [v0.9.0 machine evidence](release-0.9.0-evidence.json)
 
 - [Native/Node/Chrome runtime regression](runtime-tests.md)
 - [Finite sample encryption](sample-encryption.md)

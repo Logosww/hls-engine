@@ -176,10 +176,7 @@ mod tests {
         corrupt_clear: bool,
     }
     impl RawSampleHook for Restore {
-        fn process<'a>(
-            &'a mut self,
-            mut sample: RawSample,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>> {
+        fn process<'a>(&'a mut self, mut sample: RawSample) -> RawFuture<'a> {
             Box::pin(async move {
                 tokio::task::yield_now().await;
                 assert_eq!(sample.protection.as_ref(), Some(&descriptor()));
@@ -197,6 +194,7 @@ mod tests {
     async fn protected_hook_binds_descriptor_and_preserves_clear_prefixes() {
         let bytes = [0, 4, 1, 2, 3, 4, 0x65, 5, 6, 7];
         let layout = RawLayout::Fragment {
+            track: 1,
             offset: 81,
             prefix: 2,
         };
@@ -270,6 +268,7 @@ mod tests {
     async fn invalid_protection_and_missing_decryptor_fail_closed() {
         let bytes = [0; 10];
         let layout = RawLayout::Fragment {
+            track: 1,
             offset: 8,
             prefix: 4,
         };

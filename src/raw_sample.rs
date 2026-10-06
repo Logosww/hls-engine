@@ -3,14 +3,27 @@ use crate::{Error, Result, types::StreamKind};
 use sha2::{Digest, Sha256};
 use std::{borrow::Cow, collections::HashMap, future::Future, pin::Pin};
 
-mod protection;
+pub(crate) mod protection;
 use protection::Protection;
 
 #[derive(Clone, Copy)]
 pub(crate) enum RawLayout {
-    Fragment { offset: u64, prefix: usize },
+    Fragment {
+        track: u32,
+        offset: u64,
+        prefix: usize,
+    },
+    Transport {
+        pid: u16,
+        offset: usize,
+        adts: bool,
+    },
+    #[allow(dead_code)]
     AnnexB,
-    Adts { offset: usize },
+    #[allow(dead_code)]
+    Adts {
+        offset: usize,
+    },
 }
 pub(crate) struct RawSample {
     pub kind: StreamKind,
@@ -47,10 +60,20 @@ fn identity(
         StreamKind::Aac => 2,
     }]);
     match layout {
-        RawLayout::Fragment { offset, prefix } => {
+        RawLayout::Fragment {
+            track,
+            offset,
+            prefix,
+        } => {
+            hash.update(track.to_be_bytes());
             hash.update([0]);
             hash.update(offset.to_be_bytes());
             hash.update((prefix as u64).to_be_bytes());
+        }
+        RawLayout::Transport { pid, offset, adts } => {
+            hash.update([3, u8::from(adts)]);
+            hash.update(pid.to_be_bytes());
+            hash.update(offset.to_be_bytes());
         }
         RawLayout::AnnexB => hash.update([1]),
         RawLayout::Adts { offset } => {
@@ -67,18 +90,41 @@ fn identity(
     hash.update(bytes);
     hash.finalize().into()
 }
-pub(crate) trait RawSampleHook {
-    fn process<'a>(
-        &'a mut self,
-        sample: RawSample,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>>;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type RawFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type RawFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>>;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type SampleCheck<'a> = dyn Fn() -> Result<()> + Sync + 'a;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type SampleCheck<'a> = dyn Fn() -> Result<()> + 'a;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) trait HookBounds: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> HookBounds for T {}
+#[cfg(target_arch = "wasm32")]
+pub(crate) trait HookBounds {}
+#[cfg(target_arch = "wasm32")]
+impl<T> HookBounds for T {}
+pub(crate) trait RawSampleHook: HookBounds {
+    fn resolved(&mut self) {}
+    fn buffers(&mut self, _raw: usize, _replay: usize) {}
+    fn sample_aes_ts(&self) -> bool {
+        false
+    }
+    fn allows_annexb_resize(&self) -> bool {
+        false
+    }
+    fn limits(&self) -> (usize, usize) {
+        (65_536, 32 * 1024 * 1024)
+    }
+    fn process<'a>(&'a mut self, sample: RawSample) -> RawFuture<'a>;
 }
+#[cfg(test)]
 pub(crate) struct ClearSamples;
+#[cfg(test)]
 impl RawSampleHook for ClearSamples {
-    fn process<'a>(
-        &'a mut self,
-        sample: RawSample,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>> {
+    fn process<'a>(&'a mut self, sample: RawSample) -> RawFuture<'a> {
         Box::pin(async move {
             if sample.protection.is_some() {
                 return Err(Error::unsupported("sample protection is not enabled"));
@@ -89,10 +135,24 @@ impl RawSampleHook for ClearSamples {
 }
 pub(crate) enum RawStage {
     Clear,
+    #[allow(dead_code)] // Unbounded collector is used only by boundary tests.
     Collect(Vec<RawSample>),
+    Bounded {
+        samples: Vec<RawSample>,
+        bytes: usize,
+        limits: (usize, usize),
+    },
     Replay(HashMap<[u8; 32], Vec<u8>>),
 }
 impl RawStage {
+    pub(crate) fn collect(hook: &dyn RawSampleHook) -> Self {
+        Self::Bounded {
+            samples: Vec::new(),
+            bytes: 0,
+            limits: hook.limits(),
+        }
+    }
+
     pub(crate) fn sample<'a>(
         &mut self,
         kind: StreamKind,
@@ -104,7 +164,7 @@ impl RawStage {
         self.protected_sample(kind, layout, dts, scale, bytes, None)
     }
     #[allow(clippy::too_many_arguments)]
-    fn protected_sample<'a>(
+    pub(crate) fn protected_sample<'a>(
         &mut self,
         kind: StreamKind,
         layout: RawLayout,
@@ -119,7 +179,33 @@ impl RawStage {
         match self {
             Self::Clear if protection.is_none() => Ok(Some(Cow::Borrowed(bytes))),
             Self::Clear => Err(Error::unsupported("sample protection is not enabled")),
+            Self::Bounded {
+                samples,
+                bytes: used,
+                limits,
+            } => {
+                let total = used
+                    .checked_add(bytes.len())
+                    .filter(|n| *n <= limits.1)
+                    .ok_or_else(|| Error::unsupported("raw sample budget exceeded"))?;
+                if samples.len() >= limits.0 {
+                    return Err(Error::unsupported("raw sample budget exceeded"));
+                }
+                *used = total;
+                samples.push(RawSample {
+                    kind,
+                    layout,
+                    dts,
+                    timescale: scale,
+                    bytes: bytes.to_vec(),
+                    protection: protection.cloned(),
+                });
+                Ok(None)
+            }
             Self::Collect(samples) => {
+                if samples.len() >= 65_536 || bytes.len() > 32 * 1024 * 1024 {
+                    return Err(Error::unsupported("raw sample budget exceeded"));
+                }
                 samples.push(RawSample {
                     kind,
                     layout,
@@ -134,9 +220,6 @@ impl RawStage {
                 let data = samples
                     .get(&identity(kind, layout, dts, scale, bytes, protection))
                     .ok_or_else(|| Error::bitstream("raw sample identity changed"))?;
-                if data.len() != bytes.len() {
-                    return Err(Error::bitstream("raw hook changed protected byte layout"));
-                }
                 Ok(Some(Cow::Owned(data.clone())))
             }
         }
@@ -144,11 +227,20 @@ impl RawStage {
     pub(crate) async fn resolve(
         self,
         hook: &mut dyn RawSampleHook,
-        check: &dyn Fn() -> Result<()>,
+        check: &SampleCheck<'_>,
     ) -> Result<Self> {
-        let Self::Collect(samples) = self else {
-            return Err(Error::invalid("invalid raw stage"));
+        let samples = match self {
+            Self::Collect(s) | Self::Bounded { samples: s, .. } => s,
+            _ => return Err(Error::invalid("invalid raw stage")),
         };
+        let (count, budget) = hook.limits();
+        let total = samples
+            .iter()
+            .try_fold(0usize, |n, s| n.checked_add(s.bytes.len()));
+        if samples.len() > count || total.is_none_or(|n| n > budget) {
+            return Err(Error::unsupported("raw sample budget exceeded"));
+        }
+        hook.buffers(samples.iter().map(|s| s.bytes.capacity()).sum(), 0);
         let mut clear = HashMap::new();
         for sample in samples {
             check()?;
@@ -157,10 +249,16 @@ impl RawStage {
             }
             let id = sample.identity();
             let length = sample.bytes.len();
+            let annexb = matches!(
+                sample.layout,
+                RawLayout::AnnexB | RawLayout::Transport { adts: false, .. }
+            );
             let protected = sample.protection.clone().map(|p| (p, sample.bytes.clone()));
             let bytes = hook.process(sample).await?;
             check()?;
-            if bytes.len() != length {
+            if bytes.len() != length
+                && !(annexb && hook.allows_annexb_resize() && bytes.len() < length)
+            {
                 return Err(Error::bitstream("raw hook changed protected byte layout"));
             }
             if let Some((protection, original)) = protected {
@@ -168,6 +266,7 @@ impl RawStage {
             }
             clear.insert(id, bytes);
         }
+        hook.buffers(0, clear.values().map(Vec::capacity).sum());
         Ok(Self::Replay(clear))
     }
 }
@@ -206,10 +305,7 @@ mod tests {
             seen: usize,
         }
         impl RawSampleHook for Pending {
-            fn process<'a>(
-                &'a mut self,
-                sample: RawSample,
-            ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>> {
+            fn process<'a>(&'a mut self, sample: RawSample) -> RawFuture<'a> {
                 Box::pin(async move {
                     tokio::task::yield_now().await;
                     self.seen += 1;
@@ -253,14 +349,11 @@ mod tests {
     async fn hook_can_restore_raw_nals_before_clear_codec_validation() {
         struct Capture(HashMap<u64, Vec<u8>>);
         impl RawSampleHook for Capture {
-            fn process<'a>(
-                &'a mut self,
-                sample: RawSample,
-            ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>> {
+            fn process<'a>(&'a mut self, sample: RawSample) -> RawFuture<'a> {
                 Box::pin(async move {
                     tokio::task::yield_now().await;
                     if !matches!(sample.kind, StreamKind::Aac)
-                        && let RawLayout::Fragment { offset, prefix } = sample.layout
+                        && let RawLayout::Fragment { offset, prefix, .. } = sample.layout
                     {
                         assert_eq!(prefix, 2);
                         if let Some(original) = self.0.get(&offset) {
@@ -303,10 +396,7 @@ mod layout_tests {
 
     struct Identity;
     impl RawSampleHook for Identity {
-        fn process<'a>(
-            &'a mut self,
-            sample: RawSample,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>> {
+        fn process<'a>(&'a mut self, sample: RawSample) -> RawFuture<'a> {
             Box::pin(async move { Ok(sample.bytes) })
         }
     }
@@ -315,6 +405,7 @@ mod layout_tests {
     async fn replay_binds_original_offset_prefix_clock_and_kind() {
         for prefix in 1..=4 {
             let layout = RawLayout::Fragment {
+                track: 1,
                 offset: 123,
                 prefix,
             };
@@ -340,6 +431,7 @@ mod layout_tests {
                 (
                     StreamKind::Avc,
                     RawLayout::Fragment {
+                        track: 1,
                         offset: 124,
                         prefix,
                     },
@@ -349,6 +441,7 @@ mod layout_tests {
                 (
                     StreamKind::Avc,
                     RawLayout::Fragment {
+                        track: 1,
                         offset: 123,
                         prefix: prefix + 1,
                     },
@@ -379,10 +472,7 @@ mod layout_tests {
     async fn raw_hook_length_changes_and_cancellation_fail_before_replay() {
         struct Resize;
         impl RawSampleHook for Resize {
-            fn process<'a>(
-                &'a mut self,
-                mut sample: RawSample,
-            ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + 'a>> {
+            fn process<'a>(&'a mut self, mut sample: RawSample) -> RawFuture<'a> {
                 Box::pin(async move {
                     sample.bytes.push(0);
                     Ok(sample.bytes)
@@ -400,11 +490,11 @@ mod layout_tests {
             }])
         }
         assert!(collected().resolve(&mut Resize, &|| Ok(())).await.is_err());
-        let calls = std::cell::Cell::new(0);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = collected()
             .resolve(&mut Identity, &|| {
-                calls.set(calls.get() + 1);
-                if calls.get() == 2 {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if calls.load(std::sync::atomic::Ordering::SeqCst) == 2 {
                     Err(Error::Cancelled)
                 } else {
                     Ok(())
@@ -412,6 +502,6 @@ mod layout_tests {
             })
             .await;
         assert!(matches!(result, Err(Error::Cancelled)));
-        assert_eq!(calls.get(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

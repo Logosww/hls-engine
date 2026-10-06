@@ -9,9 +9,9 @@ HTTP dependencies are required.
 
 Documentation: [integration guides](docs/README.md).
 
-Version 0.7.0 adds finite presentation ranges, epoch mapping, gap policies and
-split outputs through `prepare_hls_timeline`. See [timeline sessions](docs/timeline-sessions.md)
-and the [release verification](docs/release-0.7.0.md).
+Version 0.8.0 adds finite sample decryption through the existing keyed/timeline APIs:
+TS SAMPLE-AES (AVC/AAC-LC), and fMP4 cenc/cbcs (AVC/HEVC/AAC-LC), producing clear MP4.
+See [sample encryption](docs/sample-encryption.md) and [release verification](docs/release-0.8.0.md).
 
 ## Features
 
@@ -76,13 +76,13 @@ and [diagnostics, progress, capability queries and examples](docs/keyed-contract
 Package version 0.6.0 extends the existing crate; release acceptance is documented
 in [the verification record](docs/release-0.6.0.md).
 Legacy clear APIs and schema v1 checkpoints remain compatible; AES resume,
-live/EVENT and sample encryption are outside this release.
+live/EVENT and sample encryption were outside v0.6; finite sample encryption is added in v0.8.
 
 | Input and workflow | Entry point | Guide |
 | --- | --- | --- |
 | Clear HLS, including legacy single-input resume | `transmux_hls_to_mp4_async` and writer/bytes variants | Quick start and resume sections below |
 | Selected clear VOD, with optional replacement audio | `prepare_hls` | [Prepared sessions](docs/prepared-sessions.md) |
-| Selected finite clear/AES-128 snapshots with an external key provider | `prepare_hls_with_keys` | [Keyed sessions](docs/keyed-sessions.md) |
+| Selected finite clear/AES-128/sample-encrypted snapshots with an external key provider | `prepare_hls_with_keys` | [Keyed sessions](docs/keyed-sessions.md) |
 
 ## v0.5.0 prepared sessions and pure tracks
 
@@ -910,7 +910,7 @@ Unsupported profiles are rejected by the corresponding API's typed errors.
 AES-128 finite input uses keyed/timeline sessions; discontinuities and presentation
 ranges use the timeline API. Legacy entry points keep their original restrictions.
 
-- SAMPLE-AES, cenc/cbcs and AES-GCM execution
+- TS HEVC SAMPLE-AES, TS/Packed AAC SAMPLE-AES-CTR, and AES-GCM execution
 - Live/EVENT inputs and LL-HLS
 - Automatic rendition selection, multiple video/audio tracks (one selected external audio track is supported)
 - Codecs other than AVC / HEVC / AAC-LC (e.g. MP3, AC-3, E-AC-3, AV1)
@@ -937,9 +937,9 @@ MP4，**不解码、不编码、不转码**。
 
 核心 HLS / TS / ISOBMFF 逻辑全部自研，仅依赖少量基础异步与 HTTP 库。
 
-v0.7.0 新增 `prepare_hls_timeline`：可解码范围、epoch 映射、缺口策略、配置变化
-拆分输出，以及有界 sample 游标。接入、内存边界和验证见
-[timeline 文档](docs/timeline-sessions.md) 与 [0.7.0 验收记录](docs/release-0.7.0.md)。
+v0.8.0 通过现有 keyed/timeline 入口支持有限 sample 解密：TS SAMPLE-AES（AVC/AAC-LC）
+及 fMP4 cenc/cbcs（AVC/HEVC/AAC-LC），输出 clear MP4，保留范围、epoch、缺口策略和配置拆分。
+接入与验证见 [sample 加密文档](docs/sample-encryption.md) 和 [0.8.0 验收记录](docs/release-0.8.0.md)。
 
 ### 特性
 
@@ -1714,7 +1714,7 @@ CI 管道包含 `cargo check --target wasm32-unknown-unknown
 不支持的组合由对应入口返回 typed 错误。有限 AES-128 输入使用 keyed/timeline
 session；discontinuity 和 presentation 范围使用 timeline API。旧入口保持原限制。
 
-- SAMPLE-AES、cenc/cbcs、AES-GCM 执行
+- TS HEVC SAMPLE-AES、TS/Packed AAC SAMPLE-AES-CTR、AES-GCM 执行
 - Live/EVENT 输入及 LL-HLS
 - 自动选择 alternate audio group、多视频 / 多音频 track（已选外置音轨可用 prepared API）
 - 非 AVC / HEVC / AAC-LC 的 codec（如 MP3、AC-3、E-AC-3、AV1）

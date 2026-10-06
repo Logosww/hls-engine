@@ -50,6 +50,12 @@ def main():
         'tests/support/sdk/shared.rs', 'tests/support/sdk/native.rs', 'tests/support/sdk/browser.rs', 'tests/support/sdk/browser.mjs',
         'src/transmux/session/timeline/catalog.rs', 'tests/support/allocation.rs', 'tests/support/timeline_profile.rs',
         'docs/release-0.7.0.md', 'docs/release-0.7.0-evidence.json',
+        'docs/release-0.8.0.md', 'docs/release-0.8.0-evidence.json',
+        'docs/sample-encryption.md', 'src/crypto/sample.rs', 'src/isobmff/protection.rs',
+        'scripts/verify_sample_crypto.py', 'scripts/sample_fixture_layout.py',
+        'tests/sample_crypto.rs', 'tests/support/sample_crypto.rs',
+        'tests/support/sample_profile.rs', 'examples/sample_budget.rs',
+        'tests/fixtures/sample_crypto/manifest.json',
     }
     with tempfile.TemporaryDirectory(prefix='hls-package-') as temporary:
         with tarfile.open(archive) as tar:
@@ -75,7 +81,7 @@ def main():
         run('cargo', 'build', '--offline', '--locked', '--example', 'keyed_demo', '--example', 'keyed_export', '--example', 'timeline_export', '--example', 'timeline_budget',
             '--target-dir', str(target), cwd=crate)
         run('cargo', 'test', '--offline', '--locked', '--features', 'serde',
-            '--test', 'timeline_session', '--target-dir', str(target), cwd=crate)
+            '--test', 'timeline_session', '--test', 'sample_crypto', '--target-dir', str(target), cwd=crate)
         run('cargo', 'build', '--offline', '--locked', '--no-default-features',
             '--target', 'wasm32-unknown-unknown', '--example', 'keyed_wasm',
             '--target-dir', str(target), cwd=crate)

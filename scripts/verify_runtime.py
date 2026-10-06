@@ -25,12 +25,23 @@ def verify_browser():
     completed = threading.Event()
     reports = []
 
+    class Server(ThreadingHTTPServer):
+        # Chrome fetches the module graph concurrently; the OS default backlog of
+        # five can drop connections before request threads accept the burst.
+        request_queue_size = 64
+
     class Handler(SimpleHTTPRequestHandler):
-        def log_message(self, *_):
-            pass
+        def log_message(self, format, *args):
+            if len(args) > 1 and str(args[1]).startswith(('4', '5')):
+                print('Chrome HTTP: ' + format % args, flush=True)
 
         def do_POST(self):
             length = int(self.headers.get('Content-Length', '0'))
+            if self.path == '/progress' and 0 < length <= 1024:
+                print('Chrome: ' + self.rfile.read(length).decode(), flush=True)
+                self.send_response(204)
+                self.end_headers()
+                return
             if self.path != '/result' or not 0 < length <= 131072:
                 self.send_error(400)
                 return
@@ -39,7 +50,7 @@ def verify_browser():
             self.end_headers()
             completed.set()
 
-    with ThreadingHTTPServer(('127.0.0.1', 0), partial(Handler, directory=str(ROOT))) as server:
+    with Server(('127.0.0.1', 0), partial(Handler, directory=str(ROOT))) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -50,7 +61,7 @@ def verify_browser():
                            f'http://127.0.0.1:{server.server_port}/tests/runtime/browser.html']
                 process = subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True)
                 try:
-                    done = completed.wait(120)
+                    done = completed.wait(int(os.environ.get('HLS_RUNTIME_BROWSER_TIMEOUT', '300')))
                 finally:
                     # Reap the isolated profile's helpers after the page completion handshake.
                     for sig in (signal.SIGTERM, signal.SIGKILL):

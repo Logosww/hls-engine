@@ -1,0 +1,11 @@
+#EXTM3U
+## Generated with https://github.com/shaka-project/shaka-packager version v3.9.3-0a8ba4f-release
+#EXT-X-TARGETDURATION:2
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:2.000,
+seg1.ts
+#EXTINF:2.000,
+seg2.ts
+#EXTINF:2.000,
+seg3.ts
+#EXT-X-ENDLIST

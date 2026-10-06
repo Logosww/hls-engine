@@ -37,6 +37,7 @@ pub struct SessionError {
     resource: Option<String>,
     byte_range: Option<ByteRange>,
     keyed_cause: Option<Box<crate::crypto::resource::ResourceError>>,
+    sample_cause: Option<Box<crate::crypto::sample::SampleError>>,
 }
 impl SessionError {
     fn new(error: Error, phase: SessionPhase) -> Self {
@@ -48,6 +49,7 @@ impl SessionError {
             resource: None,
             byte_range: None,
             keyed_cause: None,
+            sample_cause: None,
         }
     }
     pub fn error(&self) -> &Error {
@@ -440,6 +442,7 @@ impl ClearInputResources {
             resource: location.map(safe_location),
             byte_range,
             keyed_cause: None,
+            sample_cause: None,
         };
         let location = self
             .location
@@ -566,6 +569,7 @@ impl InputCursor {
                 .map(safe_location),
             byte_range: range.or_else(|| resolved.and_then(|r| r.1)),
             keyed_cause: None,
+            sample_cause: None,
         }
     }
     async fn open(
@@ -596,6 +600,7 @@ impl InputCursor {
             resource: Some(safe_location(&root)),
             byte_range: None,
             keyed_cause: None,
+            sample_cause: None,
         };
         let text = crate::cancel::wait(options.cancel.as_ref(), source.0.read_text(&root))
             .await

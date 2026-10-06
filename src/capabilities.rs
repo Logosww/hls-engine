@@ -299,7 +299,11 @@ pub fn query_keyed_capability(query: &KeyedCapabilityQuery) -> KeyedCapabilityDe
         }
         if !matches!(
             input.encryption,
-            KeyedEncryption::Clear | KeyedEncryption::Aes128 | KeyedEncryption::ClearAndAes128
+            KeyedEncryption::Clear
+                | KeyedEncryption::Aes128
+                | KeyedEncryption::ClearAndAes128
+                | KeyedEncryption::SampleAes
+                | KeyedEncryption::SampleAesCtr
         ) {
             reject(D::Encryption);
         }
@@ -323,8 +327,27 @@ pub fn query_keyed_capability(query: &KeyedCapabilityQuery) -> KeyedCapabilityDe
         {
             reject(D::TrackSelection);
         }
-        if input.scheme != KeyedProtectionScheme::None {
+        let expected_scheme = match (input.container, input.encryption) {
+            (KeyedContainer::FragmentedMp4, KeyedEncryption::SampleAes) => {
+                KeyedProtectionScheme::Cbcs
+            }
+            (KeyedContainer::FragmentedMp4, KeyedEncryption::SampleAesCtr) => {
+                KeyedProtectionScheme::Cenc
+            }
+            _ => KeyedProtectionScheme::None,
+        };
+        if input.scheme != expected_scheme {
             reject(D::ProtectionScheme);
+        }
+        if input.container == KeyedContainer::TransportStream {
+            if input.encryption == KeyedEncryption::SampleAesCtr {
+                reject(D::Encryption);
+            }
+            if input.encryption == KeyedEncryption::SampleAes
+                && input.codecs.contains(&KeyedCodec::Hevc)
+            {
+                reject(D::Codec);
+            }
         }
         if !matches!(
             input.key_source,

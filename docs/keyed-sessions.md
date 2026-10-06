@@ -40,13 +40,17 @@ playlists. It supports clear and AES-128 TS/fMP4, AVC/HEVC/AAC-LC, explicit or
 original-sequence IVs, encrypted MAPs, rotation at the same key URI, and METHOD=NONE.
 `with_audio` replaces primary embedded audio. Each input advances independently;
 sequence numbers are not used to align the two timelines. Open/EVENT playlists,
-gaps, discontinuities, mid-input container changes, SAMPLE-AES and other unsupported
-methods remain rejected. This is whole-resource CBC decryption, without authentication.
+gaps, discontinuities and mid-input container changes remain rejected by this entry;
+use timeline sessions for those policies. The v0.8 [sample profile](sample-encryption.md)
+adds TS SAMPLE-AES AVC/AAC-LC and fMP4 cenc/cbcs AVC/HEVC/AAC-LC.
+CBC and CTR do not authenticate the key or plaintext.
 
 Encrypted BYTERANGE defaults to rejection. Set
 `ResourceOptions::with_encrypted_ranges(EncryptedRangePolicy::CompleteResources)`
 through `KeyedPrepareOptions::with_resources` only when each range is a complete,
-independently padded encrypted resource; block alignment alone is insufficient.
+independently padded AES-128 resource; block alignment alone is insufficient.
+For sample encryption the attestation instead requires a complete container resource;
+resource-wide padding/block alignment and AES MAP IV rules do not apply.
 See [resource validation and limits](aes-resources.md).
 
 `into_mp4_bytes` collects a classic MP4 in memory. `write_to(&mut writer)` produces
@@ -70,7 +74,8 @@ resource sessions are stopped on completion or dropped futures.
 MAP reuse compares input identity/generation/epoch and the entire immutable MAP
 (location, range, declaration and captured key context). Before reuse it resolves
 the current key and checks the selected reference, version, resolution revision
-and expiry. Explicit `prepared.invalidate_keys()`, TTL expiry, cache eviction or
+and expiry for AES-128. Sample MAPs retain protection descriptors; keys are resolved
+per protected sample through the operation key session. Explicit `prepared.invalidate_keys()`, TTL expiry, cache eviction or
 a new MAP declaration can force re-read. MAPs are never shared across operations.
 
 Cancellation races resource reads, provider waits and writer writes/flushes.
@@ -91,7 +96,8 @@ Validation uses retained independent OpenSSL fixtures, normalized complete outpu
 comparison (only MP4 creation/modification timestamps excluded), native file tests,
 actual Node/Chrome WASM with asynchronous providers and a non-Send short writer,
 and FFprobe packet/payload/timing plus FFmpeg decode/seek checks. This integration
-does not implement live, sample encryption, subtitles or multi-track selection.
+does not implement live, subtitles or multi-track selection.
+Run `python3 scripts/verify_sample_crypto.py --ffmpeg --ffmpeg-finalize` for the sample corpus.
 
 Run `python3 scripts/verify_keyed_decode.py` for the Issue #1 regression gate.
 It generates local HEVC/AVC B-frame inputs with FFmpeg, encrypts complete TS/fMP4

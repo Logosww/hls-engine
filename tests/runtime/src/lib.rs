@@ -5,6 +5,7 @@ pub mod keys;
 pub mod playlist;
 pub mod prepared;
 pub mod resources;
+pub mod samples;
 pub mod timeline;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,6 +20,7 @@ pub fn native_report() -> serde_json::Value {
         "prepared": json(prepared::native_suite()),
         "contracts": json(contracts::native_suite()),
         "timeline": json(timeline::native_suite()),
+        "samples": json(samples::native_suite()),
     })
 }
 
@@ -29,3 +31,7 @@ pub mod timeline_profile;
 
 #[path = "../../support/timeline_budget.rs"]
 pub mod timeline_budget;
+
+pub(crate) use samples::suite as sample_corpus;
+#[path = "../../support/sample_profile.rs"]
+pub mod sample_profile;

@@ -409,7 +409,7 @@ async fn metadata_key_kid_and_options_validation() {
     let s = session(p.clone(), clock, KeySessionOptions::default());
     for (body, kind) in [
         (
-            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"",
+            "#EXT-X-KEY:METHOD=AES-256-GCM,URI=\"k\"",
             KeyErrorKind::Unsupported,
         ),
         (

@@ -326,6 +326,18 @@ impl AvailableKey {
             kid: None,
         }
     }
+    pub fn sample_aes(secret: SecretKey) -> Self {
+        Self {
+            method: EncryptionMethod::SampleAes,
+            ..Self::aes128(secret)
+        }
+    }
+    pub fn sample_aes_ctr(secret: SecretKey) -> Self {
+        Self {
+            method: EncryptionMethod::SampleAesCtr,
+            ..Self::aes128(secret)
+        }
+    }
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
@@ -587,7 +599,10 @@ impl KeySession {
         {
             return Err(KeyError::new(KeyErrorKind::ConflictingMetadata));
         }
-        if first.method() != &EncryptionMethod::Aes128 {
+        if !matches!(
+            first.method(),
+            EncryptionMethod::Aes128 | EncryptionMethod::SampleAes | EncryptionMethod::SampleAesCtr
+        ) {
             return Err(KeyError::new(KeyErrorKind::Unsupported));
         }
         let mut selected = Vec::new();

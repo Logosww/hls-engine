@@ -500,6 +500,7 @@ impl TimelinePreparedTransmux {
             peak_planned_samples: plan.peak_samples.max(replay.peak_samples),
             peak_planned_resources: plan.peak_resources.max(replay.peak_resources),
             indexed_resources: plan.resources.len(),
+            sample_buffers: self.resources.stats(),
         })
     }
 }

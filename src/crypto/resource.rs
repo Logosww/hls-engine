@@ -202,6 +202,7 @@ pub enum EncryptedRangePolicy {
 #[derive(Debug, Clone)]
 pub struct ResourceOptions {
     max_resource_bytes: u64,
+    max_samples: usize,
     max_waiting_bytes: u64,
     max_resources: usize,
     ranges: EncryptedRangePolicy,
@@ -210,6 +211,7 @@ impl Default for ResourceOptions {
     fn default() -> Self {
         Self {
             max_resource_bytes: 16 * 1024 * 1024,
+            max_samples: 65_536,
             max_waiting_bytes: 32 * 1024 * 1024,
             max_resources: 2,
             ranges: EncryptedRangePolicy::Reject,
@@ -217,6 +219,11 @@ impl Default for ResourceOptions {
     }
 }
 impl ResourceOptions {
+    /// Maximum raw samples retained while processing one resource.
+    pub fn with_sample_limit(mut self, samples: usize) -> Self {
+        self.max_samples = samples;
+        self
+    }
     pub fn with_limits(
         mut self,
         resource_bytes: u64,
@@ -233,7 +240,8 @@ impl ResourceOptions {
         self
     }
     pub(crate) fn validate(&self) -> ResourceResult<()> {
-        if self.max_resource_bytes == 0
+        if self.max_samples == 0
+            || self.max_resource_bytes == 0
             || self.max_waiting_bytes < self.max_resource_bytes
             || self.max_resources == 0
             || usize::try_from(self.max_resource_bytes).is_err()
@@ -252,6 +260,18 @@ impl ResourceOptions {
     ) -> ResourceResult<()> {
         (|| {
             self.request_size(request)?;
+            if request.segment.map().is_none()
+                && request
+                    .resource
+                    .keys()
+                    .candidates()
+                    .first()
+                    .is_some_and(|k| {
+                        matches!(k.method(), crate::playlist::EncryptionMethod::SampleAesCtr)
+                    })
+            {
+                return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist));
+            }
             keys.validate_resource(&request.resource)
                 .map_err(ResourceError::from_key)
         })()
@@ -270,7 +290,7 @@ impl ResourceOptions {
         if reserved > self.max_resource_bytes {
             return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));
         }
-        if encrypted && range.is_some_and(|r| r.length % 16 != 0) {
+        if encrypted && !sample_method(request) && range.is_some_and(|r| r.length % 16 != 0) {
             return Err(ResourceError::new(
                 ResourceErrorKind::InvalidCiphertextLength,
             ));
@@ -341,8 +361,19 @@ impl fmt::Debug for ClearResource {
 pub struct ResourceStats {
     resources: usize,
     reserved_bytes: u64,
+    peak_raw_sample_bytes: usize,
+    peak_replay_sample_bytes: usize,
 }
 impl ResourceStats {
+    /// Peak retained raw sample payload capacity in one resource (not total RSS).
+    pub fn peak_raw_sample_bytes(&self) -> usize {
+        self.peak_raw_sample_bytes
+    }
+    /// Peak retained decrypted replay payload capacity in one resource.
+    pub fn peak_replay_sample_bytes(&self) -> usize {
+        self.peak_replay_sample_bytes
+    }
+
     pub fn resources(&self) -> usize {
         self.resources
     }
@@ -350,7 +381,7 @@ impl ResourceStats {
         self.reserved_bytes
     }
 }
-struct Permit {
+pub(crate) struct Permit {
     state: Arc<Mutex<ResourceStats>>,
     bytes: u64,
 }
@@ -406,6 +437,8 @@ impl ResourceSession {
             state: Arc::new(Mutex::new(ResourceStats {
                 resources: 0,
                 reserved_bytes: 0,
+                peak_raw_sample_bytes: 0,
+                peak_replay_sample_bytes: 0,
             })),
             cancel: RequestCancellation::new(),
             observer: None,
@@ -471,6 +504,9 @@ impl ResourceSession {
         source: Arc<dyn Source>,
         request: ResourceRequest,
     ) -> ResourceResult<ClearResource> {
+        if sample_method(&request) {
+            return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist).at(&request));
+        }
         self.read_inner(source, &request, None)
             .await
             .map_err(|e| e.at(&request))
@@ -683,6 +719,147 @@ fn validate_container(bytes: &[u8], request: &ResourceRequest) -> crate::Result<
         return Err(crate::Error::bitstream("TS resource missing PAT"));
     }
     Ok(ClearContainer::TransportStream)
+}
+
+/// Internal resource envelope: sample-protected bytes are never returned as ClearResource.
+pub(crate) enum EncodedResource {
+    Clear(Box<ClearResource>),
+    Samples {
+        bytes: Zeroizing<Vec<u8>>,
+        request: Box<ResourceRequest>,
+    },
+}
+impl EncodedResource {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Clear(v) => v.bytes(),
+            Self::Samples { bytes, .. } => bytes,
+        }
+    }
+    fn request(&self) -> &ResourceRequest {
+        match self {
+            Self::Clear(v) => v.request(),
+            Self::Samples { request, .. } => request,
+        }
+    }
+}
+fn sample_method(request: &ResourceRequest) -> bool {
+    request
+        .resource
+        .keys()
+        .candidates()
+        .first()
+        .is_some_and(|k| {
+            matches!(
+                k.method(),
+                crate::playlist::EncryptionMethod::SampleAes
+                    | crate::playlist::EncryptionMethod::SampleAesCtr
+            )
+        })
+}
+impl ResourceSession {
+    pub(crate) fn observe_sample_buffers(&self, raw: usize, replay: usize) {
+        let mut stats = self.state.lock().unwrap();
+        stats.peak_raw_sample_bytes = stats.peak_raw_sample_bytes.max(raw);
+        stats.peak_replay_sample_bytes = stats.peak_replay_sample_bytes.max(replay);
+    }
+    pub(crate) fn reserve_samples(&self, bytes: usize) -> ResourceResult<Permit> {
+        self.check()?;
+        self.reserve(bytes as u64)
+    }
+    pub(crate) fn sample_limits(&self) -> (usize, usize) {
+        (
+            self.options.max_samples,
+            self.options.max_waiting_bytes as usize,
+        )
+    }
+    pub(crate) async fn resolve_sample_key(
+        &self,
+        resource: KeyResource,
+    ) -> Result<Arc<ResolvedKey>, KeyError> {
+        let waiter = self.keys.try_resolve(resource)?;
+        let key = tokio::select! {biased; _=self.cancel.cancelled()=>return Err(KeyError::new(KeyErrorKind::Cancelled)),result=waiter=>result?};
+        if !self.keys.key_is_valid(&key) {
+            return Err(KeyError::new(KeyErrorKind::Expired));
+        }
+        Ok(key)
+    }
+    pub(crate) async fn read_encoded(
+        &self,
+        source: Arc<dyn Source>,
+        request: ResourceRequest,
+    ) -> ResourceResult<EncodedResource> {
+        if !sample_method(&request) {
+            return self
+                .read(source, request)
+                .await
+                .map(|v| EncodedResource::Clear(Box::new(v)));
+        }
+        let result=async {
+            self.check()?;
+            let reserved=self.options.request_size(&request)?;let _permit=self.reserve(reserved)?;
+            let settings=SourceSessionOptions{demand_driven:true,max_resource_bytes:Some(reserved)};
+            let isolated=source.create_session_with_options(&settings);
+            let lease=SourceLease{isolated:isolated.is_some(),source:isolated.unwrap_or(source)};
+            let range=request.resource.range().map(|r|r.byte_range());
+            let bytes=tokio::select!{biased;_=self.cancel.cancelled()=>return Err(ResourceError::new(ResourceErrorKind::Cancelled)),v=lease.source.read_bytes(request.resource.location().location(),range.as_ref())=>v}
+                .map_err(|e|ResourceError::from_cause(if crate::source::is_resource_limit(&e){ResourceErrorKind::ResourceTooLarge}else{ResourceErrorKind::Read},e))?;
+            let bytes=Zeroizing::new(bytes);
+            self.check()?;
+            if bytes.len() as u64 > reserved {return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));}
+            if range.is_some_and(|r|r.length!=bytes.len() as u64){return Err(ResourceError::new(ResourceErrorKind::InvalidRange));}
+            self.observe(&request,ResourceStage::Downloaded,bytes.len() as u64)?;
+            if request.resource.kind()==KeyResourceKind::Map || request.segment.map().is_some() {
+                crate::isobmff::validate_sample_envelope(&bytes,request.resource.kind()==KeyResourceKind::Map)
+            }else {validate_container(&bytes,&request).map(|_|())}
+                .map_err(|e|ResourceError::from_cause(ResourceErrorKind::MediaValidation,e))?;
+            self.observe(&request,ResourceStage::Ready,bytes.len() as u64)?;
+            Ok(bytes)
+        }.await.map_err(|e:ResourceError|e.at(&request))?;
+        Ok(EncodedResource::Samples {
+            bytes: result,
+            request: Box::new(request),
+        })
+    }
+    pub(crate) async fn read_encoded_map(
+        &self,
+        source: Arc<dyn Source>,
+        request: ResourceRequest,
+        cached: &mut Option<EncodedResource>,
+    ) -> ResourceResult<()> {
+        if sample_method(&request) {
+            if cached.as_ref().is_some_and(|v| {
+                matches!(v, EncodedResource::Samples { .. })
+                    && v.request().segment.map() == request.segment.map()
+                    && v.request().resource.slot().input_id() == request.resource.slot().input_id()
+                    && v.request().resource.slot().generation()
+                        == request.resource.slot().generation()
+                    && v.request().resource.slot().epoch() == request.resource.slot().epoch()
+            }) {
+                return self.observe(&request, ResourceStage::MapReused, 0);
+            }
+            *cached = Some(self.read_encoded(source, request).await?);
+            return Ok(());
+        }
+        let mut clear = match cached.take() {
+            Some(EncodedResource::Clear(v)) => Some(*v),
+            _ => None,
+        };
+        let result = self.read_map_cached(source, request, &mut clear).await;
+        *cached = clear.map(|v| EncodedResource::Clear(Box::new(v)));
+        result
+    }
+    pub(crate) fn sample_decrypted(
+        &self,
+        request: &ResourceRequest,
+        bytes: u64,
+    ) -> ResourceResult<()> {
+        if sample_method(request) {
+            self.observe(request, ResourceStage::Decrypted, bytes)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

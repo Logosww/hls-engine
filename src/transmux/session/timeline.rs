@@ -52,7 +52,7 @@ fn prepare_selected(
     for input in &inputs {
         input
             .snapshot
-            .validate_timeline_vod()
+            .validate_timeline_sample_vod()
             .map_err(|_| fail(TimelineErrorKind::UnsupportedPlaylist))?;
     }
     for anchor in &options.anchors {
@@ -110,6 +110,7 @@ fn fail(kind: TimelineErrorKind) -> TimelineSessionError {
         slot: None,
         cause: None,
         resource: None,
+        sample: None,
         completed: Vec::new(),
     }
 }
@@ -120,7 +121,7 @@ fn media_error(error: Error) -> TimelineSessionError {
         TimelineErrorKind::Media
     };
     TimelineSessionError {
-        cause: Some(error),
+        cause: Some(Box::new(error)),
         ..fail(kind)
     }
 }

@@ -1,0 +1,14 @@
+#EXTM3U
+## Generated with https://github.com/shaka-project/shaka-packager version v3.9.3-0a8ba4f-release
+#EXT-X-TARGETDURATION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-KEY:METHOD=SAMPLE-AES,URI="key",IV=0x000102030405060708090a0b0c0d0e0f,KEYFORMAT="identity"
+#EXTINF:2.005,
+seg1.ts
+#EXTINF:2.005,
+seg2.ts
+#EXTINF:2.005,
+seg3.ts
+#EXTINF:0.005,
+seg4.ts
+#EXT-X-ENDLIST

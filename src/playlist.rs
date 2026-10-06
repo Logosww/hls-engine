@@ -610,14 +610,26 @@ impl PlaylistSnapshot {
     /// Manifest-only preflight for the planned v0.6 finite profile. Does NOT enable execution,
     /// validate provider/codec/container support, or fetch resources.
     pub fn validate_finite_vod(&self) -> Result<(), PlaylistRejection> {
-        self.validate_finite_profile(false)
+        self.validate_finite_profile(false, false)
     }
     /// Validate the finite timeline profile. GAP and discontinuity are retained
     /// for the timeline executor; this is not a codec or timeline validation.
     pub fn validate_timeline_vod(&self) -> Result<(), PlaylistRejection> {
-        self.validate_finite_profile(true)
+        self.validate_finite_profile(true, false)
     }
-    fn validate_finite_profile(&self, timeline: bool) -> Result<(), PlaylistRejection> {
+    /// Finite sample-encryption manifest profile; container validation is deferred to demux.
+    pub fn validate_finite_sample_vod(&self) -> Result<(), PlaylistRejection> {
+        self.validate_finite_profile(false, true)
+    }
+    /// Timeline sample-encryption profile, retaining GAP and discontinuity.
+    pub fn validate_timeline_sample_vod(&self) -> Result<(), PlaylistRejection> {
+        self.validate_finite_profile(true, true)
+    }
+    fn validate_finite_profile(
+        &self,
+        timeline: bool,
+        samples: bool,
+    ) -> Result<(), PlaylistRejection> {
         if !self.0.end_list {
             return Err(PlaylistRejection::OpenInput);
         }
@@ -660,7 +672,9 @@ impl PlaylistSnapshot {
                     match first.method {
                         EncryptionMethod::Aes128 => {}
                         EncryptionMethod::SampleAes | EncryptionMethod::SampleAesCtr => {
-                            return Err(PlaylistRejection::SampleEncryption);
+                            if !samples {
+                                return Err(PlaylistRejection::SampleEncryption);
+                            }
                         }
                         _ => return Err(PlaylistRejection::UnknownEncryption),
                     }
@@ -668,7 +682,12 @@ impl PlaylistSnapshot {
                 if keys.candidates.iter().any(|k| !k.extensions.is_empty()) {
                     return Err(PlaylistRejection::UnvalidatedTag);
                 }
-                if map && keys.candidates.iter().any(|k| k.iv.is_none()) {
+                if map
+                    && keys
+                        .candidates
+                        .iter()
+                        .any(|k| k.method == EncryptionMethod::Aes128 && k.iv.is_none())
+                {
                     return Err(PlaylistRejection::MissingMapIv);
                 }
             }

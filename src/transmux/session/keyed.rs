@@ -185,7 +185,11 @@ impl KeyedSessionError {
             None => None,
         };
         let resource = cause.keyed_cause.take();
-        let kind = if matches!(cause.error, Error::Cancelled)
+        let kind = if cause
+            .sample_cause
+            .as_ref()
+            .is_some_and(|e| e.kind() == crate::crypto::sample::SampleErrorKind::Cancelled)
+            || matches!(cause.error, Error::Cancelled)
             || resource
                 .as_ref()
                 .is_some_and(|r| r.kind() == ResourceErrorKind::Cancelled)
@@ -217,15 +221,46 @@ impl KeyedSessionError {
                     })
             })
             .map(Box::new);
-        let failure = resource
+        let failure = cause
+            .sample_cause
             .as_ref()
-            .map(|e| resource_failure(e))
-            .unwrap_or(match cause.error {
-                Error::Cancelled => KeyedFailure::Cancelled,
-                _ if kind == KeyedSessionErrorKind::Output => KeyedFailure::Output,
-                Error::Unsupported(_) => KeyedFailure::UnsupportedCombination,
-                Error::Io(_) | Error::Http(_) => KeyedFailure::Read,
+            .map(|e| match e.kind() {
+                crate::crypto::sample::SampleErrorKind::Cancelled => KeyedFailure::Cancelled,
+                crate::crypto::sample::SampleErrorKind::Unsupported => {
+                    KeyedFailure::UnsupportedCombination
+                }
+                crate::crypto::sample::SampleErrorKind::BudgetExceeded => {
+                    KeyedFailure::BudgetExceeded
+                }
+                crate::crypto::sample::SampleErrorKind::Key => {
+                    match e.key_error().map(|k| k.kind()) {
+                        Some(KeyErrorKind::Unavailable) => KeyedFailure::ProviderUnavailable,
+                        Some(KeyErrorKind::Provider) => KeyedFailure::ProviderFailure,
+                        Some(KeyErrorKind::Expired) => KeyedFailure::KeyExpired,
+                        Some(KeyErrorKind::BudgetExceeded) => KeyedFailure::BudgetExceeded,
+                        Some(KeyErrorKind::ConflictingMetadata) => {
+                            KeyedFailure::InvalidEncryptionMetadata
+                        }
+                        _ => KeyedFailure::InvalidKey,
+                    }
+                }
+                crate::crypto::sample::SampleErrorKind::InvalidMetadata => {
+                    KeyedFailure::InvalidEncryptionMetadata
+                }
+                crate::crypto::sample::SampleErrorKind::Decrypt => KeyedFailure::Decrypt,
                 _ => KeyedFailure::MediaValidation,
+            })
+            .unwrap_or_else(|| {
+                resource
+                    .as_ref()
+                    .map(|e| resource_failure(e))
+                    .unwrap_or(match cause.error {
+                        Error::Cancelled => KeyedFailure::Cancelled,
+                        _ if kind == KeyedSessionErrorKind::Output => KeyedFailure::Output,
+                        Error::Unsupported(_) => KeyedFailure::UnsupportedCombination,
+                        Error::Io(_) | Error::Http(_) => KeyedFailure::Read,
+                        _ => KeyedFailure::MediaValidation,
+                    })
             });
         Self {
             kind,
@@ -249,11 +284,14 @@ impl KeyedSessionError {
         self.context.as_deref()
     }
     /// The finite resource API has no reliable failing sample/track attribution.
+    pub fn sample_error(&self) -> Option<&crate::crypto::sample::SampleError> {
+        self.cause.as_ref().and_then(|e| e.sample_cause.as_deref())
+    }
     pub fn track_id(&self) -> Option<u32> {
-        None
+        self.sample_error().and_then(|e| e.track_id())
     }
     pub fn sample_index(&self) -> Option<usize> {
-        None
+        self.sample_error().and_then(|e| e.sample_index())
     }
     pub fn kind(&self) -> KeyedSessionErrorKind {
         self.kind
@@ -437,7 +475,7 @@ pub async fn prepare_hls_with_keys(
         error
     })?;
     for input in &selected {
-        if let Err(rejection) = input.snapshot.validate_finite_vod() {
+        if let Err(rejection) = input.snapshot.validate_finite_sample_vod() {
             let mut error = KeyedSessionError::new(KeyedSessionErrorKind::UnsupportedPlaylist);
             error.input_id = Some(input.snapshot.context().input_id().clone());
             error.rejection = Some(rejection);
@@ -687,7 +725,7 @@ pub(super) struct KeyedCursor {
     pub(super) snapshot: PlaylistSnapshot,
     source: Arc<dyn Source>,
     resources: Arc<ResourceSession>,
-    map: Option<ClearResource>,
+    map: Option<EncodedResource>,
 }
 impl KeyedCursor {
     pub(super) async fn read(
@@ -707,6 +745,7 @@ impl KeyedCursor {
             resource: Some(safe_location(&location)),
             byte_range: range,
             keyed_cause: None,
+            sample_cause: None,
         };
         let resource_error = |error: ResourceError, phase| {
             let mut result = context(Error::invalid("keyed resource preparation failed"), phase);
@@ -722,14 +761,14 @@ impl KeyedCursor {
                 let request = ResourceRequest::from_validated(&self.snapshot, index, true)
                     .map_err(|e| resource_error(e, SessionPhase::Initialization))?;
                 self.resources
-                    .read_map_cached(self.source.clone(), request, &mut self.map)
+                    .read_encoded_map(self.source.clone(), request, &mut self.map)
                     .await
                     .map_err(|e| resource_error(e, SessionPhase::Initialization))?;
             }
             let request = ResourceRequest::from_validated(&self.snapshot, index, false)
                 .map_err(|e| resource_error(e, SessionPhase::Downloading))?;
             self.resources
-                .read(self.source.clone(), request)
+                .read_encoded(self.source.clone(), request)
                 .await
                 .map_err(|e| resource_error(e, SessionPhase::Downloading))
         };
@@ -745,12 +784,33 @@ impl KeyedCursor {
         } else {
             read.await?
         };
-        let data = if let Some(map) = &self.map {
-            demux_isobmff(map.bytes(), bytes.bytes())
+        let request = ResourceRequest::from_validated(&self.snapshot, index, false)
+            .map_err(|e| resource_error(e, SessionPhase::Processing))?;
+        let check = || check_cancel(options.cancel.as_ref());
+        let operation = crate::crypto::sample::demux(
+            &self.resources,
+            &request,
+            self.map.as_ref().map(|m| m.bytes()),
+            bytes.bytes(),
+            &check,
+        );
+        tokio::pin!(operation);
+        let result = if let Some(cancel) = &options.cancel {
+            tokio::select! {biased;_=cancel.cancelled()=>return Err(context(Error::Cancelled,SessionPhase::Processing)),v=&mut operation=>v}
         } else {
-            demux_ts(bytes.bytes())
-        }
-        .map_err(|e| context(e, SessionPhase::Processing))?;
+            operation.await
+        };
+        let data = result.map_err(|e| {
+            let mut error = context(
+                Error::invalid("sample demux failed"),
+                SessionPhase::Processing,
+            );
+            error.sample_cause = Some(Box::new(e));
+            error
+        })?;
+        self.resources
+            .sample_decrypted(&request, bytes.bytes().len() as u64)
+            .map_err(|e| resource_error(e, SessionPhase::Processing))?;
         Ok((data, location, range, bytes.bytes().len() as u64))
     }
 }
@@ -766,6 +826,18 @@ fn observed_capability(
             .iter()
             .flat_map(|s| std::iter::once(s.keys()).chain(s.map().map(|m| m.keys())))
             .collect::<Vec<_>>();
+        let sample_method =
+            keys.iter()
+                .flat_map(|k| k.candidates())
+                .find_map(|k| match k.method() {
+                    crate::playlist::EncryptionMethod::SampleAes => {
+                        Some(KeyedEncryption::SampleAes)
+                    }
+                    crate::playlist::EncryptionMethod::SampleAesCtr => {
+                        Some(KeyedEncryption::SampleAesCtr)
+                    }
+                    _ => None,
+                });
         let encrypted = keys.iter().any(|k| !k.is_clear());
         let clear = keys.iter().any(|k| k.is_clear());
         let role = if i == 0 {
@@ -779,7 +851,9 @@ fn observed_capability(
             } else {
                 KeyedContainer::TransportStream
             },
-            if !encrypted {
+            if let Some(method) = sample_method {
+                method
+            } else if !encrypted {
                 KeyedEncryption::Clear
             } else if clear {
                 KeyedEncryption::ClearAndAes128
@@ -797,6 +871,15 @@ fn observed_capability(
                 })
                 .collect(),
         )
+        .with_scheme(if s.segments()[0].map().is_some() {
+            match sample_method {
+                Some(KeyedEncryption::SampleAes) => KeyedProtectionScheme::Cbcs,
+                Some(KeyedEncryption::SampleAesCtr) => KeyedProtectionScheme::Cenc,
+                _ => KeyedProtectionScheme::None,
+            }
+        } else {
+            KeyedProtectionScheme::None
+        })
     });
     let mut query = KeyedCapabilityQuery::new(inputs.next().unwrap(), output);
     if let Some(audio) = inputs.next() {

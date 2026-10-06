@@ -1,6 +1,7 @@
 # Keyed session diagnostics, progress and capability queries
 
-These additive v0.6 APIs describe the finite clear/AES-128 prepared entry. Legacy `Error`, `SessionPhase`, source
+These additive APIs describe the finite keyed prepared entry (clear/AES-128 since v0.6,
+[finite sample encryption](sample-encryption.md) since v0.8). Legacy `Error`, `SessionPhase`, source
 bounds, options literals and checkpoint schemas retain their existing contracts.
 
 ## Query a combination
@@ -38,7 +39,7 @@ experimental requests and timeline changes. Every unsupported dimension is
 returned with an input role when applicable. TS/fMP4, AVC/HEVC/AAC-LC, clear/AES-128
 and mixed clear/AES resources are supported within the finite profile. Replacement
 external audio may use a different container/encryption mode. Generic multi-track,
-subtitles, Packed AAC, SAMPLE-AES/CTR, cenc/cbcs, GCM, live/EVENT, rewritten snapshots,
+subtitles, Packed AAC, GCM, live/EVENT, rewritten snapshots,
 gaps/discontinuities and presentation ranges remain rejected. The experimental
 flag cannot bypass those checks.
 
@@ -131,3 +132,8 @@ and actual Node/Chrome execution of the JS example including rejected/unavailabl
 wrong-length key responses. The P4 output/cancellation/compatibility tests remain
 active. See the [release verification record](release-0.6.0.md); publication remains
 a separate operation.
+
+Sample failures expose `SampleError` through `sample_error()`, with non-exhaustive
+kind, resource/track/sample identity, scheme, key reference/version and typed causes.
+The sample profile capability query reflects the container/codec/method matrix;
+protected container metadata is validated during demux before sample submission.

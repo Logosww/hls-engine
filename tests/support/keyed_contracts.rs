@@ -63,7 +63,7 @@ pub fn queries() -> usize {
             KeyedCapabilityQuery::new(
                 KeyedInputCapability::new(
                     KeyedContainer::TransportStream,
-                    KeyedEncryption::SampleAes,
+                    KeyedEncryption::SampleAesCtr,
                     vec![KeyedCodec::Avc],
                 ),
                 KeyedOutput::Mp4Bytes,

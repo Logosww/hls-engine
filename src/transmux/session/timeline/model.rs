@@ -28,15 +28,16 @@ pub enum TimelineErrorKind {
 pub struct TimelineSessionError {
     pub(super) kind: TimelineErrorKind,
     pub(super) slot: Option<SegmentSlot>,
-    pub(super) cause: Option<Error>,
+    pub(super) cause: Option<Box<Error>>,
     pub(super) resource: Option<Box<ResourceError>>,
+    pub(super) sample: Option<Box<crate::crypto::sample::SampleError>>,
     pub(super) completed: Vec<TimelineOutputReport>,
 }
 impl TimelineSessionError {
     /// Construct a provider acquisition failure without exposing its cause in Debug.
     pub fn output(error: impl Into<Error>) -> Self {
         let mut result = fail(TimelineErrorKind::Output);
-        result.cause = Some(error.into());
+        result.cause = Some(Box::new(error.into()));
         result
     }
     pub fn kind(&self) -> TimelineErrorKind {
@@ -46,7 +47,10 @@ impl TimelineSessionError {
         self.slot.as_ref()
     }
     pub fn raw_cause(&self) -> Option<&Error> {
-        self.cause.as_ref()
+        self.cause.as_deref()
+    }
+    pub fn sample_error(&self) -> Option<&crate::crypto::sample::SampleError> {
+        self.sample.as_deref()
     }
     pub fn resource_error(&self) -> Option<&ResourceError> {
         self.resource.as_deref()
@@ -498,8 +502,18 @@ pub struct TimelineSessionReport {
     pub(super) peak_planned_samples: usize,
     pub(super) peak_planned_resources: usize,
     pub(super) indexed_resources: usize,
+    pub(super) sample_buffers: crate::crypto::resource::ResourceStats,
 }
 impl TimelineSessionReport {
+    /// Peak raw sample payload capacity per resource, excluding container and allocator overhead.
+    pub fn peak_raw_sample_bytes(&self) -> usize {
+        self.sample_buffers.peak_raw_sample_bytes()
+    }
+    /// Peak decrypted replay payload capacity per resource; not a total memory limit.
+    pub fn peak_replay_sample_bytes(&self) -> usize {
+        self.sample_buffers.peak_replay_sample_bytes()
+    }
+
     pub fn requested_range(&self) -> Option<PresentationRange> {
         self.requested
     }

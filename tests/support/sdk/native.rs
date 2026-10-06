@@ -29,6 +29,7 @@ impl wire::Host for Host {
     }
     fn resolve(&self, request: String) -> KeyFuture<wire::Reply> {
         let r: Value = serde_json::from_str(&request).unwrap();
+        if r["method"] == "SAMPLE-AES-CTR" { assert_eq!(r["kid"], "00112233445566778899aabbccddeeff"); }
         let hex = if r["resourceKind"] == "media" && r["originalSequence"] == "9007199254740994" {
             "603deb1015ca71be2b73aef0857d7781"
         } else {

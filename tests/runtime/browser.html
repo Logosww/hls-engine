@@ -1,12 +1,14 @@
 <!doctype html><meta charset="utf-8"><title>Runtime contract regression</title>
 <pre id="result">RUNNING</pre>
 <script type="module">
-import { verify } from './harness.mjs';
+
 const unhandled = [];
 let report;
 window.addEventListener('unhandledrejection', event => unhandled.push(String(event.reason)));
 try {
-  const result = await verify();
+  await fetch('/progress', {method:'POST',body:JSON.stringify({phase:'import',status:'start'})});
+  const { verify } = await import('./harness.mjs');
+  const result = await verify(undefined, value => fetch('/progress', {method:'POST',body:JSON.stringify(value)}));
   await new Promise(resolve => setTimeout(resolve, 0));
   if (unhandled.length) throw new Error(unhandled.join('\n'));
   report = { status: 'PASS', runtime: navigator.userAgent, ...result };

@@ -1,6 +1,6 @@
-# Timeline sessions — v0.7.0
+# Timeline sessions
 
-The additive `prepare_hls_timeline` entry supports finite clear/AES-128
+The additive `prepare_hls_timeline` entry supports finite clear/AES-128/sample-encrypted
 presentation ranges, epoch mapping, explicit gap policies and decodable split
 outputs. Legacy prepared/keyed entry points and checkpoint schema v1 retain
 their original behavior. See the [release record](release-0.7.0.md).
@@ -27,7 +27,7 @@ async fn export(inputs: KeyedInputs, keys: KeySession) -> TimelineResult<Vec<u8>
 }
 ```
 
-Inputs are finite typed clear/AES-128 snapshots. External audio replaces
+Inputs are finite typed clear/AES-128/sample-encrypted snapshots. External audio replaces
 embedded audio. Complete encrypted BYTERANGE resources require the same explicit
 `ResourceOptions` policy as keyed sessions. Original sequences, MAP declarations
 and key contexts survive range selection and replay.
@@ -113,19 +113,14 @@ cancellation at three checkpoints during native finalization of that output.
 The last cases verify completed reports, preservation of existing destinations,
 and temporary-file cleanup.
 
-The internal protection prototype validates supported IV/pattern shapes and exact
-subsample coverage against the **original** byte layout. Replay identity includes
-scheme, KID, IV, pattern and subsamples in addition to prefix/offset/source clock.
-Hooks may change protected bytes but cannot resize the sample or change declared
-clear bytes, including CBCS skipped blocks and partial tails. The `0:0` CBCS
-pattern convention is also covered, consistent with
-[Shaka Packager's implementation](https://github.com/shaka-project/shaka-packager/blob/main/packager/media/base/aes_pattern_cryptor.cc).
-Invalid descriptors fail before hook invocation, and the clear-only
-hook rejects protected samples. These are descriptor/layout vectors, not a
-container-protection parser or a sample-decryption implementation. Packed AAC
-also tests truncated ID3/ADTS, duplicate/oversized clocks, malformed sizes/flags,
-configuration changes and unsupported raw-data-block layouts. No public
-SAMPLE-AES, cenc/cbcs or Packed AAC capability is enabled.
+The v0.8 sample path resolves protection and awaits keys before codec checks,
+keyframe detection and NAL normalization. Replay identity includes scheme, KID,
+IV, pattern and subsamples alongside original layout/timing. fMP4 and AAC samples
+retain their lengths and declared clear bytes. TS AVC may shrink only when removing
+encryption-layer emulation prevention; the clear NAL mapping is checked.
+See [sample encryption](sample-encryption.md) for the supported container metadata.
+Timeline rereads verify both resource bytes and decrypted packet digests, so a
+changed key cannot silently alter an accepted output. Packed AAC stays internal.
 
 ## Verification entry points
 

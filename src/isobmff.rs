@@ -1,5 +1,6 @@
 use crate::raw_sample::{RawLayout, RawSampleHook, RawStage};
 use std::collections::HashMap;
+mod protection;
 
 use crate::codecs::{avc, hevc};
 use crate::error::{Error, Result};
@@ -88,6 +89,8 @@ where
 // === Init segment parsing ===
 
 struct InitTrack {
+    protection: Option<protection::Defaults>,
+    groups: protection::Groups,
     track_id: u32,
     kind: StreamKind,
     timescale: u32,
@@ -247,6 +250,8 @@ fn parse_trak(
         trex_defaults.get(&track_id).copied().unwrap_or((0, 0, 0));
 
     Ok(InitTrack {
+        groups: protection::groups(stbl, entry.protection.as_ref())?,
+        protection: entry.protection,
         track_id,
         kind,
         timescale,
@@ -353,6 +358,7 @@ fn parse_mdhd_timescale(mdhd: &[u8]) -> Result<u32> {
 }
 
 struct SampleEntryInfo {
+    protection: Option<protection::Defaults>,
     kind: StreamKind,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
@@ -384,7 +390,14 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
         return Err(Error::bitstream("stsd entry extends past data"));
     }
     let entry_payload = &entries_data[header.header_size..header.total_size];
-    let entry_type = &header.box_type;
+    let protected = matches!(&header.box_type, b"encv" | b"enca");
+    let (clear_type, protection) = if protected {
+        let (kind, defaults) = protection::entry(entry_payload, header.box_type == *b"enca")?;
+        (kind, Some(defaults))
+    } else {
+        (header.box_type, None)
+    };
+    let entry_type = &clear_type;
 
     match entry_type {
         b"avc1" | b"avc3" => {
@@ -400,6 +413,7 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let config = avc::parse_avcc(avcc_data)?;
             let (width, height) = read_video_dimensions(entry_payload)?;
             Ok(SampleEntryInfo {
+                protection,
                 kind: StreamKind::Avc,
                 sps: Some(config.sps),
                 pps: Some(config.pps),
@@ -425,6 +439,7 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let config = hevc::parse_hvcc(hvcc_data)?;
             let (width, height) = read_video_dimensions(entry_payload)?;
             Ok(SampleEntryInfo {
+                protection,
                 kind: StreamKind::Hevc,
                 sps: Some(config.sps),
                 pps: Some(config.pps),
@@ -453,6 +468,7 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let channel_count = u16::from_be_bytes([entry_payload[16], entry_payload[17]]) as u8;
             let sample_rate = u16::from_be_bytes([entry_payload[24], entry_payload[25]]) as u32;
             Ok(SampleEntryInfo {
+                protection,
                 kind: StreamKind::Aac,
                 sps: None,
                 pps: None,
@@ -596,11 +612,12 @@ pub(crate) async fn demux_isobmff_with_hook(
     init: &[u8],
     segment: &[u8],
     hook: &mut dyn RawSampleHook,
-    check: &dyn Fn() -> Result<()>,
+    check: &crate::raw_sample::SampleCheck<'_>,
 ) -> Result<DemuxOutput> {
-    let mut stage = RawStage::Collect(Vec::new());
+    let mut stage = RawStage::collect(hook);
     demux_isobmff_stage(init, segment, check, &mut stage)?;
     let mut stage = stage.resolve(hook, check).await?;
+    hook.resolved();
     demux_isobmff_stage(init, segment, check, &mut stage)
 }
 fn demux_isobmff_stage(
@@ -759,6 +776,22 @@ fn parse_traf(
             "implicit cross-traf base data offsets are unsupported",
         ));
     }
+    let mut sizes = Vec::new();
+    let mut run_counts = Vec::new();
+    for_each_box(traf, |kind, data| {
+        if kind == b"trun" {
+            let run = parse_trun(data, &tfhd, track)?;
+            if sizes.len().saturating_add(run.samples.len()) > 65_536 {
+                return Err(Error::unsupported("raw sample budget exceeded"));
+            }
+            run_counts.push(run.samples.len());
+            sizes.extend(run.samples.iter().map(|s| s.size as usize));
+        }
+        Ok(())
+    })?;
+    let protections =
+        protection::samples(traf, segment, base_data_offset, track, &sizes, &run_counts)?;
+    let mut sample_index = 0;
     let mut cumulative_duration = 0u64;
     let mut sample_data_offset = base_data_offset;
     let mut runs = 0;
@@ -789,15 +822,19 @@ fn parse_traf(
             let raw_dts = base_decode_time
                 .checked_add(cumulative_duration)
                 .ok_or_else(|| Error::bitstream("raw DTS overflow"))?;
-            let Some(raw) = stage.sample(
+            let sample_protection = protections[sample_index].as_ref();
+            sample_index += 1;
+            let Some(raw) = stage.protected_sample(
                 track.kind,
                 RawLayout::Fragment {
+                    track: track.track_id,
                     offset: sample_data_offset,
                     prefix: track.length_size,
                 },
                 i128::from(raw_dts),
                 track.timescale,
                 raw,
+                sample_protection,
             )?
             else {
                 if sample.duration == 0 {
@@ -983,6 +1020,9 @@ fn parse_trun(data: &[u8], tfhd: &Tfhd, track: &InitTrack) -> Result<Trun> {
     }
     let flags = u32::from_be_bytes([0, data[1], data[2], data[3]]);
     let sample_count = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    if sample_count > 65_536 {
+        return Err(Error::unsupported("raw sample budget exceeded"));
+    }
 
     let mut pos = 8;
 
@@ -1236,6 +1276,12 @@ fn rescale_to_90k(value: u64, timescale: u32) -> Result<u64> {
 /// Strict resource framing for the new AES path only. Existing demux behavior is unchanged.
 /// Sample offsets/codecs are validated by demux after a matching MAP is available.
 pub(crate) fn validate_resource_envelope(data: &[u8], init: bool) -> Result<()> {
+    validate_envelope(data, init, false)
+}
+pub(crate) fn validate_sample_envelope(data: &[u8], init: bool) -> Result<()> {
+    validate_envelope(data, init, true)
+}
+fn validate_envelope(data: &[u8], init: bool, sample_profile: bool) -> Result<()> {
     let (mut ftyp, mut moov, mut moof, mut mdat) = (0, 0, 0, 0);
     let mut awaiting_data = false;
     for_each_box(data, |kind, payload| {
@@ -1291,7 +1337,9 @@ pub(crate) fn validate_resource_envelope(data: &[u8], init: bool) -> Result<()> 
                                             return Err(Error::bitstream("truncated trun"));
                                         }
                                     }
-                                    b"senc" | b"saiz" | b"saio" | b"sgpd" | b"sbgp" => {
+                                    b"senc" | b"saiz" | b"saio" | b"sgpd" | b"sbgp"
+                                        if !sample_profile =>
+                                    {
                                         return Err(Error::unsupported(
                                             "sample protection/group metadata is not supported in resource-only profile",
                                         ));

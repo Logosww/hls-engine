@@ -79,7 +79,7 @@ pub(super) struct Cursor {
     positions: [usize; 4],
     queues: [VecDeque<SampleRecord>; 4],
     loaded: HashMap<usize, DemuxOutput>,
-    maps: Vec<Option<ClearResource>>,
+    maps: Vec<Option<EncodedResource>>,
     pub reads: u64,
     pub bytes: u64,
     pub peak_samples: usize,

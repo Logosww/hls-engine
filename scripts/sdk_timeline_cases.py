@@ -34,4 +34,17 @@ def cases():
     p,pf=snapshot('ts_avc_regular');files=files|pf
     config=copy.deepcopy(reset);config['url']=p['url'];config['text']=config['text'].replace('#EXT-X-DISCONTINUITY\n#EXTINF:2,\nseg0.ts','#EXT-X-DISCONTINUITY\n#EXTINF:2,\n'+h['url'].replace('input.m3u8','seg0.ts'))
     add('config-split',config,files|hf,{'split':True},outputs=2)
+    for name in ['fmp4_avc_cenc','fmp4_hevc_cbcs','fmp4_aac_cenc','ts_avc_sample','ts_aac_sample']:
+        folder=ROOT/'tests/fixtures/sample_crypto'/name
+        base=f'https://sdk.test/tests/fixtures/sample_crypto/{name}/'
+        p={'url':base+'input.m3u8','text':(folder/'input.m3u8').read_text()}
+        files={base+f.name:str(f.relative_to(ROOT)) for f in folder.iterdir() if f.is_file()}
+        add('sample-'+name,p,files,request_range)
+        if name=='fmp4_avc_cenc':
+            audio=ROOT/'tests/fixtures/sample_crypto/fmp4_aac_cbcs';ab='https://sdk.test/tests/fixtures/sample_crypto/fmp4_aac_cbcs/'
+            a={'url':ab+'input.m3u8','text':(audio/'input.m3u8').read_text()}
+            add('sample-dual-schemes',p,files|{ab+f.name:str(f.relative_to(ROOT)) for f in audio.iterdir() if f.is_file()},request_range,a)
+            rotated=copy.deepcopy(p)
+            rotated['text']=rotated['text'].replace('#EXTINF:2.000,\nseg2.m4s','#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="key-rotation"\n#EXTINF:2.000,\nseg2.m4s')
+            add('sample-range-key-redeclaration',rotated,files,request_range)
     return results

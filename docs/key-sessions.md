@@ -1,6 +1,6 @@
 # Key sessions (v0.6)
 
-`crypto::key` provides operation-scoped AES-128 key resolution over P1 playlist
+`crypto::key` provides operation-scoped AES key resolution over P1 playlist
 metadata. It performs no HTTP, decryption or media execution.
 Legacy `Source`, prepared sessions, errors and checkpoint serialization are unchanged.
 
@@ -42,7 +42,10 @@ version intersection; unknown formats/versions are skipped. Conflicting methods
 or IVs fail before calling a provider. Only `Unavailable` advances to another
 candidate; authorization, transport and response failures are terminal. The core
 never retries transport and never tries keys in response to decryption failure.
-Available values bind to AES-128 and must echo an expected KID exactly, if supplied.
+Available values bind to a method via `aes128`, `sample_aes` or `sample_aes_ctr`
+and must echo an expected KID exactly with `with_kid`, if supplied.
+Sample keys share candidate selection, request merging, TTL, invalidation and
+cancellation with whole-resource AES-128.
 
 `KeyRequest` carries operation and opaque auth scope, selected `KeyReference`,
 resource/input/generation/epoch/original sequence, optional KID, resolve revision,

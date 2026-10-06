@@ -12,6 +12,8 @@ const STREAM_TYPE_HEVC: u8 = 0x24;
 
 #[derive(Debug, Clone)]
 struct PesAccumulator {
+    pid: u16,
+    offset: usize,
     kind: StreamKind,
     data: Vec<u8>,
 }
@@ -23,23 +25,28 @@ struct PesHeader {
     payload_start: usize,
 }
 
+pub(crate) fn demux_ts_checked(data: &[u8], check: &dyn Fn() -> Result<()>) -> Result<DemuxOutput> {
+    demux_ts_stage(data, &mut RawStage::Clear, check, false)
+}
 pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
-    demux_ts_stage(data, &mut RawStage::Clear, &|| Ok(()))
+    demux_ts_stage(data, &mut RawStage::Clear, &|| Ok(()), false)
 }
 pub(crate) async fn demux_ts_with_hook(
     data: &[u8],
     hook: &mut dyn RawSampleHook,
-    check: &dyn Fn() -> Result<()>,
+    check: &crate::raw_sample::SampleCheck<'_>,
 ) -> Result<DemuxOutput> {
-    let mut stage = RawStage::Collect(Vec::new());
-    demux_ts_stage(data, &mut stage, check)?;
+    let mut stage = RawStage::collect(hook);
+    demux_ts_stage(data, &mut stage, check, hook.sample_aes_ts())?;
     let mut stage = stage.resolve(hook, check).await?;
-    demux_ts_stage(data, &mut stage, check)
+    hook.resolved();
+    demux_ts_stage(data, &mut stage, check, hook.sample_aes_ts())
 }
 fn demux_ts_stage(
     data: &[u8],
     stage: &mut RawStage,
     check: &dyn Fn() -> Result<()>,
+    sample_aes: bool,
 ) -> Result<DemuxOutput> {
     if data.len() < TS_PACKET_SIZE || data[0] != 0x47 {
         return Err(Error::invalid(
@@ -57,7 +64,7 @@ fn demux_ts_stage(
     let mut accumulators: HashMap<u16, PesAccumulator> = HashMap::new();
     let mut result = DemuxOutput::default();
 
-    for packet in data.as_chunks::<TS_PACKET_SIZE>().0 {
+    for (packet_index, packet) in data.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
         check()?;
         if packet[0] != 0x47 {
             return Err(Error::bitstream("MPEG-TS sync byte mismatch"));
@@ -95,7 +102,7 @@ fn demux_ts_stage(
 
         if Some(pid) == pmt_pid {
             if payload_unit_start {
-                let parsed = parse_pmt(payload)?;
+                let parsed = parse_pmt(payload, sample_aes)?;
                 streams = parsed;
                 validate_streams(&streams)?;
                 result.saw_video |= streams
@@ -143,6 +150,8 @@ fn demux_ts_stage(
                 accumulators.insert(
                     pid,
                     PesAccumulator {
+                        pid,
+                        offset: packet_index * TS_PACKET_SIZE,
                         kind,
                         data: payload.to_vec(),
                     },
@@ -220,7 +229,7 @@ fn parse_pat(payload: &[u8]) -> Result<u16> {
     pmt_pid.ok_or_else(|| Error::bitstream("PAT does not reference a PMT"))
 }
 
-fn parse_pmt(payload: &[u8]) -> Result<HashMap<u16, StreamKind>> {
+fn parse_pmt(payload: &[u8], sample_aes: bool) -> Result<HashMap<u16, StreamKind>> {
     let section = psi_section(payload)?;
     if section.first().copied() != Some(0x02) {
         return Err(Error::bitstream("expected PMT table_id 0x02"));
@@ -239,7 +248,42 @@ fn parse_pmt(payload: &[u8]) -> Result<HashMap<u16, StreamKind>> {
         let elementary_pid = (((section[pos + 1] & 0x1f) as u16) << 8) | section[pos + 2] as u16;
         let es_info_length =
             (((section[pos + 3] & 0x0f) as usize) << 8) | section[pos + 4] as usize;
+        if pos.checked_add(5 + es_info_length).is_none_or(|n| n > end) {
+            return Err(Error::bitstream("PMT descriptor overflow"));
+        }
+        if matches!(stream_type, 0xdb | 0xcf) && !sample_aes {
+            return Err(Error::unsupported("protected TS requires SAMPLE-AES"));
+        }
+        if sample_aes && matches!(stream_type, 0xc1 | 0xc2) {
+            return Err(Error::unsupported("SAMPLE-AES AC-3/E-AC-3 is unsupported"));
+        }
+        let mut descriptor = pos + 5;
+        while descriptor < pos + 5 + es_info_length {
+            let header = section
+                .get(descriptor..descriptor + 2)
+                .ok_or_else(|| Error::bitstream("short PMT descriptor"))?;
+            let finish = descriptor + 2 + usize::from(header[1]);
+            if finish > pos + 5 + es_info_length {
+                return Err(Error::bitstream("PMT descriptor extends past stream"));
+            }
+            let body = &section[descriptor + 2..finish];
+            if header[0] == 5 && body.starts_with(b"apad") {
+                if body.len() < 12 || body[10] != 1 || body.len() != 12 + usize::from(body[11]) {
+                    return Err(Error::bitstream("invalid audio setup descriptor"));
+                }
+                if &body[4..8] != b"zaac" {
+                    return Err(Error::unsupported("protected audio setup is not AAC-LC"));
+                }
+            }
+            descriptor = finish;
+        }
         match stream_type {
+            0xdb if sample_aes => {
+                streams.insert(elementary_pid, StreamKind::Avc);
+            }
+            0xcf if sample_aes => {
+                streams.insert(elementary_pid, StreamKind::Aac);
+            }
             STREAM_TYPE_AVC => {
                 streams.insert(elementary_pid, StreamKind::Avc);
             }
@@ -334,7 +378,11 @@ fn flush_pes(
     let payload = if !matches!(accumulator.kind, StreamKind::Aac) {
         let Some(clear) = stage.sample(
             accumulator.kind,
-            RawLayout::AnnexB,
+            RawLayout::Transport {
+                pid: accumulator.pid,
+                offset: accumulator.offset,
+                adts: false,
+            },
             i128::from(header.dts_90k),
             90_000,
             payload,
@@ -441,8 +489,10 @@ fn flush_pes(
                 let frame_end = offset + header_adts.frame_length;
                 let Some(frame) = stage.sample(
                     StreamKind::Aac,
-                    RawLayout::Adts {
-                        offset: frame_start,
+                    RawLayout::Transport {
+                        pid: accumulator.pid,
+                        offset: accumulator.offset + frame_start,
+                        adts: true,
                     },
                     i128::from(pts),
                     90_000,

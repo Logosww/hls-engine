@@ -49,7 +49,7 @@ fn finite(body: &str) -> String {
 async fn manifest_rejections_include_late_keys_and_ranges_before_any_io() {
     let calls = Arc::new(AtomicUsize::new(0));
     let unsupported = [
-        finite("#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key\"\n#EXTINF:2,\na"),
+        finite("#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI=\"key\"\n#EXTINF:2,\na"),
         finite("#EXT-X-KEY:METHOD=AES-256-GCM,URI=\"key\"\n#EXTINF:2,\na"),
         finite("#EXT-X-GAP\n#EXTINF:2,\na"),
         finite("#EXT-X-DISCONTINUITY\n#EXTINF:2,\na"),

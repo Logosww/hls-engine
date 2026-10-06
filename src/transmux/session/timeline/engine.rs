@@ -54,7 +54,7 @@ impl TimelinePreparedTransmux {
         &self,
         input: usize,
         segment: usize,
-        map: &mut Option<ClearResource>,
+        map: &mut Option<EncodedResource>,
         expected: Option<[u8; 32]>,
     ) -> TimelineResult<(DemuxOutput, [u8; 32], u64)> {
         self.options.check()?;
@@ -65,7 +65,7 @@ impl TimelinePreparedTransmux {
                 let request = ResourceRequest::from_validated(&selected.snapshot, segment, true)
                     .map_err(resource_error)?;
                 self.resources
-                    .read_map_cached(selected.source.clone(), request, map)
+                    .read_encoded_map(selected.source.clone(), request, map)
                     .await
                     .map_err(resource_error)?;
             } else {
@@ -75,7 +75,7 @@ impl TimelinePreparedTransmux {
                 .map_err(resource_error)?;
             let bytes = self
                 .resources
-                .read(selected.source.clone(), request)
+                .read_encoded(selected.source.clone(), request)
                 .await
                 .map_err(resource_error)?;
             let mut hash = Sha256::new();
@@ -83,27 +83,30 @@ impl TimelinePreparedTransmux {
                 hash.update(init.bytes());
             }
             hash.update(bytes.bytes());
-            let hash: [u8; 32] = hash.finalize().into();
-            if expected.is_some_and(|expected| expected != hash) {
-                return Err(fail(TimelineErrorKind::ResourceChanged));
-            }
-            let mut data = if let Some(init) = map.as_ref() {
-                crate::isobmff::demux_isobmff_with_hook(
-                    init.bytes(),
-                    bytes.bytes(),
-                    &mut crate::raw_sample::ClearSamples,
-                    &|| check_cancel(self.options.cancel.as_ref()),
-                )
-                .await
-            } else {
-                crate::mpeg_ts::demux_ts_with_hook(
-                    bytes.bytes(),
-                    &mut crate::raw_sample::ClearSamples,
-                    &|| check_cancel(self.options.cancel.as_ref()),
-                )
-                .await
-            }
-            .map_err(media_error)?;
+            let request = ResourceRequest::from_validated(&selected.snapshot, segment, false)
+                .map_err(resource_error)?;
+            let mut data = crate::crypto::sample::demux(
+                &self.resources,
+                &request,
+                map.as_ref().map(|m| m.bytes()),
+                bytes.bytes(),
+                &|| check_cancel(self.options.cancel.as_ref()),
+            )
+            .await
+            .map_err(|e| {
+                let mut error = fail(
+                    if e.kind() == crate::crypto::sample::SampleErrorKind::Cancelled {
+                        TimelineErrorKind::Cancelled
+                    } else {
+                        TimelineErrorKind::Media
+                    },
+                );
+                error.sample = Some(Box::new(e));
+                error
+            })?;
+            self.resources
+                .sample_decrypted(&request, bytes.bytes().len() as u64)
+                .map_err(resource_error)?;
             // TS drains trailing PES from a HashMap. Canonicalize track order
             // without sorting raw timestamps across a 33-bit wrap.
             data.packets.sort_by_key(|packet| match packet.kind {
@@ -111,11 +114,22 @@ impl TimelinePreparedTransmux {
                 StreamKind::Hevc => 1,
                 StreamKind::Aac => 2,
             });
-            let count = if descriptor.keys().is_clear() {
-                bytes.bytes().len() as u64
-            } else {
-                (bytes.bytes().len() as u64 / 16 + 1) * 16
-            };
+            for packet in &data.packets {
+                hash.update((packet.data.len() as u64).to_be_bytes());
+                hash.update(&packet.data);
+            }
+            let hash: [u8; 32] = hash.finalize().into();
+            if expected.is_some_and(|v| v != hash) {
+                return Err(fail(TimelineErrorKind::ResourceChanged));
+            }
+            let count =
+                if !descriptor.keys().candidates().first().is_some_and(|k| {
+                    matches!(k.method(), crate::playlist::EncryptionMethod::Aes128)
+                }) {
+                    bytes.bytes().len() as u64
+                } else {
+                    (bytes.bytes().len() as u64 / 16 + 1) * 16
+                };
             Ok((data, hash, count))
         };
         let result = if let Some(cancel) = &self.options.cancel {

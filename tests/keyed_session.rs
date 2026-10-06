@@ -503,7 +503,7 @@ async fn preflight_rejects_unsupported_before_io_and_resource_errors_keep_origin
     for replacement in [
         text.replace("#EXT-X-ENDLIST", ""),
         text.replace("#EXTINF:2,", "#EXT-X-GAP\n#EXTINF:2,"),
-        text.replace("METHOD=AES-128", "METHOD=SAMPLE-AES"),
+        text.replace("METHOD=AES-128", "METHOD=AES-256-GCM"),
     ] {
         let result = prepare_hls_with_keys(
             observed(

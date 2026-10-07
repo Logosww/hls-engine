@@ -17,12 +17,12 @@ hls-engine = "1.0"
 Disable `default-source` with `default-features = false` to provide your own
 `Source` without the built-in reqwest dependency. WASM builds use this option.
 
-| Feature | Purpose |
-| --- | --- |
-| `default-source` (default) | Native reqwest HTTP source |
-| `serde` | Lossless playlist, report and checkpoint serialization |
-| `ffmpeg-finalize` | Optional FFmpeg 9 finalizer for compatible legacy file APIs |
-| `experimental-gcm` | Fixed HLS draft-22 AES-256-GCM resource profile; runtime opt-in also required |
+| Feature                    | Purpose                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `default-source` (default) | Native reqwest HTTP source                                                    |
+| `serde`                    | Lossless playlist, report and checkpoint serialization                        |
+| `ffmpeg-finalize`          | Optional FFmpeg 9 finalizer for compatible legacy file APIs                   |
+| `experimental-gcm`         | Fixed HLS draft-22 AES-256-GCM resource profile; runtime opt-in also required |
 
 ## Start a session
 
@@ -122,7 +122,7 @@ transitive dependencies; they are excluded from the published crate.
 
 本项目提供共用的 Rust/native/WASM HLS 处理核心，支持有限和持续输入、解密、
 时间范围、多音轨、字幕 cue 合流、MP4 输出及 native 文件恢复。应用负责网络传输、
-清单刷新、选轨、密钥获取和 WebVTT 解析。新接入使用 `EngineSession`，完整契约见
+清单刷新、选轨、密钥获取和 WebVTT 解析。接入使用 `EngineSession`，完整契约见
 [接入指南](docs/engine.md)与[支持范围](docs/support.md)。
 
 ## License

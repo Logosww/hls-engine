@@ -15,7 +15,16 @@ pub struct Provider;
 impl KeyProvider for Provider {
     fn resolve(&self, r: KeyRequest) -> KeyFuture<KeyResolution> {
         Box::pin(async move {
-            let secret = SecretKey::new(KEY.to_vec()).unwrap();
+            let rotated = matches!(r.reference().location().location(),SourceLocation::Url(url) if url.path().ends_with("/packed-rotated-key"));
+            let secret = SecretKey::new(if rotated {
+                vec![
+                    0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae, 0xf0, 0x85,
+                    0x7d, 0x77, 0x81,
+                ]
+            } else {
+                KEY.to_vec()
+            })
+            .unwrap();
             let mut key = match r.reference().method() {
                 EncryptionMethod::SampleAes => AvailableKey::sample_aes(secret),
                 EncryptionMethod::SampleAesCtr => AvailableKey::sample_aes_ctr(secret),

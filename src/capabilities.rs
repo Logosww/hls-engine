@@ -563,3 +563,263 @@ pub fn query_continuous_capability(query: &ContinuousCapabilityQuery) -> KeyedCa
     }
     result
 }
+
+/// Container support is separate from a target player's rendering support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MultiTrackPlayback {
+    Container,
+    /// Extract a single wvtt track before the pinned Shaka parser/display adapter.
+    /// Does not certify audio switching or direct mixed-mdat playback.
+    ShakaAdapter,
+    DirectBrowser,
+    AvFoundation,
+    Vlc,
+    Iina,
+    /// FFmpeg's default demux/decoding path, separate from the finalize backend.
+    Ffmpeg,
+}
+/// Tested playback incompatibilities, distinct from invalid media or mux support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MultiTrackPlaybackRejection {
+    /// The generic browser path cannot expose/select all embedded tracks.
+    BrowserTrackSelection,
+    /// The renderer cannot preserve the complete accepted WebVTT settings profile.
+    SubtitleSettings,
+    /// The player does not recognize MP4 wvtt subtitle tracks.
+    WvttDecoder,
+    /// Default classic edit-list playback can trim AAC or mis-handle interior gaps.
+    ClassicEditTimeline,
+    /// Decode-gap playback is not certified for this player adapter.
+    DecodeGaps,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SubtitleProfile {
+    WvttPlainText,
+    StyledWebVtt,
+}
+#[derive(Debug, Clone)]
+pub struct MultiTrackCapabilityQuery {
+    inputs: Vec<(crate::playlist::InputId, KeyedInputCapability)>,
+    output: KeyedOutput,
+    embedded: crate::EmbeddedAudio,
+    mode: KeyedSourceMode,
+    range: KeyedRange,
+    subtitles: bool,
+    subtitle_profile: SubtitleProfile,
+    decode_gaps: bool,
+    playback: MultiTrackPlayback,
+    capacity: Option<usize>,
+    waiter: bool,
+    resume: bool,
+}
+impl MultiTrackCapabilityQuery {
+    pub fn new(
+        id: crate::playlist::InputId,
+        primary: KeyedInputCapability,
+        output: KeyedOutput,
+        embedded: crate::EmbeddedAudio,
+    ) -> Self {
+        Self {
+            inputs: vec![(id, primary)],
+            output,
+            embedded,
+            mode: KeyedSourceMode::FiniteVod,
+            range: KeyedRange::WholeResources,
+            subtitles: false,
+            subtitle_profile: SubtitleProfile::WvttPlainText,
+            decode_gaps: false,
+            playback: MultiTrackPlayback::Container,
+            capacity: None,
+            waiter: false,
+            resume: false,
+        }
+    }
+    pub fn with_audio(mut self, id: crate::playlist::InputId, input: KeyedInputCapability) -> Self {
+        self.inputs.push((id, input));
+        self
+    }
+    pub fn with_source_mode(mut self, mode: KeyedSourceMode) -> Self {
+        self.mode = mode;
+        self
+    }
+    pub fn with_range(mut self, range: KeyedRange) -> Self {
+        self.range = range;
+        self
+    }
+    pub fn with_subtitles(mut self, value: bool) -> Self {
+        self.subtitles = value;
+        self
+    }
+    /// Declare interior decode gaps. Native classic output uses edit lists;
+    /// video must resume at a sync sample with non-overlapping presentation runs.
+    pub fn with_decode_gaps(mut self, value: bool) -> Self {
+        self.decode_gaps = value;
+        self
+    }
+    pub fn with_subtitle_profile(mut self, profile: SubtitleProfile) -> Self {
+        self.subtitles = true;
+        self.subtitle_profile = profile;
+        self
+    }
+    pub fn with_playback(mut self, target: MultiTrackPlayback) -> Self {
+        self.playback = target;
+        self
+    }
+    pub fn with_memory_capacity(mut self, capacity: usize) -> Self {
+        self.capacity = Some(capacity);
+        self
+    }
+    pub fn with_host_waiter(mut self, available: bool) -> Self {
+        self.waiter = available;
+        self
+    }
+    pub fn with_resume(mut self, value: bool) -> Self {
+        self.resume = value;
+        self
+    }
+}
+#[derive(Debug, Clone)]
+pub struct MultiTrackCapabilityRejection {
+    input: Option<crate::playlist::InputId>,
+    dimension: CapabilityDimension,
+}
+impl MultiTrackCapabilityRejection {
+    pub fn input_id(&self) -> Option<&crate::playlist::InputId> {
+        self.input.as_ref()
+    }
+    pub fn dimension(&self) -> CapabilityDimension {
+        self.dimension
+    }
+}
+#[derive(Debug, Clone)]
+pub struct MultiTrackCapabilityDecision {
+    rejections: Vec<MultiTrackCapabilityRejection>,
+    requirements: Vec<CapabilityRequirement>,
+    playback_rejection: Option<MultiTrackPlaybackRejection>,
+}
+impl MultiTrackCapabilityDecision {
+    pub fn supported(&self) -> bool {
+        self.rejections.is_empty()
+    }
+    pub fn rejections(&self) -> &[MultiTrackCapabilityRejection] {
+        &self.rejections
+    }
+    pub fn requirements(&self) -> &[CapabilityRequirement] {
+        &self.requirements
+    }
+    pub fn playback_rejection(&self) -> Option<MultiTrackPlaybackRejection> {
+        self.playback_rejection
+    }
+}
+/// No I/O; media bytes, keys, mappings and budgets still require runtime validation.
+pub fn query_multitrack_capability(
+    query: &MultiTrackCapabilityQuery,
+) -> MultiTrackCapabilityDecision {
+    use CapabilityDimension as D;
+    let mut result = MultiTrackCapabilityDecision {
+        rejections: vec![],
+        requirements: vec![],
+        playback_rejection: None,
+    };
+    for (index, (id, input)) in query.inputs.iter().enumerate() {
+        let mut selected = input.clone();
+        if selected.container == KeyedContainer::PackedAac {
+            selected.container = KeyedContainer::TransportStream;
+            if selected.codecs != [KeyedCodec::AacLc] {
+                result.rejections.push(MultiTrackCapabilityRejection {
+                    input: Some(id.clone()),
+                    dimension: D::Codec,
+                });
+            }
+        }
+        let q = KeyedCapabilityQuery::new(selected, query.output)
+            .with_source_mode(query.mode)
+            .with_range(query.range)
+            .with_resume(query.resume);
+        let q = ContinuousCapabilityQuery::new(TimelineCapabilityQuery::new(q))
+            .with_host_waiter(query.waiter);
+        let q = if let Some(capacity) = query.capacity {
+            q.with_memory_capacity(capacity)
+        } else {
+            q
+        };
+        let decision = query_continuous_capability(&q);
+        result
+            .rejections
+            .extend(
+                decision
+                    .rejections
+                    .into_iter()
+                    .map(|r| MultiTrackCapabilityRejection {
+                        input: Some(id.clone()),
+                        dimension: r.dimension,
+                    }),
+            );
+        for requirement in decision.requirements {
+            if !result.requirements.contains(&requirement) {
+                result.requirements.push(requirement);
+            }
+        }
+        if (index > 0 && !input.codecs.contains(&KeyedCodec::AacLc))
+            || (index == 0
+                && query.embedded == crate::EmbeddedAudio::Exclude
+                && !input
+                    .codecs
+                    .iter()
+                    .any(|c| matches!(c, KeyedCodec::Avc | KeyedCodec::Hevc)))
+            || query.inputs[..index].iter().any(|(other, _)| other == id)
+        {
+            result.rejections.push(MultiTrackCapabilityRejection {
+                input: Some(id.clone()),
+                dimension: D::TrackSelection,
+            });
+        }
+    }
+    if query.inputs.len() > 32 || (query.inputs.len() > 1 && !query.waiter) {
+        result.rejections.push(MultiTrackCapabilityRejection {
+            input: None,
+            dimension: D::TrackSelection,
+        });
+    }
+    if query.output == KeyedOutput::FfmpegStreamingFile {
+        result.rejections.push(MultiTrackCapabilityRejection {
+            input: None,
+            dimension: D::Output,
+        });
+    }
+    use MultiTrackPlayback as P;
+    use MultiTrackPlaybackRejection as PR;
+    let classic = matches!(
+        query.output,
+        KeyedOutput::Mp4Bytes | KeyedOutput::Mp4File | KeyedOutput::NativeStreamingFile
+    );
+    // Negative player tests are a supported preflight outcome, not permission to
+    // silently drop cues, trim samples, transcode, or compress the timeline.
+    result.playback_rejection = match query.playback {
+        P::Container | P::ShakaAdapter => None,
+        P::DirectBrowser => Some(PR::BrowserTrackSelection),
+        P::Ffmpeg if classic => Some(PR::ClassicEditTimeline),
+        P::Iina | P::Ffmpeg if query.subtitles => Some(PR::WvttDecoder),
+        P::Vlc if query.subtitles => Some(PR::SubtitleSettings),
+        P::Ffmpeg => None,
+        _ if query.decode_gaps => Some(PR::DecodeGaps),
+        P::Iina if classic => Some(PR::ClassicEditTimeline),
+        _ => None,
+    };
+    if result.playback_rejection.is_some()
+        || (query.subtitles && query.subtitle_profile != SubtitleProfile::WvttPlainText)
+    {
+        result.rejections.push(MultiTrackCapabilityRejection {
+            input: None,
+            dimension: if query.subtitles {
+                D::Subtitles
+            } else {
+                D::Output
+            },
+        });
+    }
+    result
+}

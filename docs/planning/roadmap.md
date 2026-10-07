@@ -1,12 +1,12 @@
 # hls-transmux → hls-engine ROADMAP
 
-更新时间：2026-10-06。当前候选版本：v0.9.0（实现与验收见本版记录，尚未发布到 registry）；上一版本基线 v0.8.0，commit `8d6c54f`，此前 v0.7.0 为 `24c5ac4`。原始基线为 v0.5.0，commit `6a2cb3d`。
+更新时间：2026-10-07。当前已发布版本：v0.9.0，commit `fe97915`；上一版本基线 v0.8.0，commit `8d6c54f`，此前 v0.7.0 为 `24c5ac4`。原始基线为 v0.5.0，commit `6a2cb3d`。
 
 本轮根据 hls-downloader v4.0 的下游改造需求，规划在 **v0.6–v0.10 五个 minor**
 逐步交付协议与解密、范围与 epoch、sample 解密、持续 session、多轨与字幕，
 随后在 **v1.0.0** 交付多输入恢复、GCM 实验及完整组合验收，稳定正式契约，
 并正式更名为 **hls-engine**，完成从转封装库到完整 HLS 媒体处理引擎的交付。
-版本号表达交付顺序，不承诺日历工期。v0.6–v0.9 的本地实现与验收分别见各版记录，v0.9.0 尚未发布；v0.10 及后续版本仍为规划；未发布或未完成项不能作为已发布能力声明。
+版本号表达交付顺序，不承诺日历工期。v0.6–v0.9 的本地实现与验收分别见各版记录，v0.9.0 已发布；v0.10 实现和本地发布验收已完成，尚未发布，后续版本仍为规划；未发布或未完成项不能作为已发布能力声明。
 
 需求来源为 [hls-transmux M0 上游改造需求](hls-transmux-m0-requirements.md)
 （2026-10-04 草案，位于下游工作区）。下文保留 U01–U10 编号方便双方追踪，
@@ -80,8 +80,8 @@ prepared 失败 partial 不能直接当作 checkpoint；legacy schema v1 保留�
 | v0.6.0 | typed playlist、资源身份、key provider、AES-128 有限 VOD | U01、U02、U10 基础 | M0 契约与风险原型通过；新增加密路径先不支持持久恢复 | 实现与后续修复已提交，基线至 v0.6.2 |
 | v0.7.0 | 可解码范围、epoch、缺口与拆分输出 | U04；U03/U08 内部 hook | 基于 v0.6 身份/key；SDK 可对齐范围、字幕和章节，hook 原型不声明 sample 解密能力 | 实现与本地门槛完成，已提交 `24c5ac4`；未发布 registry |
 | v0.8.0 | TS SAMPLE-AES 与 fMP4 cbcs/cenc 有限输入 | U03、U10 加密诊断 | hook 顺序、protection metadata 和双运行时 clear sample 对照通过 | 实现与本地验收完成，基线 `8d6c54f`；SDK 隔离联调通过 |
-| v0.9.0 | Live/EVENT、持续 session、背压、stop 与 pause | U05、U01 增量、U10 开放报告 | v0.7 epoch 与 v0.8 解密进入开放输入；慢 sink、轮换、竞态和有界状态有证据 | 本地候选完成；范围与限制见 v0.9 验收记录，未发布 |
-| v0.10.0 | 多音轨、持续字幕 mux、完整 Packed AAC | U06、U07、U08 | 固定多轨集合、统一映射；有限/开放/范围/解密组合和播放器证据通过 | 规划中 |
+| v0.9.0 | Live/EVENT、持续 session、背压、stop 与 pause | U05、U01 增量、U10 开放报告 | v0.7 epoch 与 v0.8 解密进入开放输入；慢 sink、轮换、竞态和有界状态有证据 | 已发布 `fe97915`；范围与限制见 v0.9 验收记录 |
+| v0.10.0 | 多音轨、持续字幕 mux、完整 Packed AAC | U06、U07、U08 | 固定多轨集合、统一映射；有限/开放/范围/解密组合和播放器证据通过 | 194 组输出及全部目标播放器实测完成；不支持组合明确预检拒绝，本地发布验收通过 |
 | v1.0.0 | hls-engine 正式更名与完整引擎交付；新 checkpoint、多输入恢复、GCM 实验与稳定契约 | U09、U02 实验、U10 完整组合；U01–U10 组合验收及 SDK M5 | 基于全部媒体路径的 committed prefix；全部目标交付、实验认证、RC 联调、长录制、恢复迁移、更名迁移及发布产物验证通过 | 更名决策已确定；实现与发布规划中 |
 
 sample 解密先在有限输入中验收，再进入开放输入，降低一次引入密码、容器和生命周期变化的风险。
@@ -213,18 +213,19 @@ SDK close 成功后才发布公共完成；本版开放输入仍不具备新持�
 
 交付 U06–U08，基于共同时间映射和持续队列完成固定多轨 mux。
 
-- [ ] 新多轨入口使用稳定 input ID/output track ID；role 只表达用途，明确内嵌音频保留/排除规则。
-- [ ] 至少主视频加两条 AAC-LC 音轨，保留各轨独立 EOF、偏移和尾部，以及语言/name/default/来源元数据。
-- [ ] 交付 M0 评审选定的字幕 sample entry，接受持续、带 track/epoch/时间区间的 sample，无需上游 WebVTT parser。
-- [ ] 定义 cue 重叠、跨 fragment/epoch、空区间、settings/style 的保留或拒绝；字幕空隙不阻塞媒体 mux。
-- [ ] Packed AAC 支持 ADTS AAC-LC 和 ID3 PRIV 时间锚，复用 33-bit 映射，缺失/非法锚不自动猜测；Packed Audio 不使用 MAP。
-- [ ] Packed AAC 支持主音频/外置音轨、clear/AES-128/SAMPLE-AES，以及范围、epoch、live、配置变化与尾帧策略。
-- [ ] 分别公布 classic MP4/fMP4 的音轨及字幕元数据映射、支持模式和目标播放器证据。
+- [x] 新多轨入口使用稳定 input ID/output track ID；role 只表达用途，明确内嵌音频保留/排除规则。
+- [x] 至少主视频加两条 AAC-LC 音轨，保留各轨独立 EOF、偏移和尾部，以及语言/name/default/来源元数据。
+- [x] 交付 M0 评审选定的字幕 sample entry，接受持续、带 track/epoch/时间区间的 sample，无需上游 WebVTT parser。
+- [x] 定义 cue 重叠、跨 fragment/epoch、空区间、settings/style 的保留或拒绝；字幕空隙不阻塞媒体 mux。
+- [x] Packed AAC 支持 ADTS AAC-LC 和 ID3 PRIV 时间锚，复用 33-bit 映射，缺失/非法锚不自动猜测；Packed Audio 不使用 MAP。
+- [x] Packed AAC 支持主音频/外置音轨、clear/AES-128/SAMPLE-AES，以及范围、epoch、live、配置变化与尾帧策略。
+- [x] 分别公布 classic MP4/fMP4 的音轨及字幕元数据映射、支持模式和目标播放器证据。
 
 验收覆盖内嵌/外置/单路兼容、不同 sequence/切片周期、偏移/不等长、语言/default、
 跨界/重叠/空 cue、多语言、样式保真、ID3/wrap/损坏 ADTS/配置变化，以及慢 sink 和解密组合。
 容器写入元数据与播放器实际切轨/显示分别验收；没有证据的输出模式预检拒绝。
 恢复身份在本版随 track/字幕配置补齐，跨进程恢复正式交付在 v1.0。
+
 
 ## v1.0 多输入恢复与实验解密
 
@@ -255,17 +256,20 @@ GCM 另以独立向量验证错误 tag 无明文提交，支持与拒绝组合�
 | U02 AES-128 与 key session | v0.6 有限 VOD | v0.7 范围、v0.9 live、v1.0 恢复 | 有限 VOD、范围及 v0.9 live 组合见各版验收；新恢复归属 v1.0 |
 | U03 sample 解密 | v0.7 hook 原型、v0.8 TS/fMP4 | v0.9 live、v0.10 Packed AAC/多轨、v1.0 恢复 | v0.8 正式 sample 解密已验收；v0.9 开放输入见本版记录 |
 | U04 范围与 epoch | v0.7 | v0.9 持续映射、v0.10 字幕/多轨、v1.0 恢复 | v0.7 有限路径验收完成，已提交 `24c5ac4`；未发布 registry |
-| U05 持续 session | v0.9 | v0.10 多轨/字幕；v1.0 恢复与长录制 | v0.9 本地候选完成；支持范围见验收记录 |
-| U06 多音轨 | v0.10 | v1.0 恢复、播放器及 SDK 联调 | 待交付 |
-| U07 字幕 mux | v0.10 | v1.0 提交/恢复、播放器及 SDK 联调 | 待交付 |
-| U08 Packed AAC | v0.7 内部 hook、v0.10 完整输入 | v1.0 恢复及组合验证 | v0.7 内部 hook 已提交 `24c5ac4`；正式输入待 v0.10 |
-| U09 多输入恢复 | v0.6 预留契约、v1.0 实现 | v1.0 故障恢复与旧任务验收 | 待交付 |
+| U05 持续 session | v0.9 | v0.10 多轨/字幕；v1.0 恢复与长录制 | v0.9 已发布；支持范围见验收记录 |
+| U06 多音轨 | v0.10 | v1.0 恢复、播放器及 SDK 联调 | 实现、组合和播放器验收已完成；未发布，不支持播放组合按原 D06 规则明确拒绝 |
+| U07 字幕 mux | v0.10 | v1.0 提交/恢复、播放器及 SDK 联调 | 实现、组合和播放器验收已完成；未发布，不支持播放组合按原 D06 规则明确拒绝 |
+| U08 Packed AAC | v0.7 内部 hook、v0.10 完整输入 | v1.0 恢复及组合验证 | v0.7 内部 hook 已提交 `24c5ac4`；正式输入及 194 组组合验收在 v0.10 完成 |
+| U09 多输入恢复 | v0.6 预留契约、v1.0 实现 | v1.0 故障恢复与旧任务验收 | 尚未实现，属于 v1.0 规划 |
 | U10 诊断报告与组合描述 | 随每个 minor 增量交付 | v1.0 覆盖完整并冻结正式契约 | v0.6–v0.8 有限路径与 sample 诊断已验收；v0.9 开放报告/组合查询见本版记录 |
-| U02 GCM 实验扩展 | v1.0 独立 experimental profile | v1.0 实验矩阵与认证证据齐备，保持实验标记 | 待交付 |
+| U02 GCM 实验扩展 | v1.0 独立 experimental profile | v1.0 实验矩阵与认证证据齐备，保持实验标记 | 尚未实现，属于 v1.0 规划 |
 
-## 下一阶段：v0.10
+## 下一阶段：v1.0
 
-下一 minor 推进固定多音轨、字幕 mux 和 Packed AAC。持续 session 的实现及本地验收见
+v0.10 U06–U08 全部计划项已闭环，见[验收记录](../release-0.10.0.md)与[机器证据](../release-0.10.0-evidence.json)。已修复 Shaka 定位适配和 WebVTT 文件语法校验；冻结播放器目标均有实测，失败组合保留证据并按 D06 明确拒绝，没有待验收门槛。
+
+
+固定多音轨、字幕 mux 和 Packed AAC 已完成；实现拆分见 [v0.10 计划](v0.10.0-implementation-plan.md)。持续 session 的实现及本地验收见
 [v0.9 记录](../release-0.9.0.md)、[机器证据](../release-0.9.0-evidence.json)和
 [P0–P4 实现映射](v0.9.0-implementation-plan.md)。SDK 产品上线与 registry 发布另行执行。
 

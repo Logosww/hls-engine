@@ -117,6 +117,24 @@ pub(crate) async fn demux(
     bytes: &[u8],
     check: &crate::raw_sample::SampleCheck<'_>,
 ) -> Result<DemuxOutput, SampleError> {
+    demux_selected(session, request, init, bytes, check, false).await
+}
+
+pub(crate) async fn demux_selected(
+    session: &ResourceSession,
+    request: &ResourceRequest,
+    init: Option<&[u8]>,
+    bytes: &[u8],
+    check: &crate::raw_sample::SampleCheck<'_>,
+    packed: bool,
+) -> Result<DemuxOutput, SampleError> {
+    let packed = packed && (bytes.starts_with(b"ID3") || bytes.first() == Some(&0xff));
+    if packed && init.is_some() {
+        return Err(SampleError::new(
+            request.resource(),
+            Error::unsupported("Packed AAC cannot use MAP"),
+        ));
+    }
     let protected = request
         .resource()
         .keys()
@@ -129,7 +147,9 @@ pub(crate) async fn demux(
             )
         });
     if !protected {
-        let result = if let Some(init) = init {
+        let result = if packed {
+            crate::raw_sample::packed::demux(bytes, None, check).await
+        } else if let Some(init) = init {
             crate::isobmff::demux_isobmff_checked(init, bytes, check)
         } else {
             crate::mpeg_ts::demux_ts_checked(bytes, check)
@@ -158,7 +178,9 @@ pub(crate) async fn demux(
         resolved: false,
         error: None,
     };
-    let result = if let Some(init) = init {
+    let result = if packed {
+        crate::raw_sample::packed::demux(bytes, Some(&mut hook), check).await
+    } else if let Some(init) = init {
         crate::isobmff::demux_isobmff_with_hook(init, bytes, &mut hook, check).await
     } else {
         crate::mpeg_ts::demux_ts_with_hook(bytes, &mut hook, check).await

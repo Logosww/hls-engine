@@ -81,3 +81,19 @@ pub async fn continuous_browser(request:String,read:Function,write:Function,reso
     let result=tokio::select! {biased;_=wasm_bindgen_futures::JsFuture::from(cancel)=>wire::error("ABORTED","cancelled"),result=run=>result};
     Ok(JsValue::from_str(&result.to_string()))
 }
+
+#[wasm_bindgen]
+pub async fn multitrack_browser(request:String,read:Function,write:Function,resolve:Function,abort:Function,cancel:js_sys::Promise)->std::result::Result<JsValue,JsValue> {
+    let r:wire::Request=serde_json::from_str(&request).map_err(|_|JsValue::from_str("invalid request"))?;
+    let read=CallbackRegistration::new(read);let write=CallbackRegistration::new(write);let resolve=CallbackRegistration::new(resolve);let abort=CallbackRegistration::new(abort);
+    let host=Arc::new(Host{read:read.0,resolve:resolve.0,abort:abort.0,start:monotonic_ms()});
+    let run=async {
+        let session=match wire::fixture_timeline::prepare_multitrack(&r,host) {Ok(v)=>v,Err(e)=>return e};
+        match session.write_to(&mut DemandWriter{id:write.0,pending:None}).await {
+            Ok(report)=>serde_json::json!({"report":wire::fixture_timeline::multitrack_report(report)}),
+            Err(error)=>wire::error("MULTITRACK_FAILED",&format!("{:?}",error.kind())),
+        }
+    };
+    let result=tokio::select! {biased;_=wasm_bindgen_futures::JsFuture::from(cancel)=>wire::error("ABORTED","cancelled"),result=run=>result};
+    Ok(JsValue::from_str(&result.to_string()))
+}

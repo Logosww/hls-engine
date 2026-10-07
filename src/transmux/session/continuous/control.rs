@@ -41,6 +41,7 @@ impl LaneState {
 }
 pub(super) struct State {
     pub lanes: Vec<LaneState>,
+    pub global_history: bool,
     pub state: ContinuousState,
     pub reason: Option<ContinuousEndReason>,
     pub paused: bool,
@@ -248,6 +249,24 @@ impl ContinuousHandle {
             lane.history.pop_front();
         }
         lane.ended = snapshot.end_list();
+        if state.global_history {
+            while state.lanes.iter().map(|l| l.history.len()).sum::<usize>() > limits.history
+                || state
+                    .lanes
+                    .iter()
+                    .flat_map(|l| &l.history)
+                    .map(metadata_bytes)
+                    .sum::<usize>()
+                    > limits.metadata
+            {
+                let lane = state
+                    .lanes
+                    .iter_mut()
+                    .max_by_key(|l| l.history.len())
+                    .unwrap();
+                lane.history.pop_front();
+            }
+        }
         state.queued += accepted;
         state.metadata += bytes;
         state.peaks.queued = state.peaks.queued.max(state.queued);

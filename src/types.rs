@@ -83,6 +83,7 @@ pub(crate) struct EncodedPacket {
 /// Unified demux output shared by the MPEG-TS and ISOBMFF demuxers.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DemuxOutput {
+    pub packed_anchor: Option<u64>,
     pub packets: Vec<EncodedPacket>,
     pub video_timescale: Option<u32>,
     pub audio_timescale: Option<u32>,

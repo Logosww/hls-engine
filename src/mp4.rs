@@ -2,11 +2,6 @@ use crate::codecs::avc;
 use crate::error::{Error, Result};
 use crate::types::{Codec, TrackInfo, TrackType};
 
-/// Movie (mvhd) and tkhd timescale. 57600 is the LCM of common frame rates
-/// (24/25/30/60/120/240 fps), so rescaling track durations into it introduces
-/// no rounding for typical content.
-const MOVIE_TIMESCALE: u32 = 57_600;
-
 #[derive(Debug, Clone)]
 pub(crate) struct Mp4Sample {
     pub data: Vec<u8>,
@@ -43,6 +38,10 @@ impl VideoCodec {
 
 #[derive(Debug, Clone)]
 pub(crate) enum Mp4Track {
+    Wvtt {
+        samples: Vec<Mp4Sample>,
+        timescale: u32,
+    },
     Video {
         samples: Vec<Mp4Sample>,
         timescale: u32,
@@ -62,18 +61,23 @@ pub(crate) enum Mp4Track {
 impl Mp4Track {
     pub(crate) fn samples(&self) -> &[Mp4Sample] {
         match self {
-            Self::Video { samples, .. } | Self::Audio { samples, .. } => samples,
+            Self::Video { samples, .. }
+            | Self::Audio { samples, .. }
+            | Self::Wvtt { samples, .. } => samples,
         }
     }
 
     fn samples_mut(&mut self) -> &mut [Mp4Sample] {
         match self {
-            Self::Video { samples, .. } | Self::Audio { samples, .. } => samples,
+            Self::Video { samples, .. }
+            | Self::Audio { samples, .. }
+            | Self::Wvtt { samples, .. } => samples,
         }
     }
 
-    fn track_info(&self) -> TrackInfo {
-        match self {
+    fn track_info(&self) -> Option<TrackInfo> {
+        Some(match self {
+            Self::Wvtt { .. } => return None,
             Self::Video {
                 samples,
                 timescale,
@@ -109,17 +113,39 @@ impl Mp4Track {
                 sample_rate: Some(*sample_rate),
                 channel_count: Some(*channel_count),
             },
-        }
+        })
     }
 }
 
 pub(crate) struct Mp4Muxer {
     tracks: Vec<Mp4Track>,
+    metadata: Vec<(u32, Option<crate::TrackMetadata>)>,
 }
 
 impl Mp4Muxer {
     pub(crate) fn new(tracks: Vec<Mp4Track>) -> Self {
-        Self { tracks }
+        Self {
+            tracks,
+            metadata: vec![],
+        }
+    }
+
+    pub(crate) fn from_fragments(
+        tracks: Vec<FragmentedTrack>,
+        samples: Vec<Vec<Mp4Sample>>,
+    ) -> Self {
+        let metadata = tracks
+            .iter()
+            .map(|t| (t.track_id, t.metadata.clone()))
+            .collect();
+        Self {
+            tracks: tracks
+                .into_iter()
+                .zip(samples)
+                .map(|(t, s)| t.into_classic(s))
+                .collect(),
+            metadata,
+        }
     }
 
     pub(crate) fn write_checked(
@@ -171,7 +197,7 @@ impl Mp4Muxer {
             return Err(Error::muxing("MP4 output requires at least one track"));
         }
         for track in &mut self.tracks {
-            normalize_sample_timeline(track.samples_mut())?;
+            normalize_classic_timeline(track.samples_mut())?;
         }
         // Validate before table construction so all timeline additions are safe.
         for track in &self.tracks {
@@ -235,7 +261,7 @@ impl Mp4Muxer {
                 sample.offset = 0;
             }
         }
-        let mut moov = moov_box(&self.tracks, &chunks)?;
+        let mut moov = moov_box(&self.tracks, &chunks, &self.metadata)?;
         // stco -> co64 only grows tables; another pass accounts for that growth.
         loop {
             check()?;
@@ -254,7 +280,7 @@ impl Mp4Muxer {
                         .ok_or_else(|| Error::muxing("sample offset overflow"))?;
                 }
             }
-            let next = moov_box(&self.tracks, &chunks)?;
+            let next = moov_box(&self.tracks, &chunks, &self.metadata)?;
             let stable = next.len() == moov.len();
             moov = next;
             if stable {
@@ -281,7 +307,10 @@ impl Mp4Muxer {
             .ok_or_else(|| Error::muxing("output size overflow"))?;
         Ok((
             total,
-            self.tracks.iter().map(Mp4Track::track_info).collect(),
+            self.tracks
+                .iter()
+                .filter_map(Mp4Track::track_info)
+                .collect(),
         ))
     }
 }
@@ -321,6 +350,25 @@ pub(crate) fn normalize_sample_timeline(samples: &mut [Mp4Sample]) -> Result<()>
         sample.pts += i128::from(expected) - i128::from(sample.dts);
         sample.dts = expected;
         expected = expected
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| Error::muxing("sample timeline overflow"))?;
+    }
+    Ok(())
+}
+
+// A classic sample table stores a contiguous media timeline. Positive source
+// gaps are preserved separately by edit lists; overlaps cannot be represented.
+fn normalize_classic_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
+    let mut expected = samples.first().map_or(0, |s| s.dts);
+    for sample in samples {
+        if sample.dts.abs_diff(expected) <= 1 {
+            sample.pts += i128::from(expected) - i128::from(sample.dts);
+            sample.dts = expected;
+        } else if sample.dts < expected {
+            return Err(Error::unsupported("overlapping classic decode intervals"));
+        }
+        expected = sample
+            .dts
             .checked_add(u64::from(sample.duration))
             .ok_or_else(|| Error::muxing("sample timeline overflow"))?;
     }
@@ -434,13 +482,22 @@ fn fragmented_ftyp_box() -> Vec<u8> {
     })
 }
 
-fn moov_box(tracks: &[Mp4Track], chunks_per_track: &[Vec<ChunkMeta>]) -> Result<Vec<u8>> {
-    let movie_timescale = tracks
-        .iter()
-        .map(track_timescale)
-        .max()
-        .unwrap_or(MOVIE_TIMESCALE)
-        .max(MOVIE_TIMESCALE);
+fn moov_box(
+    tracks: &[Mp4Track],
+    chunks_per_track: &[Vec<ChunkMeta>],
+    metadata: &[(u32, Option<crate::TrackMetadata>)],
+) -> Result<Vec<u8>> {
+    let mut movie_timescale = 1000_u32;
+    for track in tracks {
+        let timescale = track_timescale(track);
+        let (mut a, mut b) = (movie_timescale, timescale);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        movie_timescale = (movie_timescale / a)
+            .checked_mul(timescale)
+            .ok_or_else(|| Error::muxing("movie timescale overflow"))?;
+    }
     // Movie duration = max over tracks of (start_offset + presentation_span),
     // all rescaled into the movie timescale. Using PTS span (not DTS-based
     // track_duration) correctly accounts for B-frame composition offsets and
@@ -459,14 +516,18 @@ fn moov_box(tracks: &[Mp4Track], chunks_per_track: &[Vec<ChunkMeta>]) -> Result<
         .unwrap_or(0);
 
     boxed_result(b"moov", |out| {
-        out.extend_from_slice(&mvhd_box(movie_timescale, movie_duration, tracks.len())?);
+        let last_id = metadata
+            .iter()
+            .map(|(id, _)| *id as usize)
+            .max()
+            .unwrap_or(tracks.len());
+        out.extend_from_slice(&mvhd_box(movie_timescale, movie_duration, last_id)?);
         for (index, track) in tracks.iter().enumerate() {
-            out.extend_from_slice(&trak_box(
-                track,
-                (index + 1) as u32,
-                movie_timescale,
-                &chunks_per_track[index],
-            )?);
+            let (id, meta) = metadata
+                .get(index)
+                .map_or(((index + 1) as u32, None), |(id, m)| (*id, m.as_ref()));
+            let trak = trak_box(track, id, movie_timescale, &chunks_per_track[index])?;
+            out.extend_from_slice(&metadata::decorate(trak, meta)?);
         }
         Ok(())
     })
@@ -485,26 +546,14 @@ fn trak_box(
     // timeline matches mvhd. mdhd duration uses just the presentation span
     // (media-local time, starting at 0).
     let tkhd_duration = rescale(span + offset, ts, movie_timescale)?;
-    let offset_movie = rescale(offset, ts, movie_timescale)?;
-    let span_movie = rescale(span, ts, movie_timescale)?;
+    let (edits, media_duration) = classic_edits(track, movie_timescale)?;
 
     boxed_result(b"trak", |out| {
         out.extend_from_slice(&tkhd_box(track, track_id, tkhd_duration)?);
-        // Keep the initial movie offset, but select the actual presentation
-        // interval in media-local time. stts starts decoding at zero, so the
-        // first DTS must be subtracted from the minimum PTS. A real edit from
-        // zero with only `span_movie` duration would cut off the B-frame tail.
-        if offset_movie > 0 {
-            let media_time = track.samples().iter().map(|s| s.pts).min().unwrap_or(0)
-                - i128::from(track.samples().first().map_or(0, |s| s.dts));
-            out.extend_from_slice(&edts_box(
-                offset_movie,
-                span_movie,
-                i64::try_from(media_time)
-                    .map_err(|_| Error::muxing("edit media time exceeds i64"))?,
-            )?);
+        if edits.len() > 1 || edits.first().is_some_and(|(_, time)| *time != 0) {
+            out.extend_from_slice(&edit_list_box(&edits)?);
         }
-        out.extend_from_slice(&mdia_box(track, span, chunks)?);
+        out.extend_from_slice(&mdia_box(track, media_duration, chunks)?);
         Ok(())
     })
 }
@@ -513,34 +562,101 @@ fn trak_box(
 /// initial PTS gap, followed by the real edit for the presentation span.
 /// Durations use the movie timescale; media_time uses the track timescale.
 fn edts_box(empty_duration: u64, real_duration: u64, media_time: i64) -> Result<Vec<u8>> {
-    let wide = empty_duration.max(real_duration) > u64::from(u32::MAX)
-        || i32::try_from(media_time).is_err();
+    edit_list_box(&[(empty_duration, -1), (real_duration, media_time)])
+}
+
+fn edit_list_box(entries: &[(u64, i64)]) -> Result<Vec<u8>> {
+    let wide = entries
+        .iter()
+        .any(|(duration, time)| *duration > u64::from(u32::MAX) || i32::try_from(*time).is_err());
     let elst = full_box_result(b"elst", u8::from(wide), 0, |out| {
-        be_u32(out, 2); // entry_count
-        // Empty edit: hold for empty_duration, media_time = -1 (no media).
-        if wide {
-            be_u64(out, empty_duration);
-            be_u64(out, u64::MAX);
-        } else {
-            be_u32(out, empty_duration as u32);
-            be_i32(out, -1);
+        be_u32(out, fit_u32(entries.len() as u64, "edit count")?);
+        for &(duration, time) in entries {
+            if wide {
+                be_u64(out, duration);
+                be_u64(out, time as u64);
+            } else {
+                be_u32(out, duration as u32);
+                be_i32(out, time as i32);
+            }
+            be_u32(out, 0x0001_0000);
         }
-        be_u32(out, 0x0001_0000); // media_rate 1.0
-        // Real edit: play the selected presentation interval.
-        if wide {
-            be_u64(out, real_duration);
-            be_u64(out, media_time as u64);
-        } else {
-            be_u32(out, real_duration as u32);
-            be_i32(out, media_time as i32);
-        }
-        be_u32(out, 0x0001_0000);
         Ok(())
     })?;
     boxed_result(b"edts", |out| {
         out.extend_from_slice(&elst);
         Ok(())
     })
+}
+
+/// Map each contiguous decode run from compact stts/ctts time back onto the
+/// movie clock. Never stretch an encoded sample to fill missing media.
+fn classic_edits(track: &Mp4Track, movie_timescale: u32) -> Result<(Vec<(u64, i64)>, u64)> {
+    let samples = track.samples();
+    let mut edits = Vec::new();
+    let mut media_cursor = 0_u64;
+    let mut media_end = 0_i128;
+    let mut movie_cursor = 0_i128;
+    let shift = composition_shift(samples);
+    let mut start = 0;
+    while start < samples.len() {
+        let mut end = start + 1;
+        while end < samples.len()
+            && samples[end].dts == samples[end - 1].dts + u64::from(samples[end - 1].duration)
+        {
+            end += 1;
+        }
+        let run = &samples[start..end];
+        if start > 0 && matches!(track, Mp4Track::Video { .. }) && !run[0].is_key {
+            return Err(Error::unsupported(
+                "classic decode gap must resume at a sync sample",
+            ));
+        }
+        let min_pts = run.iter().map(|s| s.pts).min().unwrap();
+        let max_end = run
+            .iter()
+            .map(|s| s.pts + i128::from(s.duration))
+            .max()
+            .unwrap();
+        let movie_start = min_pts + shift;
+        if movie_start < movie_cursor {
+            return Err(Error::unsupported("overlapping classic presentation runs"));
+        }
+        if movie_start > movie_cursor {
+            edits.push((
+                rescale(
+                    u64::try_from(movie_start - movie_cursor)
+                        .map_err(|_| Error::muxing("edit gap overflow"))?,
+                    track_timescale(track),
+                    movie_timescale,
+                )?,
+                -1,
+            ));
+        }
+        let media_time = i128::from(media_cursor) + min_pts - i128::from(run[0].dts);
+        edits.push((
+            rescale(
+                u64::try_from(max_end - min_pts)
+                    .map_err(|_| Error::muxing("edit duration overflow"))?,
+                track_timescale(track),
+                movie_timescale,
+            )?,
+            i64::try_from(media_time).map_err(|_| Error::muxing("edit media time exceeds i64"))?,
+        ));
+        media_end = media_end.max(media_time + max_end - min_pts);
+        for sample in run {
+            media_cursor = media_cursor
+                .checked_add(u64::from(sample.duration))
+                .ok_or_else(|| Error::muxing("media duration overflow"))?;
+        }
+        movie_cursor = max_end + shift;
+        start = end;
+    }
+    Ok((
+        edits,
+        u64::try_from(media_end.max(i128::from(media_cursor)))
+            .map_err(|_| Error::muxing("media duration overflow"))?,
+    ))
 }
 
 fn mdia_box(track: &Mp4Track, media_duration: u64, chunks: &[ChunkMeta]) -> Result<Vec<u8>> {
@@ -557,6 +673,7 @@ fn minf_box(track: &Mp4Track, chunks: &[ChunkMeta]) -> Result<Vec<u8>> {
         match track {
             Mp4Track::Video { .. } => out.extend_from_slice(&vmhd_box()),
             Mp4Track::Audio { .. } => out.extend_from_slice(&smhd_box()),
+            Mp4Track::Wvtt { .. } => out.extend_from_slice(&full_box(b"nmhd", 0, 0, |_| {})),
         }
         out.extend_from_slice(&dinf_box());
         out.extend_from_slice(&stbl_box(track, chunks)?);
@@ -659,7 +776,7 @@ fn tkhd_box(track: &Mp4Track, track_id: u32, duration: u64) -> Result<Vec<u8>> {
                 be_u32(out, u32::from(*width) << 16);
                 be_u32(out, u32::from(*height) << 16);
             }
-            Mp4Track::Audio { .. } => {
+            Mp4Track::Audio { .. } | Mp4Track::Wvtt { .. } => {
                 be_u32(out, 0);
                 be_u32(out, 0);
             }
@@ -722,6 +839,7 @@ fn hdlr_box(track: &Mp4Track) -> Vec<u8> {
         match track {
             Mp4Track::Video { .. } => out.extend_from_slice(b"vide"),
             Mp4Track::Audio { .. } => out.extend_from_slice(b"soun"),
+            Mp4Track::Wvtt { .. } => out.extend_from_slice(b"text"),
         }
         be_u32(out, 0);
         be_u32(out, 0);
@@ -729,6 +847,7 @@ fn hdlr_box(track: &Mp4Track) -> Vec<u8> {
         match track {
             Mp4Track::Video { .. } => out.extend_from_slice(b"VideoHandler\0"),
             Mp4Track::Audio { .. } => out.extend_from_slice(b"SoundHandler\0"),
+            Mp4Track::Wvtt { .. } => out.extend_from_slice(b"SubtitleHandler\0"),
         }
     })
 }
@@ -762,6 +881,7 @@ fn stsd_box(track: &Mp4Track) -> Result<Vec<u8>> {
     full_box_result(b"stsd", 0, 0, |out| {
         be_u32(out, 1);
         match track {
+            Mp4Track::Wvtt { .. } => out.extend_from_slice(&wvtt_entry()),
             Mp4Track::Video {
                 width,
                 height,
@@ -977,12 +1097,17 @@ fn cslg_box(samples: &[Mp4Sample]) -> Result<Vec<u8>> {
         .map(|s| s.pts - i128::from(s.dts))
         .max()
         .unwrap_or(0);
-    let start = samples.iter().map(|s| s.pts).min().unwrap_or(0);
-    let end = samples
-        .iter()
-        .map(|s| s.pts + i128::from(s.duration))
-        .max()
-        .unwrap_or(0);
+    // stts omits source gaps and starts at zero, as must these media bounds.
+    let mut cursor = 0_i128;
+    let mut start = i128::MAX;
+    let mut end = 0_i128;
+    for sample in samples {
+        let pts = cursor + sample.pts - i128::from(sample.dts);
+        start = start.min(pts);
+        end = end.max(pts + i128::from(sample.duration));
+        cursor += i128::from(sample.duration);
+    }
+    let start = if samples.is_empty() { 0 } else { start };
     let values = [(-min).max(0), min, max, start, end];
     let wide = values.iter().any(|&v| i32::try_from(v).is_err());
     full_box_result(b"cslg", u8::from(wide), 0, |out| {
@@ -1098,7 +1223,9 @@ where
 
 fn track_timescale(track: &Mp4Track) -> u32 {
     match track {
-        Mp4Track::Video { timescale, .. } | Mp4Track::Audio { timescale, .. } => *timescale,
+        Mp4Track::Video { timescale, .. }
+        | Mp4Track::Audio { timescale, .. }
+        | Mp4Track::Wvtt { timescale, .. } => *timescale,
     }
 }
 
@@ -1244,6 +1371,7 @@ fn be_u64(out: &mut Vec<u8>, value: u64) {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FragmentedTrack {
+    pub metadata: Option<crate::TrackMetadata>,
     pub track_id: u32,
     pub timescale: u32,
     pub kind: FragmentedTrackKind,
@@ -1251,6 +1379,7 @@ pub(crate) struct FragmentedTrack {
 
 #[derive(Debug, Clone)]
 pub(crate) enum FragmentedTrackKind {
+    Wvtt,
     Video {
         width: u16,
         height: u16,
@@ -1266,6 +1395,10 @@ pub(crate) enum FragmentedTrackKind {
 impl FragmentedTrack {
     pub(crate) fn into_classic(self, samples: Vec<Mp4Sample>) -> Mp4Track {
         match self.kind {
+            FragmentedTrackKind::Wvtt => Mp4Track::Wvtt {
+                samples,
+                timescale: self.timescale,
+            },
             FragmentedTrackKind::Video {
                 width,
                 height,
@@ -1296,6 +1429,7 @@ impl FragmentedTrack {
         let avcc = avc::avcc(sps, pps)?;
         Ok(Self {
             track_id,
+            metadata: None,
             timescale: 90_000,
             kind: FragmentedTrackKind::Video {
                 width: info.width,
@@ -1311,6 +1445,7 @@ impl FragmentedTrack {
         let hvcc = hevc::hvcc(vps, sps, pps)?;
         Ok(Self {
             track_id,
+            metadata: None,
             timescale: 90_000,
             kind: FragmentedTrackKind::Video {
                 width: info.width,
@@ -1328,6 +1463,7 @@ impl FragmentedTrack {
     ) -> Self {
         Self {
             track_id,
+            metadata: None,
             timescale: sample_rate,
             kind: FragmentedTrackKind::Audio {
                 sample_rate,
@@ -1523,9 +1659,20 @@ fn fragmented_moov_box(tracks: &[FragmentedTrack], offsets: &[u64]) -> Result<Ve
             .ok_or_else(|| Error::muxing("movie timescale overflow"))?;
     }
     boxed_result(b"moov", |out| {
-        out.extend_from_slice(&mvhd_box(movie_timescale, 0, tracks.len())?);
+        out.extend_from_slice(&mvhd_box(
+            movie_timescale,
+            0,
+            tracks
+                .iter()
+                .map(|t| t.track_id as usize)
+                .max()
+                .unwrap_or(0),
+        )?);
         for (track, offset) in tracks.iter().zip(offsets) {
-            out.extend_from_slice(&fragmented_trak_box(track, *offset, movie_timescale)?);
+            out.extend_from_slice(&metadata::decorate(
+                fragmented_trak_box(track, *offset, movie_timescale)?,
+                track.metadata.as_ref(),
+            )?);
         }
         out.extend_from_slice(&mvex_box(tracks)?);
         Ok(())
@@ -1579,7 +1726,7 @@ fn fragmented_tkhd_box(track: &FragmentedTrack) -> Result<Vec<u8>> {
                 be_u32(out, u32::from(*width) << 16);
                 be_u32(out, u32::from(*height) << 16);
             }
-            FragmentedTrackKind::Audio { .. } => {
+            FragmentedTrackKind::Audio { .. } | FragmentedTrackKind::Wvtt => {
                 be_u32(out, 0);
                 be_u32(out, 0);
             }
@@ -1603,6 +1750,7 @@ fn fragmented_hdlr_box(track: &FragmentedTrack) -> Vec<u8> {
         match &track.kind {
             FragmentedTrackKind::Video { .. } => out.extend_from_slice(b"vide"),
             FragmentedTrackKind::Audio { .. } => out.extend_from_slice(b"soun"),
+            FragmentedTrackKind::Wvtt => out.extend_from_slice(b"text"),
         }
         be_u32(out, 0);
         be_u32(out, 0);
@@ -1610,6 +1758,7 @@ fn fragmented_hdlr_box(track: &FragmentedTrack) -> Vec<u8> {
         match &track.kind {
             FragmentedTrackKind::Video { .. } => out.extend_from_slice(b"VideoHandler\0"),
             FragmentedTrackKind::Audio { .. } => out.extend_from_slice(b"SoundHandler\0"),
+            FragmentedTrackKind::Wvtt => out.extend_from_slice(b"SubtitleHandler\0"),
         }
     })
 }
@@ -1619,6 +1768,7 @@ fn fragmented_minf_box(track: &FragmentedTrack) -> Result<Vec<u8>> {
         match &track.kind {
             FragmentedTrackKind::Video { .. } => out.extend_from_slice(&vmhd_box()),
             FragmentedTrackKind::Audio { .. } => out.extend_from_slice(&smhd_box()),
+            FragmentedTrackKind::Wvtt => out.extend_from_slice(&full_box(b"nmhd", 0, 0, |_| {})),
         }
         out.extend_from_slice(&dinf_box());
         out.extend_from_slice(&fragmented_stbl_box(track)?);
@@ -1645,6 +1795,7 @@ fn fragmented_stsd_box(track: &FragmentedTrack) -> Result<Vec<u8>> {
     full_box_result(b"stsd", 0, 0, |out| {
         be_u32(out, 1);
         match &track.kind {
+            FragmentedTrackKind::Wvtt => out.extend_from_slice(&wvtt_entry()),
             FragmentedTrackKind::Video {
                 width,
                 height,
@@ -1856,6 +2007,7 @@ mod tests {
         // We avoid parse_sps here by constructing FragmentedTrack via the enum
         // directly so this test stays focused on the muxer box layout.
         let track = FragmentedTrack {
+            metadata: None,
             track_id: 1,
             timescale: 90_000,
             kind: FragmentedTrackKind::Video {
@@ -1895,6 +2047,56 @@ mod tests {
             channel_count: 2,
             audio_specific_config: vec![0x11, 0x90],
         }
+    }
+
+    #[test]
+    fn classic_edits_preserve_gaps_and_compact_media_without_stretching_samples() {
+        let mut samples = vec![
+            sample(34, 34, 1024),
+            sample(1058, 1058, 1024),
+            sample(4096, 4096, 1024),
+            sample(5120, 5120, 256),
+        ];
+        normalize_classic_timeline(&mut samples).unwrap();
+        let track = audio(samples, 48000);
+        let (edits, duration) = classic_edits(&track, 48000).unwrap();
+        assert_eq!(edits, vec![(34, -1), (2048, 0), (2014, -1), (1280, 2048)]);
+        assert_eq!(duration, 3328);
+        assert_eq!(track.samples().last().unwrap().duration, 256);
+        let (bytes, infos) = Mp4Muxer::new(vec![track])
+            .write_checked(&|| Ok(()))
+            .unwrap();
+        assert_eq!(infos[0].duration, 5376);
+        assert!(bytes.windows(4).any(|b| b == b"elst"));
+        let mut overlap = vec![sample(0, 0, 100), sample(90, 90, 100)];
+        assert!(normalize_classic_timeline(&mut overlap).is_err());
+    }
+
+    #[test]
+    fn classic_gap_rejects_non_sync_video_and_overlapping_presentation_runs() {
+        let video = |samples| Mp4Track::Video {
+            samples,
+            timescale: 1000,
+            width: 160,
+            height: 90,
+            codec: VideoCodec::Hevc { hvcc: vec![1] },
+        };
+        let mut second = sample(300, 300, 100);
+        second.is_key = false;
+        assert!(classic_edits(&video(vec![sample(0, 0, 100), second]), 1000).is_err());
+        assert!(
+            classic_edits(
+                &video(vec![sample(0, 400, 100), sample(300, 300, 100)]),
+                1000
+            )
+            .is_err()
+        );
+        assert_eq!(
+            classic_edits(&video(vec![sample(0, 0, 100), sample(300, 300, 100)]), 1000)
+                .unwrap()
+                .0,
+            vec![(100, 0), (200, -1), (100, 100)]
+        );
     }
 
     #[test]
@@ -2078,7 +2280,8 @@ mod tests {
         ];
         tracks[0].samples_mut()[0].duration = 96000;
         let chunks: Vec<_> = tracks.iter().map(split_chunks).collect();
-        let base = (ftyp_box(&tracks).len() + moov_box(&tracks, &chunks).unwrap().len() + 8) as u64;
+        let base =
+            (ftyp_box(&tracks).len() + moov_box(&tracks, &chunks, &[]).unwrap().len() + 8) as u64;
         tracks[0].samples_mut()[0].source = Some((0, (u64::from(u32::MAX) - base - 4) as u32));
         let mut bytes = Vec::new();
         Mp4Muxer::new(tracks)
@@ -2123,7 +2326,7 @@ mod tests {
                 .write_checked(&|| Ok(()))
                 .is_err()
         );
-        let s = sample(u64::from(u32::MAX), u64::from(u32::MAX) + 1, 1);
+        let s = sample(0, 1, u32::MAX);
         assert_eq!(cslg_box(&[s]).unwrap()[8], 1);
     }
 
@@ -2258,4 +2461,13 @@ mod tests {
             offset: 0,
         }
     }
+}
+
+mod metadata;
+fn wvtt_entry() -> Vec<u8> {
+    boxed(b"wvtt", |out| {
+        out.extend_from_slice(&[0; 6]);
+        be_u16(out, 1);
+        out.extend_from_slice(&boxed(b"vttC", |o| o.extend_from_slice(b"WEBVTT")));
+    })
 }

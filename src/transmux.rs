@@ -1114,7 +1114,14 @@ fn config_digest(tracks: &[FragmentedTrack]) -> [u8; 32] {
     for track in tracks {
         bytes.extend_from_slice(&track.track_id.to_be_bytes());
         bytes.extend_from_slice(&track.timescale.to_be_bytes());
+        if let Some(meta) = &track.metadata {
+            field(&mut bytes, meta.language.as_bytes());
+            field(&mut bytes, meta.name.as_bytes());
+            bytes.push(u8::from(meta.default));
+            bytes.extend_from_slice(&meta.group.to_be_bytes());
+        }
         match &track.kind {
+            FragmentedTrackKind::Wvtt => field(&mut bytes, b"wvtt"),
             FragmentedTrackKind::Video {
                 width,
                 height,
@@ -1775,6 +1782,7 @@ impl TrackLayout {
         let mut layout = Self::default();
         for (index, track) in tracks.iter().enumerate() {
             match &track.kind {
+                FragmentedTrackKind::Wvtt => {}
                 FragmentedTrackKind::Video { .. } => {
                     layout.video_index = Some(index);
                     layout.video_timescale = track.timescale;
@@ -1908,6 +1916,7 @@ fn build_fragmented_tracks(first: &DemuxOutput) -> Result<Vec<FragmentedTrack>> 
 
     for track in &mut tracks {
         track.timescale = match &track.kind {
+            crate::mp4::FragmentedTrackKind::Wvtt => track.timescale,
             crate::mp4::FragmentedTrackKind::Video { .. } => {
                 first.video_timescale.unwrap_or(90_000)
             }
@@ -1954,6 +1963,7 @@ fn set_boundary_duration(current: &mut DemuxOutput, next: &DemuxOutput) -> Resul
 fn track_report(track: &FragmentedTrack, sample_count: usize, duration: u64) -> crate::TrackInfo {
     use crate::mp4::FragmentedTrackKind;
     let (track_type, codec, width, height, sample_rate, channel_count) = match &track.kind {
+        FragmentedTrackKind::Wvtt => unreachable!("subtitle reports use OutputTrackInfo"),
         FragmentedTrackKind::Video {
             width,
             height,
@@ -2117,6 +2127,7 @@ fn check_media_config(previous: &mut Option<DemuxOutput>, current: &DemuxOutput)
         }
     } else {
         *previous = Some(DemuxOutput {
+            packed_anchor: None,
             packets: Vec::new(),
             video_timescale: current.video_timescale,
             audio_timescale: current.audio_timescale,

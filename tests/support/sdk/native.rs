@@ -131,3 +131,23 @@ async fn sdk_continuous_host_contract() {
     }
     std::fs::write(root.join("target/sdk-compat/native-continuous.json"),serde_json::to_vec_pretty(&results).unwrap()).unwrap();
 }
+
+#[tokio::test]
+async fn sdk_multitrack_host_contract() {
+    use sha2::{Digest,Sha256};
+    let root=std::path::PathBuf::from(std::env::var("HLS_TIMELINE_ROOT").unwrap());
+    let cases:Value=serde_json::from_slice(&std::fs::read(root.join("target/sdk-compat/multitrack-cases.json")).unwrap()).unwrap();
+    let mut results=Vec::new();
+    for case in cases.as_array().unwrap().iter() {
+        let request:wire::Request=serde_json::from_value(case["request"].clone()).unwrap();
+        let host=Arc::new(Host {files:serde_json::from_value(case["files"].clone()).unwrap(),root:root.clone()});
+        let session=wire::fixture_timeline::prepare_multitrack(&request,host.clone()).unwrap();
+        let mut bytes=Vec::new();let report=session.write_to(&mut bytes).await.unwrap();canonical(&mut bytes);
+        results.push(json!({"name":case["name"],"hash":format!("{:x}",Sha256::digest(&bytes)),"report":wire::fixture_timeline::multitrack_report(report)}));
+        let session=wire::fixture_timeline::prepare_multitrack(&request,host).unwrap();
+        let path=root.join("target/sdk-compat").join(format!("multitrack-{}.mp4",case["name"].as_str().unwrap()));let _=std::fs::remove_file(&path);
+        let report=session.write_to_file(&path,hls_transmux::FileOutputOptions::default().with_format(hls_transmux::OutputFormat::StreamingMp4)).await.unwrap();
+        assert_eq!(report.media().bytes_written(),std::fs::metadata(path).unwrap().len());
+    }
+    std::fs::write(root.join("target/sdk-compat/native-multitrack.json"),serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+}

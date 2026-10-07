@@ -33,6 +33,14 @@ def main():
     name = f'hls-transmux-{version}'
     archive = ROOT / 'target/package' / f'{name}.crate'
     required = {
+        'docs/multitrack-sessions.md', 'docs/release-0.10.0.md', 'docs/release-0.10.0-evidence.json',
+        'examples/multitrack_demo.rs', 'examples/multitrack_wasm.rs', 'examples/multitrack_budget.rs',
+        'tests/multitrack_session.rs', 'tests/support/multitrack_runtime.rs', 'tests/support/multitrack_profile.rs',
+        'scripts/shaka_wvtt_adapter.mjs', 'scripts/run_multitrack_browser.mjs', 'scripts/multitrack_mse.mjs', 'scripts/verify_webkit.py', 'scripts/probe_vlc.py', 'scripts/record_multitrack_evidence.py',
+        'scripts/verify_multitrack.py', 'scripts/verify_multitrack_matrix.py', 'scripts/probe_webkit.swift', 'scripts/probe_iina.py', 'scripts/verify_multitrack_player.py', 'scripts/test_multitrack_wasm.mjs',
+        'tests/support/multitrack-player.mjs', 'scripts/probe_avfoundation.swift',
+        'tests/fixtures/packed_aac/manifest.json',
+
         'docs/continuous-sessions.md', 'docs/release-0.9.0.md', 'docs/release-0.9.0-evidence.json',
         'examples/continuous_demo.rs', 'examples/continuous_wasm.rs', 'examples/continuous_budget.rs',
         'scripts/verify_continuous.py', 'scripts/test_continuous_wasm.mjs',
@@ -85,7 +93,7 @@ def main():
         run('cargo', 'build', '--offline', '--locked', '--example', 'keyed_demo', '--example', 'keyed_export', '--example', 'timeline_export', '--example', 'timeline_budget',
             '--target-dir', str(target), cwd=crate)
         run('cargo', 'test', '--offline', '--locked', '--features', 'serde',
-            '--test', 'timeline_session', '--test', 'sample_crypto', '--test', 'continuous_session', '--target-dir', str(target), cwd=crate)
+            '--test', 'timeline_session', '--test', 'sample_crypto', '--test', 'continuous_session', '--test', 'multitrack_session', '--target-dir', str(target), cwd=crate)
         run('cargo', 'build', '--offline', '--locked', '--no-default-features',
             '--target', 'wasm32-unknown-unknown', '--example', 'keyed_wasm',
             '--target-dir', str(target), cwd=crate)
@@ -94,12 +102,17 @@ def main():
             '--target', 'web', '--out-dir', str(bindings))
         run('node', str(crate / 'scripts/test_keyed_wasm.mjs'),
             str(bindings / 'keyed_wasm.js'), str(crate), cwd=crate)
-        run('cargo', 'build', '--offline', '--locked', '--example', 'continuous_demo', '--target-dir', str(target), cwd=crate)
+        run('cargo', 'build', '--offline', '--locked', '--example', 'continuous_demo', '--example', 'multitrack_demo', '--target-dir', str(target), cwd=crate)
         run('cargo', 'build', '--offline', '--locked', '--no-default-features', '--features', 'serde',
             '--target', 'wasm32-unknown-unknown', '--example', 'continuous_wasm', '--target-dir', str(target), cwd=crate)
         run('wasm-bindgen', str(target / 'wasm32-unknown-unknown/debug/examples/continuous_wasm.wasm'),
             '--target', 'web', '--out-dir', str(bindings))
         run('node', str(crate / 'scripts/test_continuous_wasm.mjs'), str(bindings / 'continuous_wasm.js'), str(crate), cwd=crate)
+        run('cargo', 'build', '--offline', '--locked', '--no-default-features', '--features', 'serde',
+            '--target', 'wasm32-unknown-unknown', '--example', 'multitrack_wasm', '--target-dir', str(target), cwd=crate)
+        run('wasm-bindgen', str(target / 'wasm32-unknown-unknown/debug/examples/multitrack_wasm.wasm'),
+            '--target', 'web', '--out-dir', str(bindings))
+        run('node', str(crate / 'scripts/test_multitrack_wasm.mjs'), str(bindings / 'multitrack_wasm.js'), str(crate), cwd=crate)
     print(json.dumps({'package': name, 'requiredFiles': len(required),
                       'publishDryRun': True, 'extractedExamples': True}))
 

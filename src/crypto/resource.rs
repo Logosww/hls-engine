@@ -146,6 +146,7 @@ pub type ResourceResult<T> = Result<T, ResourceError>;
 /// A resource selected from a finite, preflight-validated P1 snapshot.
 #[derive(Debug, Clone)]
 pub struct ResourceRequest {
+    packed: bool,
     resource: KeyResource,
     segment: SegmentDescriptor,
 }
@@ -186,7 +187,15 @@ impl ResourceRequest {
         } else {
             KeyResource::media(&segment)
         };
-        Ok(Self { resource, segment })
+        Ok(Self {
+            resource,
+            segment,
+            packed: false,
+        })
+    }
+    pub(crate) fn with_packed(mut self, enabled: bool) -> Self {
+        self.packed = enabled;
+        self
     }
     pub fn resource(&self) -> &KeyResource {
         &self.resource
@@ -314,6 +323,7 @@ impl ResourceOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClearContainer {
+    PackedAac,
     TransportStream,
     Fmp4Init,
     Fmp4Media,
@@ -693,6 +703,13 @@ fn decrypt(bytes: &mut Vec<u8>, key: &[u8], iv: &[u8; 16]) -> ResourceResult<()>
     Ok(())
 }
 fn validate_container(bytes: &[u8], request: &ResourceRequest) -> crate::Result<ClearContainer> {
+    if request.packed && bytes.starts_with(b"ID3") {
+        if request.segment.map().is_some() || request.resource.kind() == KeyResourceKind::Map {
+            return Err(crate::Error::unsupported("Packed AAC cannot use MAP"));
+        }
+        crate::raw_sample::packed::validate(bytes)?;
+        return Ok(ClearContainer::PackedAac);
+    }
     if request.resource.kind() == KeyResourceKind::Map {
         crate::isobmff::validate_resource_envelope(bytes, true)?;
         return Ok(ClearContainer::Fmp4Init);

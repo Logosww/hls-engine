@@ -9,6 +9,11 @@ HTTP dependencies are required.
 
 Documentation: [integration guides](docs/README.md).
 
+Version 0.10.0 implements fixed multi-track sessions, typed wvtt
+cues and Packed AAC. See the [guide](docs/multitrack-sessions.md) and
+[completed acceptance](docs/release-0.10.0.md), including tested player restrictions.
+Local release checks pass; registry publication has not been run.
+
 Version 0.9.0 adds `ContinuousSession` for selected Live/EVENT input, atomic
 snapshot admission, bounded backpressure, stop/cancel and VOD pause. It connects
 clear, AES-128, TS SAMPLE-AES and fMP4 cenc/cbcs to incremental fMP4 output and
@@ -938,6 +943,8 @@ HTTP/HTTPS），把底层的 MPEG-TS 或 fMP4/CMAF 分片解封装后直接重�
 MP4，**不解码、不编码、不转码**。
 
 核心 HLS / TS / ISOBMFF 逻辑全部自研，仅依赖少量基础异步与 HTTP 库。
+
+v0.10.0 新增固定多音轨、持续 wvtt 字幕与 Packed AAC；实现与本地发布验收已完成，尚未执行 registry 发布。详见[多轨指南](docs/multitrack-sessions.md)和[验收及播放器支持矩阵](docs/release-0.10.0.md)。
 
 v0.9.0 新增 `ContinuousSession`：typed snapshot 原子接收、滚动去重、有界背压、
 stop/cancel 和 VOD pause；将 clear、AES-128、TS SAMPLE-AES、fMP4 cenc/cbcs

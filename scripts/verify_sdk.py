@@ -53,6 +53,7 @@ def main():
     # Install the versioned integration extension only into the disposable SDK copy.
     # Both runtimes keep the SDK's real SourceHost/provider/Promise implementation.
     (output / 'cases.json').write_text(json.dumps(sdk_timeline_cases.cases(), indent=2) + '\n')
+    (output / 'multitrack-cases.json').write_text(json.dumps(sdk_timeline_cases.multitrack_cases(), indent=2)+'\n')
     shared = copy / adapters / 'rust/keyed.rs'
     shared_text = shared.read_text()
     # Versioned v0.8 adapter extension, installed only in the disposable copy.
@@ -101,6 +102,9 @@ def main():
         'timelineApiIntegratedInHarness': integrated,
         'timelineCases': browser_evidence['cases'],
         'sampleEncryptionAdapterExtension': True,
+        'multitrackCases': browser_evidence['multitrackCases'],
+        'nativeBrowserMultitrackEqual': True,
+        'multitrackCancellationCases': browser_evidence['cancelledMultitrack'],
         'continuousCases': browser_evidence['continuousCases'],
         'continuousCloseFailure': browser_evidence['continuousCloseFailure'],
         'continuousCancellationCases': browser_evidence['cancelledContinuous'],

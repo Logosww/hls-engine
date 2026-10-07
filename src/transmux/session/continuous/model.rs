@@ -4,6 +4,9 @@ pub type ContinuousResult<T> = std::result::Result<T, ContinuousError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContinuousErrorKind {
+    InvalidSubtitle,
+    UnsupportedSubtitleProfile,
+    MissingSubtitleMapping,
     InvalidOptions,
     UnknownInput,
     UnsupportedPlaylist,
@@ -280,7 +283,7 @@ impl ContinuousOptions {
             || self
                 .duration
                 .is_some_and(|v| v.ticks <= 0 || v.timescale == 0)
-            || (inputs == 2 && self.waiter.is_none())
+            || (inputs > 1 && self.waiter.is_none())
             || self
                 .anchors
                 .iter()

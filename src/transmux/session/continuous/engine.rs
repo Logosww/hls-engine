@@ -57,10 +57,15 @@ impl Lane {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TrackKey {
+    input: usize,
+    kind: OutputTrackKind,
+}
 pub(super) struct Engine {
     lanes: Vec<Lane>,
     pub tracks: Vec<FragmentedTrack>,
-    pub track_keys: Vec<(usize, bool)>,
+    track_keys: Vec<TrackKey>,
     pub offsets: Vec<u64>,
     pub origin: MediaTime,
     pub common: MediaTime,
@@ -78,7 +83,7 @@ pub(super) struct Engine {
     wall: Option<MediaTime>,
     pub selected_start: Option<MediaTime>,
     selected_end: Option<MediaTime>,
-    common_gap: Option<(usize, MediaTime, MediaTime)>,
+    common_gap: Option<(Vec<usize>, MediaTime, MediaTime)>,
 }
 impl ContinuousSession {
     async fn descriptor(&self, input: usize) -> ContinuousResult<Option<SegmentDescriptor>> {
@@ -143,7 +148,8 @@ impl ContinuousSession {
                     *map = None;
                 }
                 let request = ResourceRequest::from_descriptor(descriptor.clone(), false)
-                    .map_err(resource_error)?;
+                    .map_err(resource_error)?
+                    .with_packed(self.multi.is_some());
                 let bytes = self
                     .resources
                     .read_encoded(source, request.clone())
@@ -152,7 +158,7 @@ impl ContinuousSession {
                 self.shared.inner.lock().unwrap().lanes[input]
                     .progress
                     .downloaded += 1;
-                let mut data = crate::crypto::sample::demux(
+                let mut data = crate::crypto::sample::demux_selected(
                     &self.resources,
                     &request,
                     map.as_ref().map(|m| m.bytes()),
@@ -164,6 +170,7 @@ impl ContinuousSession {
                             Ok(())
                         }
                     },
+                    self.multi.is_some(),
                 )
                 .await
                 .map_err(|e| {
@@ -188,7 +195,7 @@ impl ContinuousSession {
                     StreamKind::Hevc => 1,
                     StreamKind::Aac => 2,
                 });
-                if self.sources.len() == 2 {
+                if input > 0 || !self.keep_embedded {
                     select_track(
                         &mut data,
                         if input == 0 {
@@ -279,10 +286,32 @@ impl Engine {
                 session.commit(input, &descriptor, 0)?;
             }
             raw.push(found.ok_or_else(|| fail(ContinuousErrorKind::EmptyInput))?);
+            let count = raw.iter().map(|(_, d)| d.packets.len()).sum::<usize>();
+            let bytes = raw
+                .iter()
+                .flat_map(|(_, d)| &d.packets)
+                .map(|p| p.data.len())
+                .sum::<usize>();
+            let maps = if session.multi.is_some() {
+                engine
+                    .lanes
+                    .iter()
+                    .filter_map(|l| l.map.as_ref())
+                    .map(|m| m.bytes().len())
+                    .sum::<usize>()
+            } else {
+                0
+            };
+            if count > session.options.limits.samples
+                || bytes.saturating_add(maps) > session.options.limits.sample_bytes
+            {
+                return Err(fail(ContinuousErrorKind::BudgetExceeded));
+            }
         }
         // Match TS modulo clocks against authoritative fMP4 time when available.
         let anchor = raw
             .iter()
+            .filter(|(_, d)| d.packed_anchor.is_none())
             .flat_map(|(_, d)| &d.packets)
             .find_map(|p| {
                 p.timing.map(|t| MediaTime {
@@ -293,6 +322,7 @@ impl Engine {
             .unwrap_or_else(|| packet_time(&raw[0].1.packets[0], 0));
         let anchor90 = scale(anchor, 90_000)?;
         for (_, data) in &mut raw {
+            unwrap_packed(data, anchor90)?;
             let mut clocks = [None, None];
             for p in &mut data.packets {
                 if p.timing.is_none() {
@@ -361,6 +391,24 @@ impl Engine {
             for mut track in build_fragmented_tracks(config).map_err(media_error)? {
                 track.track_id = self.tracks.len() as u32 + 1;
                 let audio = matches!(track.kind, crate::mp4::FragmentedTrackKind::Audio { .. });
+                if let Some(state) = &session.multi {
+                    let state = state.lock().unwrap();
+                    track.track_id = if input == 0 {
+                        if audio { 2 } else { 1 }
+                    } else {
+                        input as u32 + 2
+                    };
+                    let mut metadata = if audio {
+                        state.metadata[input].clone()
+                    } else {
+                        TrackMetadata::new("und", "Video")
+                    };
+                    metadata.group = if audio { 1 } else { 0 };
+                    if !audio {
+                        metadata.default = true;
+                    }
+                    track.metadata = Some(metadata);
+                }
                 let offset = if let Some(batch) = lane.pending.front() {
                     let first = batch
                         .data
@@ -385,12 +433,63 @@ impl Engine {
                     u64::try_from(offset)
                         .map_err(|_| fail(ContinuousErrorKind::TimelineAmbiguous))?,
                 );
-                self.track_keys.push((input, audio));
+                self.track_keys.push(TrackKey {
+                    input,
+                    kind: if audio {
+                        OutputTrackKind::Audio
+                    } else {
+                        OutputTrackKind::Video
+                    },
+                });
                 self.tracks.push(track);
             }
         }
         if self.tracks.is_empty() {
             return Err(fail(ContinuousErrorKind::EmptyInput));
+        }
+        if let Some(state) = &session.multi {
+            let mut state = state.lock().unwrap();
+            let audio_default = self
+                .tracks
+                .iter()
+                .filter(|t| matches!(t.kind, crate::mp4::FragmentedTrackKind::Audio { .. }))
+                .any(|t| t.metadata.as_ref().is_some_and(|m| m.default));
+            if !audio_default
+                && let Some(track) = self
+                    .tracks
+                    .iter_mut()
+                    .find(|t| matches!(t.kind, crate::mp4::FragmentedTrackKind::Audio { .. }))
+            {
+                track.metadata.as_mut().unwrap().default = true;
+            }
+            for (track, key) in self.tracks.iter().zip(&self.track_keys) {
+                if let Some(old) = state
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.id.0 == track.track_id && t.output == self.output)
+                {
+                    old.timescale = track.timescale;
+                } else {
+                    let input_id = state.input_ids[key.input].clone();
+                    state.tracks.push(OutputTrackInfo {
+                        id: OutputTrackId(track.track_id),
+                        output: self.output,
+                        input: input_id,
+                        kind: key.kind,
+                        codec: OutputTrackCodec::of(track),
+                        metadata: track.metadata.clone().unwrap(),
+                        timescale: track.timescale,
+                        duration: 0,
+                        samples: 0,
+                    });
+                }
+            }
+        }
+        if let Some(state) = &session.multi {
+            state
+                .lock()
+                .unwrap()
+                .trim_tracks(self.output, &session.options.limits);
         }
         self.reports = self.tracks.iter().map(|t| track_report(t, 0, 0)).collect();
         self.ends = vec![None; self.tracks.len()];
@@ -437,6 +536,17 @@ impl Engine {
         }
         if data.packets.is_empty() {
             return Err(at(ContinuousErrorKind::EmptyInput, &descriptor));
+        }
+        if let Some(anchor) = data.packed_anchor {
+            let reference = lane.clock[1].unwrap_or(if previous_epoch.is_none() {
+                scale(self.common, 90_000)?
+            } else {
+                i128::from(anchor)
+            });
+            unwrap_packed(&mut data, reference)?;
+            if let Some(last) = data.packets.last() {
+                lane.clock[1] = Some(scale(packet_time(last, 0), 90_000)?);
+            }
         }
         let mut previous_packet = [None, None];
         for index in 0..data.packets.len() {
@@ -571,7 +681,7 @@ impl Engine {
         });
         self.budget(session)
     }
-    fn budget(&self, session: &ContinuousSession) -> ContinuousResult<()> {
+    pub fn budget(&self, session: &ContinuousSession) -> ContinuousResult<()> {
         let samples = self
             .lanes
             .iter()
@@ -585,6 +695,29 @@ impl Engine {
             .flat_map(|b| &b.data.packets)
             .map(|p| p.data.len())
             .sum::<usize>();
+        // Retained encoded MAPs share the operation byte budget with samples.
+        // Resource permits cover in-flight reads, not these per-input caches.
+        let bytes = if session.multi.is_some() {
+            bytes.saturating_add(
+                self.lanes
+                    .iter()
+                    .filter_map(|l| l.map.as_ref())
+                    .map(|m| m.bytes().len())
+                    .sum::<usize>(),
+            )
+        } else {
+            bytes
+        };
+        let (subtitle_samples, subtitle_bytes) = if let Some(shared) = &session.multi {
+            let mut multi = shared.lock().unwrap();
+            multi.media_samples = samples;
+            multi.media_bytes = bytes;
+            multi.subtitle_usage()
+        } else {
+            (0, 0)
+        };
+        let samples = samples.saturating_add(subtitle_samples);
+        let bytes = bytes.saturating_add(subtitle_bytes);
         if samples > session.options.limits.samples || bytes > session.options.limits.sample_bytes {
             return Err(fail(ContinuousErrorKind::BudgetExceeded));
         }
@@ -657,16 +790,22 @@ impl Engine {
                     if session.sources.len() > 1 {
                         let start = lane.end;
                         let end = add(start, gap)?;
-                        if let Some((other, a, b)) = self.common_gap {
-                            if other == input || !cmp(a, start)?.is_eq() || !cmp(b, end)?.is_eq() {
+                        if let Some((others, a, b)) = &mut self.common_gap {
+                            if others.contains(&input)
+                                || !cmp(*a, start)?.is_eq()
+                                || !cmp(*b, end)?.is_eq()
+                            {
                                 return Err(at(
                                     ContinuousErrorKind::TimelineAmbiguous,
                                     &descriptor,
                                 ));
                             }
-                            self.common_gap = None;
+                            others.push(input);
+                            if others.len() == session.sources.len() {
+                                self.common_gap = None;
+                            }
                         } else {
-                            self.common_gap = Some((input, start, end));
+                            self.common_gap = Some((vec![input], start, end));
                         }
                     }
                     lane.shift = sub(lane.shift, gap)?;
@@ -711,38 +850,46 @@ impl Engine {
                 }
             }
         }
-        if let Some((input, start, _)) = self.common_gap {
-            if let Some(other) = self.lanes[1 - input].pending.front() {
-                for packet in &other.data.packets {
-                    let t = packet.timing.unwrap();
-                    let end = add(
-                        add(pts(packet), other.shift)?,
-                        MediaTime {
-                            ticks: i128::from(t.duration),
-                            timescale: t.timescale,
-                        },
-                    )?;
-                    if cmp(end, start)?.is_gt() {
-                        return Err(at(
-                            ContinuousErrorKind::TimelineAmbiguous,
-                            &other.descriptor,
-                        ));
-                    }
+        if let Some((inputs, start, _)) = &self.common_gap {
+            for input in 0..self.lanes.len() {
+                if inputs.contains(&input) {
+                    continue;
                 }
-            } else {
-                return Err(fail(ContinuousErrorKind::TimelineAmbiguous));
+                if let Some(other) = self.lanes[input].pending.front() {
+                    for packet in &other.data.packets {
+                        let t = packet.timing.unwrap();
+                        let end = add(
+                            add(pts(packet), other.shift)?,
+                            MediaTime {
+                                ticks: i128::from(t.duration),
+                                timescale: t.timescale,
+                            },
+                        )?;
+                        if cmp(end, *start)?.is_gt() {
+                            return Err(at(
+                                ContinuousErrorKind::TimelineAmbiguous,
+                                &other.descriptor,
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(fail(ContinuousErrorKind::TimelineAmbiguous));
+                }
             }
-            if selected.is_some_and(|(i, _)| i == input) {
+            if selected.is_some_and(|(i, _)| inputs.contains(&i)) {
                 return Err(fail(ContinuousErrorKind::TimelineAmbiguous));
             }
         }
         let Some((input, _)) = selected else {
             return Ok(None);
         };
-        if self.lanes.len() == 2
-            && let (Some(a), Some(b)) =
-                (self.lanes[0].pending.front(), self.lanes[1].pending.front())
-        {
+        for other in 0..self.lanes.len() {
+            let (Some(a), Some(b)) = (
+                self.lanes[input].pending.front(),
+                self.lanes[other].pending.front(),
+            ) else {
+                continue;
+            };
             let delta = sub(a.first()?, b.first()?)?;
             if scale(delta, 1_000_000)?.unsigned_abs()
                 > scale(session.options.limits.skew, 1_000_000)? as u128
@@ -785,7 +932,15 @@ impl Engine {
             let index = self
                 .track_keys
                 .iter()
-                .position(|k| *k == (input, audio))
+                .position(|k| {
+                    k.input == input
+                        && k.kind
+                            == if audio {
+                                OutputTrackKind::Audio
+                            } else {
+                                OutputTrackKind::Video
+                            }
+                })
                 .ok_or_else(|| at(ContinuousErrorKind::ConfigurationChanged, &batch.descriptor))?;
             let timescale = self.tracks[index].timescale;
             let t = packet.timing.unwrap();
@@ -847,6 +1002,16 @@ impl Engine {
                 .checked_add(u64::from(sample.duration))
                 .ok_or_else(|| fail(ContinuousErrorKind::TimeOverflow))?;
             self.ends[index] = Some(end);
+            if let Some(state) = &session.multi {
+                let mut state = state.lock().unwrap();
+                let report = state
+                    .tracks
+                    .iter_mut()
+                    .find(|r| r.id.0 == self.tracks[index].track_id && r.output == self.output)
+                    .unwrap();
+                report.samples += 1;
+                report.duration = report.duration.max(end);
+            }
             self.reports[index].sample_count += 1;
             self.reports[index].duration = self.reports[index]
                 .duration
@@ -932,7 +1097,10 @@ impl Engine {
     }
     pub async fn seek(&mut self, session: &ContinuousSession) -> ContinuousResult<()> {
         let range = session.options.range.unwrap();
-        let video = self.track_keys.iter().any(|(i, a)| *i == 0 && !a);
+        let video = self
+            .track_keys
+            .iter()
+            .any(|k| k.input == 0 && k.kind == OutputTrackKind::Video);
         loop {
             self.fill(session, 0).await?;
             let lane = &self.lanes[0];
@@ -987,11 +1155,11 @@ impl Engine {
             let data = session.load(0, &mut self.lanes[0].map, &descriptor).await?;
             self.push(session, 0, descriptor, data)?;
         }
-        if self.lanes.len() == 2 {
+        for input in 1..self.lanes.len() {
             let start = self.selected_start.unwrap();
             loop {
-                self.fill(session, 1).await?;
-                let Some(batch) = self.lanes[1].pending.front_mut() else {
+                self.fill(session, input).await?;
+                let Some(batch) = self.lanes[input].pending.front_mut() else {
                     return Err(fail(ContinuousErrorKind::EmptyInput));
                 };
                 let shift = batch.shift;
@@ -1001,8 +1169,8 @@ impl Engine {
                 if !batch.data.packets.is_empty() {
                     break;
                 }
-                let old = self.lanes[1].pending.pop_front().unwrap();
-                session.commit(1, &old.descriptor, 0)?;
+                let old = self.lanes[input].pending.pop_front().unwrap();
+                session.commit(input, &old.descriptor, 0)?;
             }
         }
         self.refresh_tracks(session)
@@ -1031,4 +1199,145 @@ fn pts(packet: &EncodedPacket) -> MediaTime {
             timescale: t.timescale,
         },
     )
+}
+
+fn unwrap_packed(data: &mut DemuxOutput, reference: i128) -> ContinuousResult<()> {
+    let Some(anchor) = data.packed_anchor else {
+        return Ok(());
+    };
+    let unwrapped = unwrap_near(i128::from(anchor), reference).map_err(media_error)?;
+    // Adjust exact LCM clocks by whole wrap periods, never round individual frames.
+    let delta = unwrapped - i128::from(anchor);
+    for packet in &mut data.packets {
+        let t = packet
+            .timing
+            .as_mut()
+            .ok_or_else(|| fail(ContinuousErrorKind::Media))?;
+        let shift = delta
+            .checked_mul(i128::from(t.timescale / 90_000))
+            .ok_or_else(|| fail(ContinuousErrorKind::TimeOverflow))?;
+        // prepare may already have selected the same wrap; restore original anchor first.
+        t.dts += shift;
+        t.pts += shift;
+    }
+    data.packed_anchor =
+        Some(u64::try_from(unwrapped).map_err(|_| fail(ContinuousErrorKind::TimelineAmbiguous))?);
+    Ok(())
+}
+
+impl Engine {
+    pub fn mux_tracks(&self, session: &ContinuousSession) -> (Vec<FragmentedTrack>, Vec<u64>) {
+        let mut tracks = self.tracks.clone();
+        let mut offsets = self.offsets.clone();
+        if let Some(state) = &session.multi {
+            let mut state = state.lock().unwrap();
+            let subtitles: Vec<_> = state
+                .subtitles
+                .iter()
+                .map(|s| (s.track(), s.config.id.clone()))
+                .collect();
+            for (track, id) in subtitles {
+                if !state
+                    .tracks
+                    .iter()
+                    .any(|t| t.id.0 == track.track_id && t.output == self.output)
+                {
+                    state.tracks.push(OutputTrackInfo {
+                        id: OutputTrackId(track.track_id),
+                        output: self.output,
+                        input: id,
+                        kind: OutputTrackKind::Subtitle,
+                        codec: OutputTrackCodec::Wvtt,
+                        metadata: track.metadata.clone().unwrap(),
+                        timescale: track.timescale,
+                        duration: 0,
+                        samples: 0,
+                    });
+                }
+                tracks.push(track);
+                offsets.push(0);
+            }
+            state.trim_tracks(self.output, &session.options.limits);
+        }
+        (tracks, offsets)
+    }
+    pub fn append_subtitles(
+        &mut self,
+        session: &ContinuousSession,
+        input: usize,
+        batch: &Batch,
+        grouped: &mut Vec<Vec<Mp4Sample>>,
+    ) -> ContinuousResult<()> {
+        let Some(shared) = &session.multi else {
+            return Ok(());
+        };
+        let mut until = self.origin;
+        for (index, samples) in grouped.iter().enumerate() {
+            if self.track_keys[index].input != input {
+                continue;
+            }
+            for sample in samples {
+                let end = add(
+                    self.origin,
+                    MediaTime {
+                        ticks: sample.pts
+                            + i128::from(self.offsets[index])
+                            + i128::from(sample.duration),
+                        timescale: self.tracks[index].timescale,
+                    },
+                )?;
+                until = max(until, end)?;
+            }
+        }
+        let extra = shared.lock().unwrap().render_subtitles(
+            batch.descriptor.slot().input_id(),
+            batch.descriptor.slot().generation(),
+            batch.descriptor.slot().epoch(),
+            batch.shift,
+            self.origin,
+            until,
+            self.output,
+            session.options.range,
+            &session.options.limits,
+        )?;
+        {
+            let state = shared.lock().unwrap();
+            let mut tracks = self.tracks.clone();
+            tracks.extend(state.subtitles.iter().map(|s| s.track()));
+            let configuration = config_digest(&tracks);
+            for lane in &state.subtitles {
+                if &lane.config.timeline_input == batch.descriptor.slot().input_id()
+                    && (batch.new_epoch
+                        || !self
+                            .mappings
+                            .iter()
+                            .any(|m| m.track == lane.track.0 && m.output == self.output))
+                {
+                    self.mappings.push_back(ContinuousMapping {
+                        input: lane.config.id.clone(),
+                        generation: batch.descriptor.slot().generation(),
+                        epoch: batch.descriptor.slot().epoch(),
+                        track: lane.track.0,
+                        source: sub(self.origin, batch.shift)?,
+                        presentation: self.origin,
+                        output: self.output,
+                        output_start: zero(),
+                        configuration,
+                        pdt: batch.descriptor.program_date_time().map(str::to_owned),
+                    });
+                }
+            }
+        }
+        grouped.extend(extra);
+        let count = grouped.iter().map(Vec::len).sum::<usize>();
+        let bytes = grouped
+            .iter()
+            .flatten()
+            .map(|s| s.data.len())
+            .sum::<usize>();
+        if count > session.options.limits.samples || bytes > session.options.limits.sample_bytes {
+            return Err(fail(ContinuousErrorKind::BudgetExceeded));
+        }
+        Ok(())
+    }
 }

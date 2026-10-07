@@ -6,6 +6,8 @@ its verification record is [release-0.9.0.md](release-0.9.0.md).
 
 ## Choose an entry point
 
+- [Fixed multi-track, wvtt and Packed AAC (candidate)](multitrack-sessions.md)
+
 - [Continuous Live/EVENT sessions](continuous-sessions.md)
 
 - [Timeline ranges, epochs and split outputs](timeline-sessions.md)
@@ -23,6 +25,9 @@ its verification record is [release-0.9.0.md](release-0.9.0.md).
 - [Benchmarks and memory bounds](benchmarks.md)
 
 ## Verification
+
+- [v0.10 candidate acceptance and remaining gates](release-0.10.0.md)
+- [v0.10 machine evidence](release-0.10.0-evidence.json)
 
 - [v0.9.0 verification record](release-0.9.0.md)
 - [v0.9.0 machine evidence](release-0.9.0-evidence.json)

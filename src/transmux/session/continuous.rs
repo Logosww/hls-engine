@@ -6,6 +6,10 @@ use std::{future::Future, pin::Pin};
 mod control;
 mod engine;
 mod model;
+mod multitrack;
+mod subtitles;
+pub use multitrack::*;
+pub use subtitles::*;
 mod output;
 #[cfg(feature = "serde")]
 mod wire;
@@ -18,6 +22,8 @@ pub use output::ContinuousFileProvider;
 pub use output::{ContinuousOutputRequest, ContinuousWriterProvider};
 
 pub struct ContinuousSession {
+    keep_embedded: bool,
+    multi: Option<Arc<std::sync::Mutex<multitrack::MultiState>>>,
     shared: Arc<Shared>,
     resources: Arc<ResourceSession>,
     sources: Vec<SessionSource>,
@@ -31,7 +37,12 @@ impl ContinuousSession {
         options: ContinuousOptions,
     ) -> ContinuousResult<Self> {
         options.validate(inputs.inputs.len())?;
-        if inputs.inputs.len() == 2 && inputs.inputs[0].id == inputs.inputs[1].id {
+        if inputs
+            .inputs
+            .iter()
+            .enumerate()
+            .any(|(n, i)| inputs.inputs[..n].iter().any(|j| j.id == i.id))
+        {
             return Err(fail(ContinuousErrorKind::InvalidOptions));
         }
         let resources = Arc::new(
@@ -49,6 +60,7 @@ impl ContinuousSession {
                     .iter()
                     .map(|i| LaneState::new(i.id.clone()))
                     .collect(),
+                global_history: false,
                 state: ContinuousState::Preparing,
                 reason: None,
                 paused: false,
@@ -65,6 +77,7 @@ impl ContinuousSession {
             demand_driven: true,
             max_resource_bytes: Some(options.resources.max_resource_bytes()),
         };
+        let keep_embedded = inputs.inputs.len() == 1;
         let sources = inputs
             .inputs
             .into_iter()
@@ -77,6 +90,8 @@ impl ContinuousSession {
             })
             .collect();
         Ok(Self {
+            keep_embedded,
+            multi: None,
             shared,
             resources,
             sources,
@@ -177,6 +192,9 @@ impl ContinuousSession {
         state.metadata = 0;
         state.blocked = false;
         drop(state);
+        if let Some(state) = &self.multi {
+            state.lock().unwrap().clear_subtitles();
+        }
         self.resources.cancel();
         self.shared.signal.wake();
         // This is the linearized terminal event; later cancel/stop is inert.
@@ -198,6 +216,9 @@ impl Drop for ContinuousSession {
             lane.history.clear();
         }
         drop(state);
+        if let Some(state) = &self.multi {
+            state.lock().unwrap().clear_subtitles();
+        }
         self.resources.cancel();
         self.shared.signal.wake();
     }

@@ -3,6 +3,7 @@
 pub mod continuous;
 pub mod contracts;
 pub mod keys;
+pub mod multitrack;
 pub mod playlist;
 pub mod prepared;
 pub mod resources;
@@ -23,6 +24,7 @@ pub fn native_report() -> serde_json::Value {
         "timeline": json(timeline::native_suite()),
         "samples": json(samples::native_suite()),
         "continuous": json(continuous::native_suite()),
+        "multitrack": json(multitrack::native_suite()),
     })
 }
 
@@ -40,3 +42,6 @@ pub mod sample_profile;
 
 #[path = "../../support/continuous_profile.rs"]
 pub mod continuous_profile;
+
+#[path = "../../support/multitrack_profile.rs"]
+pub mod multitrack_profile;

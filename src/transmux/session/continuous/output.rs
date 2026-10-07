@@ -5,8 +5,13 @@ use std::task::{Context, Poll};
 pub struct ContinuousOutputRequest {
     index: u64,
     tracks: Vec<crate::TrackInfo>,
+    all_tracks: Vec<OutputTrackInfo>,
 }
 impl ContinuousOutputRequest {
+    /// Includes subtitle tracks and stable IDs for the new multi-track entry.
+    pub fn all_tracks(&self) -> &[OutputTrackInfo] {
+        &self.all_tracks
+    }
     pub fn index(&self) -> u64 {
         self.index
     }
@@ -198,16 +203,30 @@ impl ContinuousSession {
         }
         let request = |engine: &Engine| ContinuousOutputRequest {
             index: engine.output,
+            all_tracks: self
+                .multi
+                .as_ref()
+                .map(|s| {
+                    s.lock()
+                        .unwrap()
+                        .tracks
+                        .iter()
+                        .filter(|t| t.output == engine.output)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default(),
             tracks: engine
                 .tracks
                 .iter()
                 .map(|t| track_report(t, 0, 0))
                 .collect(),
         };
+        let (tracks, offsets) = engine.mux_tracks(self);
         let mut writer = self.wait(target.acquire(request(&engine))).await?;
-        let mut mux = FragmentedMp4Muxer::new(engine.tracks.clone());
+        let mut mux = FragmentedMp4Muxer::new(tracks);
         let header = mux
-            .write_header_with_offsets(&engine.offsets)
+            .write_header_with_offsets(&offsets)
             .map_err(output_error)?;
         self.write(&mut writer, &header).await?;
         engine.bytes += header.len() as u64;
@@ -231,6 +250,7 @@ impl ContinuousSession {
             if batch.changed {
                 let previous = engine.output_report();
                 engine.split(self, input, batch)?;
+                let (tracks, offsets) = engine.mux_tracks(self);
                 let next = self.wait(target.acquire(request(&engine))).await?;
                 // Finish the old output only after acquisition of the new lease.
                 let previous_bytes = previous.media.bytes_written;
@@ -249,9 +269,9 @@ impl ContinuousSession {
                 engine.retain_history(self);
                 self.emit(ContinuousEvent::Output(old))?;
                 writer = next;
-                mux = FragmentedMp4Muxer::new(engine.tracks.clone());
+                mux = FragmentedMp4Muxer::new(tracks);
                 let header = mux
-                    .write_header_with_offsets(&engine.offsets)
+                    .write_header_with_offsets(&offsets)
                     .map_err(output_error)?;
                 self.write(&mut writer, &header).await?;
                 engine.bytes += header.len() as u64;
@@ -259,12 +279,14 @@ impl ContinuousSession {
                 continue;
             }
             let mapping_count = engine.mappings.len();
-            let grouped = engine.samples(self, input, &mut batch)?;
+            let mut grouped = engine.samples(self, input, &mut batch)?;
+            engine.append_subtitles(self, input, &batch, &mut grouped)?;
             let fragment = if grouped.iter().any(|s| !s.is_empty()) {
                 mux.write_fragment(&grouped).map_err(output_error)?
             } else {
                 Vec::new()
             };
+            drop(grouped);
             self.write(&mut writer, &fragment).await?;
             engine.bytes = engine
                 .bytes
@@ -276,6 +298,7 @@ impl ContinuousSession {
                 self.emit(ContinuousEvent::Mapping(mapping.clone()))?;
             }
             engine.retain_history(self);
+            engine.budget(self)?;
             self.commit(input, &batch.descriptor, engine.bytes)?;
             if self
                 .options
@@ -286,6 +309,23 @@ impl ContinuousSession {
             }
         }
         self.handle().drain(ContinuousEndReason::Eof);
+        if let Some(shared) = &self.multi {
+            let (subtitles, end) = shared.lock().unwrap().drain_subtitles(
+                engine.origin,
+                engine.output,
+                self.options.range,
+                &self.options.limits,
+            )?;
+            if subtitles.iter().any(|s| !s.is_empty()) {
+                let mut grouped = vec![vec![]; engine.tracks.len()];
+                grouped.extend(subtitles);
+                let fragment = mux.write_fragment(&grouped).map_err(output_error)?;
+                self.write(&mut writer, &fragment).await?;
+                engine.bytes += fragment.len() as u64;
+                engine.part_bytes += fragment.len() as u64;
+                engine.duration = max(engine.duration, end)?;
+            }
+        }
         self.state(ContinuousState::Finalizing)?;
         // Validate fallible timeline arithmetic before a native publication boundary.
         let _ = engine.report(self)?;
@@ -361,34 +401,9 @@ impl Target for MemoryTarget {
                         Ok(())
                     }
                 };
-                let data =
-                    crate::isobmff::demux_isobmff_checked(&writer.bytes, &writer.bytes, &check)
-                        .map_err(media_error)?;
-                let tracks = build_fragmented_tracks(&data).map_err(media_error)?;
-                let mut samples = vec![Vec::new(); tracks.len()];
-                for packet in data.packets {
-                    check().map_err(media_error)?;
-                    let audio = matches!(packet.kind, StreamKind::Aac);
-                    let index = tracks
-                        .iter()
-                        .position(|t| {
-                            matches!(t.kind, crate::mp4::FragmentedTrackKind::Audio { .. }) == audio
-                        })
-                        .ok_or_else(|| fail(ContinuousErrorKind::Media))?;
-                    samples[index].push(
-                        packet_sample(packet, tracks[index].timescale, 0, Some((0, 1)))
-                            .map_err(media_error)?,
-                    );
-                }
-                let (bytes, tracks) = Mp4Muxer::new(
-                    tracks
-                        .into_iter()
-                        .zip(samples)
-                        .map(|(t, s)| t.into_classic(s))
-                        .collect(),
-                )
-                .write_checked(&check)
-                .map_err(output_error)?;
+                let (bytes, tracks, samples) =
+                    crate::isobmff::classic_bytes(&writer.bytes, &check).map_err(output_error)?;
+                report.classic_index_samples = samples as u64;
                 if bytes.len() > writer.capacity {
                     return Err(fail(ContinuousErrorKind::BudgetExceeded));
                 }
@@ -485,7 +500,7 @@ mod native {
                     let signal = self.shared.signal.clone();
                     let backend = self.options.backend;
                     let previous = report.media.tracks.clone();
-                    let (temp, bytes, tracks) =
+                    let (temp, bytes, tracks, sample_count) =
                         tokio::task::spawn_blocking(move || -> ContinuousResult<_> {
                             let check = || {
                                 if signal.is_cancelled() {
@@ -503,18 +518,15 @@ mod native {
                             let scan =
                                 crate::isobmff::scan_file(&mut input, size, true, false, &check)
                                     .map_err(media_error)?;
+                            let sample_count = scan.sample_counts.iter().sum::<usize>();
                             let tracks =
                                 crate::isobmff::file_tracks(&scan.init).map_err(media_error)?;
                             let (bytes, reports) = match backend {
-                                FinalizeBackend::Native => Mp4Muxer::new(
-                                    tracks
-                                        .into_iter()
-                                        .zip(scan.samples)
-                                        .map(|(t, s)| t.into_classic(s))
-                                        .collect(),
-                                )
-                                .write_file(&mut input, &mut output, &check)
-                                .map_err(output_error)?,
+                                FinalizeBackend::Native => {
+                                    Mp4Muxer::from_fragments(tracks, scan.samples)
+                                        .write_file(&mut input, &mut output, &check)
+                                        .map_err(output_error)?
+                                }
                                 #[cfg(feature = "ffmpeg-finalize")]
                                 FinalizeBackend::Ffmpeg => {
                                     crate::ffmpeg_finalize::remux_blocking(
@@ -535,13 +547,14 @@ mod native {
                             std::io::Write::flush(&mut output)
                                 .map_err(|e| output_error(e.into()))?;
                             check().map_err(media_error)?;
-                            Ok((temp, bytes, reports))
+                            Ok((temp, bytes, reports, sample_count))
                         })
                         .await
                         .map_err(|_| fail(ContinuousErrorKind::Output))??;
                     writer.temp = temp;
                     report.media.bytes_written = bytes;
                     report.media.tracks = tracks;
+                    report.classic_index_samples = sample_count as u64;
                 }
                 // Cancellation and final publication share one linearization lock.
                 let mut state = self.shared.inner.lock().unwrap();
@@ -591,6 +604,10 @@ mod native {
             provider: &mut P,
             options: FileOutputOptions,
         ) -> ContinuousResult<ContinuousReport> {
+            #[cfg(feature = "ffmpeg-finalize")]
+            if self.multi.is_some() && options.backend == FinalizeBackend::Ffmpeg {
+                return self.finish(Err(fail(ContinuousErrorKind::InvalidOptions)));
+            }
             let result = self
                 .run(&mut Files {
                     provider,

@@ -103,7 +103,7 @@ pub(crate) fn scan<R: Read + Seek>(
         init.extend(metadata(reader, &h, check)?);
         position = h.end;
     }
-    let tracks = parse_init_segment(&init)?;
+    let tracks = parse_output_init(&init)?;
     if tracks.iter().any(|t| t.timescale == 0) {
         return Err(Error::invalid("zero track timescale"));
     }

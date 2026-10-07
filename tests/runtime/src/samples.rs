@@ -22,13 +22,14 @@ pub(crate) mod bridge {
         fn resolve(&self, r: KeyRequest) -> KeyFuture<KeyResolution> {
             let kid = r.resource().kid();
             let method = r.reference().method().clone();
-            let result = self.0.call2(
+            let result = self.0.call3(
                 &JsValue::NULL,
                 &JsValue::from_str(method.as_str()),
                 &kid.map(|k| {
                     JsValue::from_str(&k.iter().map(|b| format!("{b:02x}")).collect::<String>())
                 })
                 .unwrap_or(JsValue::NULL),
+                &JsValue::from_bool(matches!(r.reference().location().location(),hls_transmux::SourceLocation::Url(url) if url.path().ends_with("/packed-rotated-key"))),
             );
             Box::pin(async move {
                 let v = match result {

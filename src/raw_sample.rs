@@ -271,11 +271,9 @@ impl RawStage {
     }
 }
 
-#[cfg(test)]
-mod packed;
+pub(crate) mod packed;
 
-/// Packed AAC prototype: decode only the specified ID3 PRIV clock, never EXTINF.
-#[cfg(test)]
+/// Decode only the specified ID3 PRIV clock, never EXTINF.
 fn id3_timestamp(owner: &str, bytes: &[u8]) -> Result<u64> {
     if owner != "com.apple.streaming.transportStreamTimestamp" || bytes.len() != 8 {
         return Err(Error::bitstream("invalid ID3 PRIV timestamp"));

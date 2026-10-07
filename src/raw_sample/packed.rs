@@ -1,5 +1,4 @@
-//! Internal validation prototype only: strict ID3v2.3/v2.4 PRIV + ADTS.
-//! No public input dispatch or capability includes Packed AAC.
+//! Strict ID3v2.3/v2.4 PRIV + ADTS AAC-LC input.
 use super::*;
 use crate::codecs::aac;
 
@@ -16,6 +15,8 @@ struct PackedFrame<'a> {
     offset_samples: u64,
     sample_rate: u32,
     payload: &'a [u8],
+    header: aac::AdtsHeader,
+    offset: usize,
 }
 fn frames(bytes: &[u8]) -> Result<Vec<PackedFrame<'_>>> {
     let invalid = || Error::bitstream("invalid Packed AAC ID3 anchor");
@@ -36,7 +37,10 @@ fn frames(bytes: &[u8]) -> Result<Vec<PackedFrame<'_>>> {
     let mut cursor = 10;
     let mut anchor = None;
     while cursor < tag_end {
-        if bytes[cursor..tag_end].iter().all(|v| *v == 0) {
+        if bytes[cursor] == 0 {
+            if !bytes[cursor..tag_end].iter().all(|v| *v == 0) {
+                return Err(invalid());
+            }
             break;
         }
         if tag_end - cursor < 10 {
@@ -104,11 +108,16 @@ fn frames(bytes: &[u8]) -> Result<Vec<PackedFrame<'_>>> {
             .checked_add(header.frame_length)
             .filter(|v| *v <= bytes.len())
             .ok_or_else(invalid)?;
+        if result.len() >= 65_536 {
+            return Err(Error::unsupported("Packed AAC sample budget exceeded"));
+        }
         result.push(PackedFrame {
             anchor_90k: anchor,
             offset_samples,
             sample_rate: header.sample_rate,
             payload: &bytes[cursor + header.header_length..end],
+            header,
+            offset: cursor + header.header_length,
         });
         offset_samples = offset_samples.checked_add(1024).ok_or_else(invalid)?;
         cursor = end;
@@ -145,6 +154,7 @@ fn packed_clock_does_not_accumulate_per_frame_rounding() {
     assert!(frames(&bytes).is_err());
 }
 
+#[cfg(test)]
 fn fixture(version: u8, clock: u64) -> Vec<u8> {
     let mut private = b"com.apple.streaming.transportStreamTimestamp\0".to_vec();
     private.extend_from_slice(&clock.to_be_bytes());
@@ -218,4 +228,85 @@ fn packed_rejects_malformed_id3_and_unsupported_adts_layouts() {
     second[2] = 0x4c; // 48 kHz rather than 44.1 kHz
     changed.extend_from_slice(&second);
     assert!(frames(&changed).is_err());
+}
+
+/// Keep the clock exact in an LCM timescale, including 44.1 kHz samples.
+pub(crate) async fn demux(
+    bytes: &[u8],
+    mut hook: Option<&mut dyn RawSampleHook>,
+    check: &SampleCheck<'_>,
+) -> Result<crate::types::DemuxOutput> {
+    use crate::types::{DemuxOutput, EncodedPacket, PacketTiming};
+    check()?;
+    let frames = frames(bytes)?;
+    let limits = hook
+        .as_ref()
+        .map_or((65_536, 32 * 1024 * 1024), |h| h.limits());
+    if frames.len() > limits.0 || bytes.len() > limits.1 {
+        return Err(Error::unsupported("Packed AAC sample budget exceeded"));
+    }
+    let first = &frames[0];
+    let rate = first.sample_rate;
+    let mut a = rate;
+    let mut b = 90_000;
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let timescale = (rate / a)
+        .checked_mul(90_000)
+        .ok_or_else(|| Error::bitstream("Packed AAC clock overflow"))?;
+    let mut result = DemuxOutput {
+        saw_audio: true,
+        audio_timescale: Some(rate),
+        sample_rate: Some(rate),
+        channel_count: Some(first.header.channel_config),
+        audio_specific_config: Some(aac::audio_specific_config(first.header)),
+        packed_anchor: Some(first.anchor_90k),
+        ..Default::default()
+    };
+    for frame in frames {
+        check()?;
+        let dts = i128::from(frame.anchor_90k) * i128::from(timescale / 90_000)
+            + i128::from(frame.offset_samples) * i128::from(timescale / rate);
+        let payload = if let Some(hook) = hook.as_deref_mut() {
+            hook.process(RawSample {
+                kind: StreamKind::Aac,
+                layout: RawLayout::Adts {
+                    offset: frame.offset,
+                },
+                dts,
+                timescale,
+                bytes: frame.payload.to_vec(),
+                protection: None,
+            })
+            .await?
+        } else {
+            frame.payload.to_vec()
+        };
+        check()?;
+        if payload.len() != frame.payload.len() {
+            return Err(Error::bitstream("Packed AAC hook changed frame length"));
+        }
+        result.packets.push(EncodedPacket {
+            kind: StreamKind::Aac,
+            timing: Some(PacketTiming {
+                edit_offset: 0,
+                timescale,
+                dts,
+                pts: dts,
+                duration: 1024 * (timescale / rate),
+            }),
+            data: payload,
+            pts_90k: dts * 90_000 / i128::from(timescale),
+            dts_90k: (dts * 90_000 / i128::from(timescale)) as u64,
+            duration: 1024,
+            is_key: true,
+            is_length_prefixed: false,
+        });
+    }
+    Ok(result)
+}
+
+pub(crate) fn validate(bytes: &[u8]) -> Result<()> {
+    frames(bytes).map(|_| ())
 }

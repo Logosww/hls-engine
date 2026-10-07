@@ -89,6 +89,8 @@ where
 // === Init segment parsing ===
 
 struct InitTrack {
+    subtitle: bool,
+    metadata: Option<crate::TrackMetadata>,
     protection: Option<protection::Defaults>,
     groups: protection::Groups,
     track_id: u32,
@@ -107,11 +109,30 @@ struct InitTrack {
     default_sample_size: u32,
     default_sample_flags: u32,
     length_size: usize,
-    #[cfg(not(target_arch = "wasm32"))]
     video_codec: Option<crate::mp4::VideoCodec>,
 }
 
 fn parse_init_segment(init: &[u8]) -> Result<Vec<InitTrack>> {
+    let tracks = parse_output_init(init)?;
+    if tracks.iter().any(|t| t.subtitle) {
+        return Err(Error::unsupported("subtitle media input"));
+    }
+    if tracks
+        .iter()
+        .filter(|t| matches!(t.kind, StreamKind::Avc | StreamKind::Hevc))
+        .count()
+        > 1
+        || tracks
+            .iter()
+            .filter(|t| matches!(t.kind, StreamKind::Aac))
+            .count()
+            > 1
+    {
+        return Err(Error::unsupported("multiple tracks of the same media kind"));
+    }
+    Ok(tracks)
+}
+fn parse_output_init(init: &[u8]) -> Result<Vec<InitTrack>> {
     let moov = find_box(init, b"moov")?
         .ok_or_else(|| Error::bitstream("init segment does not contain a moov box"))?;
 
@@ -144,19 +165,6 @@ fn parse_init_segment(init: &[u8]) -> Result<Vec<InitTrack>> {
         Ok(())
     })?;
 
-    if tracks
-        .iter()
-        .filter(|t| matches!(t.kind, StreamKind::Avc | StreamKind::Hevc))
-        .count()
-        > 1
-        || tracks
-            .iter()
-            .filter(|t| matches!(t.kind, StreamKind::Aac))
-            .count()
-            > 1
-    {
-        return Err(Error::unsupported("multiple tracks of the same media kind"));
-    }
     if tracks.is_empty() {
         return Err(Error::bitstream(
             "init segment does not contain any trak boxes",
@@ -237,7 +245,10 @@ fn parse_trak(
 
     let kind = if handler_type == b"vide" {
         entry.kind
-    } else if handler_type == b"soun" {
+    } else if (handler_type == b"text" && entry.subtitle)
+        || (handler_type == b"soun" && !entry.subtitle)
+    {
+        // Subtitle entries are confined to the generic output scanner.
         StreamKind::Aac
     } else {
         return Err(Error::unsupported(format!(
@@ -250,6 +261,8 @@ fn parse_trak(
         trex_defaults.get(&track_id).copied().unwrap_or((0, 0, 0));
 
     Ok(InitTrack {
+        subtitle: entry.subtitle,
+        metadata: parse_track_metadata(mdia, tkhd, hdlr)?,
         groups: protection::groups(stbl, entry.protection.as_ref())?,
         protection: entry.protection,
         track_id,
@@ -268,7 +281,6 @@ fn parse_trak(
         default_sample_size,
         default_sample_flags,
         length_size: entry.length_size,
-        #[cfg(not(target_arch = "wasm32"))]
         video_codec: entry.video_codec,
     })
 }
@@ -358,6 +370,7 @@ fn parse_mdhd_timescale(mdhd: &[u8]) -> Result<u32> {
 }
 
 struct SampleEntryInfo {
+    subtitle: bool,
     protection: Option<protection::Defaults>,
     kind: StreamKind,
     sps: Option<Vec<u8>>,
@@ -369,7 +382,6 @@ struct SampleEntryInfo {
     sample_rate: Option<u32>,
     channel_count: Option<u8>,
     length_size: usize,
-    #[cfg(not(target_arch = "wasm32"))]
     video_codec: Option<crate::mp4::VideoCodec>,
 }
 
@@ -413,6 +425,7 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let config = avc::parse_avcc(avcc_data)?;
             let (width, height) = read_video_dimensions(entry_payload)?;
             Ok(SampleEntryInfo {
+                subtitle: false,
                 protection,
                 kind: StreamKind::Avc,
                 sps: Some(config.sps),
@@ -424,7 +437,6 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
                 sample_rate: None,
                 channel_count: None,
                 length_size: config.length_size_minus_one as usize + 1,
-                #[cfg(not(target_arch = "wasm32"))]
                 video_codec: Some(crate::mp4::VideoCodec::Avc {
                     avcc: avcc_data.to_vec(),
                 }),
@@ -439,6 +451,7 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let config = hevc::parse_hvcc(hvcc_data)?;
             let (width, height) = read_video_dimensions(entry_payload)?;
             Ok(SampleEntryInfo {
+                subtitle: false,
                 protection,
                 kind: StreamKind::Hevc,
                 sps: Some(config.sps),
@@ -450,10 +463,29 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
                 sample_rate: None,
                 channel_count: None,
                 length_size: config.length_size_minus_one as usize + 1,
-                #[cfg(not(target_arch = "wasm32"))]
                 video_codec: Some(crate::mp4::VideoCodec::Hevc {
                     hvcc: hvcc_data.to_vec(),
                 }),
+            })
+        }
+        b"wvtt" => {
+            if entry_payload.len() < 8 || find_box(&entry_payload[8..], b"vttC")?.is_none() {
+                return Err(Error::bitstream("invalid wvtt entry"));
+            }
+            Ok(SampleEntryInfo {
+                subtitle: true,
+                protection: None,
+                kind: StreamKind::Aac,
+                sps: None,
+                pps: None,
+                vps: None,
+                width: None,
+                height: None,
+                audio_specific_config: None,
+                sample_rate: None,
+                channel_count: None,
+                length_size: 0,
+                video_codec: None,
             })
         }
         b"mp4a" => {
@@ -468,6 +500,7 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
             let channel_count = u16::from_be_bytes([entry_payload[16], entry_payload[17]]) as u8;
             let sample_rate = u16::from_be_bytes([entry_payload[24], entry_payload[25]]) as u32;
             Ok(SampleEntryInfo {
+                subtitle: false,
                 protection,
                 kind: StreamKind::Aac,
                 sps: None,
@@ -479,7 +512,6 @@ fn parse_stsd_entry(stsd: &[u8]) -> Result<SampleEntryInfo> {
                 sample_rate: Some(sample_rate),
                 channel_count: Some(channel_count),
                 length_size: 0,
-                #[cfg(not(target_arch = "wasm32"))]
                 video_codec: None,
             })
         }
@@ -1549,43 +1581,109 @@ mod tests {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[path = "file_scan.rs"]
 mod file_scan;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) use file_scan::{FileIndex, scan as scan_file};
+pub(crate) use file_scan::FileIndex;
+pub(crate) use file_scan::scan as scan_file;
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn file_tracks(init: &[u8]) -> Result<Vec<crate::mp4::FragmentedTrack>> {
     use crate::mp4::{FragmentedTrack, FragmentedTrackKind};
-    parse_init_segment(init)?
+    parse_output_init(init)?
         .into_iter()
         .map(|t| {
-            let kind = match t.kind {
-                StreamKind::Avc | StreamKind::Hevc => FragmentedTrackKind::Video {
-                    width: t.width.ok_or_else(|| Error::invalid("missing width"))?,
-                    height: t.height.ok_or_else(|| Error::invalid("missing height"))?,
-                    codec: t
-                        .video_codec
-                        .ok_or_else(|| Error::invalid("missing codec config"))?,
-                },
-                StreamKind::Aac => FragmentedTrackKind::Audio {
-                    sample_rate: t
-                        .sample_rate
-                        .ok_or_else(|| Error::invalid("missing sample rate"))?,
-                    channel_count: t
-                        .channel_count
-                        .ok_or_else(|| Error::invalid("missing channels"))?,
-                    audio_specific_config: t
-                        .audio_specific_config
-                        .ok_or_else(|| Error::invalid("missing AAC config"))?,
-                },
+            let kind = if t.subtitle {
+                FragmentedTrackKind::Wvtt
+            } else {
+                match t.kind {
+                    StreamKind::Avc | StreamKind::Hevc => FragmentedTrackKind::Video {
+                        width: t.width.ok_or_else(|| Error::invalid("missing width"))?,
+                        height: t.height.ok_or_else(|| Error::invalid("missing height"))?,
+                        codec: t
+                            .video_codec
+                            .ok_or_else(|| Error::invalid("missing codec config"))?,
+                    },
+                    StreamKind::Aac => FragmentedTrackKind::Audio {
+                        sample_rate: t
+                            .sample_rate
+                            .ok_or_else(|| Error::invalid("missing sample rate"))?,
+                        channel_count: t
+                            .channel_count
+                            .ok_or_else(|| Error::invalid("missing channels"))?,
+                        audio_specific_config: t
+                            .audio_specific_config
+                            .ok_or_else(|| Error::invalid("missing AAC config"))?,
+                    },
+                }
             };
             Ok(FragmentedTrack {
+                metadata: t.metadata,
                 track_id: t.track_id,
                 timescale: t.timescale,
                 kind,
             })
         })
         .collect()
+}
+
+fn parse_track_metadata(
+    mdia: &[u8],
+    tkhd: &[u8],
+    hdlr: &[u8],
+) -> Result<Option<crate::TrackMetadata>> {
+    let Some(elng) = find_box(mdia, b"elng")? else {
+        return Ok(None);
+    };
+    if elng.len() < 5 || hdlr.len() < 24 {
+        return Err(Error::bitstream("invalid track metadata"));
+    }
+    let text = |b: &[u8]| -> Result<String> {
+        let end = b
+            .iter()
+            .position(|v| *v == 0)
+            .ok_or_else(|| Error::bitstream("unterminated metadata"))?;
+        Ok(std::str::from_utf8(&b[..end])
+            .map_err(|_| Error::bitstream("invalid metadata UTF-8"))?
+            .to_owned())
+    };
+    let group = if tkhd.first() == Some(&1) { 46 } else { 34 };
+    if tkhd.len() < group + 2 {
+        return Err(Error::bitstream("short tkhd metadata"));
+    }
+    Ok(Some(crate::TrackMetadata {
+        language: text(&elng[4..])?,
+        name: text(&hdlr[24..])?,
+        default: tkhd[3] & 1 != 0,
+        group: u16::from_be_bytes(tkhd[group..group + 2].try_into().unwrap()),
+    }))
+}
+
+pub(crate) fn classic_bytes(
+    bytes: &[u8],
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(Vec<u8>, Vec<crate::TrackInfo>, usize)> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let scan = scan_file(&mut cursor, bytes.len() as u64, true, false, check)?;
+    let count = scan.sample_counts.iter().sum();
+    let tracks = file_tracks(&scan.init)?;
+    let mut samples = scan.samples;
+    for track in &mut samples {
+        for sample in track {
+            check()?;
+            let (offset, size) = sample
+                .source
+                .take()
+                .ok_or_else(|| Error::bitstream("missing sample source"))?;
+            let start =
+                usize::try_from(offset).map_err(|_| Error::bitstream("sample offset overflow"))?;
+            let end = start
+                .checked_add(size as usize)
+                .filter(|e| *e <= bytes.len())
+                .ok_or_else(|| Error::bitstream("sample outside buffer"))?;
+            sample.data = bytes[start..end].to_vec();
+        }
+    }
+    let (bytes, tracks) =
+        crate::mp4::Mp4Muxer::from_fragments(tracks, samples).write_checked(check)?;
+    Ok((bytes, tracks, count))
 }

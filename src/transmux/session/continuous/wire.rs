@@ -58,3 +58,24 @@ impl Serialize for ContinuousReport {
             "mappings"=>self.mappings,"history_truncated"=>self.truncated,"peaks"=>self.peaks)
     }
 }
+
+impl Serialize for TrackMetadata {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        fields!(self,s,"TrackMetadata","language"=>self.language(),"name"=>self.name(),"default"=>self.is_default())
+    }
+}
+impl Serialize for OutputTrackInfo {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        fields!(self,s,"OutputTrackInfo","track_id"=>self.id().get(),"output_index"=>self.output_index().to_string(),"input_id"=>self.input_id(),"kind"=>format!("{:?}",self.kind()),"codec"=>format!("{:?}",self.codec()),"metadata"=>self.metadata(),"timescale"=>self.timescale(),"duration"=>self.duration().to_string(),"sample_count"=>self.sample_count().to_string())
+    }
+}
+impl Serialize for SubtitleCueReport {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        fields!(self,s,"SubtitleCueReport","track_id"=>self.track_id().get(),"identifier"=>self.identifier(),"disposition"=>format!("{:?}",self.disposition()),"output_index"=>self.output_index().to_string(),"start"=>self.start(),"end"=>self.end())
+    }
+}
+impl Serialize for MultiTrackReport {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        fields!(self,s,"MultiTrackReport","schema_version"=>1u32,"configuration_id"=>self.configuration_id(),"media"=>self.media(),"tracks"=>self.tracks(),"track_history_truncated"=>self.track_history_truncated(),"subtitle_reports"=>self.subtitle_reports(),"subtitle_history_truncated"=>self.subtitle_history_truncated())
+    }
+}

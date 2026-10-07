@@ -48,3 +48,18 @@ def cases():
             rotated['text']=rotated['text'].replace('#EXTINF:2.000,\nseg2.m4s','#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="key-rotation"\n#EXTINF:2.000,\nseg2.m4s')
             add('sample-range-key-redeclaration',rotated,files,request_range)
     return results
+
+
+def multitrack_cases():
+    result=[copy.deepcopy(next(c for c in cases() if c['name']=='sample-dual-schemes'))]
+    result[0]['name']='multi-video-two-audio'
+    for profile in ['clear','aes128','sample_aes']:
+        c=copy.deepcopy(result[0]);c['name']='packed-'+profile;c['request']['audio']=None
+        folder=ROOT/'tests/fixtures/packed_aac'/profile
+        base='https://sdk.test/packed/'+profile+'/'
+        c['request']['primary']={'url':base+'input.m3u8','text':(folder/'input.m3u8').read_text()}
+        c['files']={base+f.name:str(f.relative_to(ROOT)) for f in folder.iterdir() if f.is_file()}
+        result.append(c)
+    mixed=copy.deepcopy(result[0]);mixed['name']='multi-packed-audio'
+    mixed['request']['audio']=result[-1]['request']['primary'];mixed['files']|=result[-1]['files'];result.append(mixed)
+    return result

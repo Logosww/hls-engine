@@ -1,6 +1,6 @@
 [package]
 name = "hls-transmux"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "A small, dependency-light HLS → MP4 transmuxer for Rust (TS/fMP4 in, MP4/CMAF out)."
 license = "MIT"
@@ -11,7 +11,7 @@ keywords = ["hls", "mp4", "transmux", "cmaf", "isobmff"]
 categories = ["multimedia::video", "multimedia"]
 # Public guides are required by include_str! even when a workspace ignores docs.
 # Keep planning, the nested runtime test crate and generated artifacts outside the archive.
-include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes", "/.github/**", "/src/**", "/tests/**", "/examples/*.rs", "/scripts/*.py", "/scripts/*.mjs", "/docs/*.md", "/docs/*.json"]
+include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes", "/.github/**", "/src/**", "/tests/**", "/examples/*.rs", "/scripts/*.py", "/scripts/*.mjs", "/scripts/*.swift", "/docs/*.md", "/docs/*.json"]
 
 [features]
 default = ["default-source"]
@@ -77,5 +77,18 @@ required-features = ["serde"]
 
 [[example]]
 name = "continuous_wasm"
+crate-type = ["cdylib"]
+required-features = ["serde"]
+
+[[example]]
+name = "multitrack_verify"
+required-features = ["serde"]
+
+[[example]]
+name = "multitrack_budget"
+required-features = ["serde"]
+
+[[example]]
+name = "multitrack_wasm"
 crate-type = ["cdylib"]
 required-features = ["serde"]

@@ -35,8 +35,12 @@ jobs:
         run: cargo run --locked --release --example timeline_budget > target/runtime/native-timeline-evidence.json
       - name: Measure continuous allocations
         run: cargo run --locked --release --features serde --example continuous_budget > target/runtime/native-continuous-evidence.json
+      - name: Measure multi-track fMP4 and Native classic allocations
+        run: cargo run --locked --release --features serde --example multitrack_budget > target/runtime/native-multitrack-evidence.json
       - name: Lint the WASM host adapter
         run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --example keyed_wasm -- -D warnings
+      - name: Lint the multi-track WASM example
+        run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --features serde --example multitrack_wasm -- -D warnings
       - name: Verify packaged docs and WASM example
         run: python3 scripts/verify_package.py
       - uses: actions/upload-artifact@v4
@@ -127,3 +131,14 @@ jobs:
 
       - name: Verify timeline packets and decoded frames
         run: python3 -u scripts/verify_timeline.py --ffmpeg
+
+      - name: Verify multi-track ranges, epochs, rotations and split outputs
+        run: python3 -u scripts/verify_multitrack.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multitrack-container-evidence
+          path: |
+            target/multitrack/reports.json
+            target/multitrack/evidence.json

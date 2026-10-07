@@ -52,10 +52,10 @@ fn shift_ts_by(mut bytes: Vec<u8>, video_ticks: u64, audio_ticks: u64) -> Vec<u8
     }
     bytes
 }
-pub fn segment_index(location: &hls_transmux::SourceLocation) -> usize {
+pub fn segment_index(location: &hls_engine::legacy::SourceLocation) -> usize {
     let path = match location {
-        hls_transmux::SourceLocation::File(p) => p.to_string_lossy().into_owned(),
-        hls_transmux::SourceLocation::Url(u) => u.path().to_owned(),
+        hls_engine::legacy::SourceLocation::File(p) => p.to_string_lossy().into_owned(),
+        hls_engine::legacy::SourceLocation::Url(u) => u.path().to_owned(),
     };
     path.rsplit('/')
         .next()

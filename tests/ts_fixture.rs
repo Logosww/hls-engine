@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hls_transmux::{HlsInput, TrackType, TransmuxOptions, transmux_hls_to_mp4_async};
+use hls_engine::legacy::{HlsInput, TrackType, TransmuxOptions, transmux_hls_to_mp4_async};
 
 /// In-repo H.264 + AAC-LC transport stream fixture (single segment, ~10s).
 fn fixture_path() -> PathBuf {

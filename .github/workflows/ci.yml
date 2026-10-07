@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -13,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -41,8 +44,12 @@ jobs:
         run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --example keyed_wasm -- -D warnings
       - name: Lint the multi-track WASM example
         run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --features serde --example multitrack_wasm -- -D warnings
+      - name: Test release identity guard
+        run: python3 scripts/test_verify_engine_release.py
       - name: Verify packaged docs and WASM example
         run: python3 scripts/verify_package.py
+      - name: Verify schema-1 recovery against the preserved baseline
+        run: python3 scripts/verify_legacy_checkpoint.py
       - uses: actions/upload-artifact@v4
         with:
           name: runtime-contract-evidence
@@ -74,6 +81,13 @@ jobs:
       - name: Test serde without default source
         run: cargo test --no-default-features --features serde
 
+      - name: Test engine GCM and recovery
+        run: |
+          cargo test --locked --features experimental-gcm
+          cargo test --locked --features serde,experimental-gcm
+          cargo test --locked --no-default-features --features experimental-gcm
+          cargo test --locked --no-default-features --features serde,experimental-gcm
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -101,7 +115,9 @@ jobs:
       - name: Install FFmpeg libraries
         run: brew install ffmpeg pkg-config
       - name: Test FFmpeg backend
-        run: cargo test --all-features
+        run: |
+          cargo test --locked --features serde,ffmpeg-finalize
+          cargo test --locked --all-features
       - name: Clippy with FFmpeg backend
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -123,7 +139,7 @@ jobs:
       - name: Verify fragmented duration with offset external audio
         run: python3 -u scripts/verify_fragmented_timeline.py
 
-      - name: Verify native keyed SDK example
+      - name: Verify native keyed example
         run: python3 scripts/verify_keyed_examples.py
 
       - name: Verify continuous clear and encrypted decodes
@@ -131,6 +147,17 @@ jobs:
 
       - name: Verify timeline packets and decoded frames
         run: python3 -u scripts/verify_timeline.py --ffmpeg
+
+      - name: Recover all retained media outputs at every checkpoint
+        run: python3 -u scripts/verify_engine_recovery.py
+
+      - name: Measure long native recording and recovery allocations
+        run: cargo run --offline --locked --release --features serde --example engine_budget > target/engine-budget.json
+
+      - name: Measure authenticated recording and recovery with rotating keys
+        env:
+          HLS_ENGINE_BUDGET_GCM: '1'
+        run: cargo run --offline --locked --release --features serde,experimental-gcm --example engine_budget > target/engine-budget-gcm.json
 
       - name: Verify multi-track ranges, epochs, rotations and split outputs
         run: python3 -u scripts/verify_multitrack.py
@@ -142,3 +169,6 @@ jobs:
           path: |
             target/multitrack/reports.json
             target/multitrack/evidence.json
+            target/engine-recovery-matrix/evidence.json
+            target/engine-budget.json
+            target/engine-budget-gcm.json

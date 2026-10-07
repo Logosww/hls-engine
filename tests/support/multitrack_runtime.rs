@@ -1,12 +1,14 @@
 //! Shared native / actual WASM vectors. No host timers, filesystem or threads required.
 use crate::sample_corpus as sample;
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use sha2::{Digest, Sha256};
 use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
 };
+mod recovery_matrix;
+use recovery_matrix::{Handle as MultiTrackHandle, Session as MultiTrackSession};
 pub struct Wait;
 impl ContinuousWait for Wait {
     #[cfg(not(target_arch = "wasm32"))]
@@ -102,7 +104,7 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
                     ContinuousInput::new(id("main"), source(&case)),
                     EmbeddedAudio::Keep,
                 ),
-                sample::keys(provider.clone()),
+                provider.clone(),
                 ContinuousOptions::default().with_mode(ContinuousMode::Vod),
             )
             .unwrap();
@@ -165,8 +167,7 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
                             callback.lock().unwrap().as_ref().unwrap().stop();
                         }
                     }));
-                let s = MultiTrackSession::new(inputs, sample::keys(provider.clone()), options)
-                    .unwrap();
+                let s = MultiTrackSession::new(inputs, provider.clone(), options).unwrap();
                 let h = s.handle();
                 *holder.lock().unwrap() = Some(h.clone());
                 for (name, case) in [("main", video), ("en", audio), ("ja", audio)] {
@@ -269,7 +270,7 @@ async fn verify_failures(provider: Arc<dyn KeyProvider>) {
             id("main"),
             TrackMetadata::default(),
         )),
-        sample::keys(provider),
+        provider,
         ContinuousOptions::default(),
     )
     .unwrap();
@@ -409,12 +410,8 @@ async fn cross_product(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Value>
                                     ));
                                 }
                             }
-                            let session = MultiTrackSession::new(
-                                inputs,
-                                sample::keys(provider.clone()),
-                                opts,
-                            )
-                            .unwrap();
+                            let session =
+                                MultiTrackSession::new(inputs, provider.clone(), opts).unwrap();
                             let h = session.handle();
                             for (input, case) in [("main", video), ("en", audio), ("ja", audio)] {
                                 let mut text = case.playlist.to_owned();
@@ -622,8 +619,7 @@ async fn split_rotations(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Valu
                         MediaTime::new(6000, 1000).unwrap(),
                     ));
                 }
-                let session =
-                    MultiTrackSession::new(inputs, sample::keys(provider.clone()), opts).unwrap();
+                let session = MultiTrackSession::new(inputs, provider.clone(), opts).unwrap();
                 let h = session.handle();
                 let audio_text = audio.playlist.replace(
                     "#EXT-X-ENDLIST",

@@ -1,5 +1,5 @@
 //! Export keyed output APIs, optionally with external audio, for media regressions.
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,

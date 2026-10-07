@@ -3,12 +3,12 @@
 The additive `prepare_hls_timeline` entry supports finite clear/AES-128/sample-encrypted
 presentation ranges, epoch mapping, explicit gap policies and decodable split
 outputs. Legacy prepared/keyed entry points and checkpoint schema v1 retain
-their original behavior. See the [release record](release-0.7.0.md).
+their original behavior.
 
 ## Entry point
 
 ```rust,no_run
-use hls_transmux::{
+use hls_engine::legacy::{
     crypto::key::KeySession, KeyedInputs, MediaTime, PresentationRange,
     TimelinePrepareOptions, TimelineResult, prepare_hls_timeline,
 };
@@ -102,7 +102,7 @@ requests and failure before sink acquisition, including ambiguous clocks and
 unrepresentable gaps. Near ranges stop once their tail access point is known;
 far ranges still scan the prefix for clock and access-point evidence. See
 [measured reads, allocation and latency](benchmarks.md). Open-input latency and
-incremental playlist acceptance belong to v0.9.
+incremental playlist acceptance use Engine sessions.
 
 The finite combination matrix now additionally covers encrypted ranges across
 three clock-reset epochs with distinct MAP/media keys and MAP redeclarations;
@@ -113,7 +113,7 @@ cancellation at three checkpoints during native finalization of that output.
 The last cases verify completed reports, preservation of existing destinations,
 and temporary-file cleanup.
 
-The v0.8 sample path resolves protection and awaits keys before codec checks,
+The sample-encryption path resolves protection and awaits keys before codec checks,
 keyframe detection and NAL normalization. Replay identity includes scheme, KID,
 IV, pattern and subsamples alongside original layout/timing. fMP4 and AAC samples
 retain their lengths and declared clear bytes. TS AVC may shrink only when removing
@@ -132,34 +132,15 @@ changed key cannot silently alter an accepted output. Packed AAC stays internal.
   planning-state peaks, full-range and long-GOP success under a fixed budget,
   allocation totals and first-write latency, plus oversized-window rejection. The same
   cases execute in the runtime suite; see [measurements](benchmarks.md).
-- `python3 scripts/verify_sdk.py /path/to/hls-downloader` — downstream native/browser timeline
-  integration verification using the real SDK host in an isolated copy.
 - `python3 scripts/verify_runtime.py --browser` — native, actual Node WASM and real
   Chrome compare timeline output hashes, reports and lossless time transport.
 
 The fixed key in `examples/timeline_export.rs` is exclusively a synthetic fixture
 key, not an application key-management implementation.
 
-Local verification and exact commands are recorded in
-[release-0.7.0.md](release-0.7.0.md). Tests cover TS wrap and half-period rejection,
+CI checks cover TS wrap and half-period rejection,
 reset-after-wrap anchors, TS gap tails, same-config MAP redeclaration, ambiguous
 dual-input resets and explicit anchors, PDT calendar/rounding, cancellation/drop
 in all three read stages, keys and output leases, blocked writes/flushes and
 native finalization. Publication checks execute the timeline tests and examples
 from an extracted crate. No registry publication is performed by those checks.
-
-## Downstream SDK integration
-
-`verify_sdk.py` copies the SDK adapters and fixtures, points the disposable
-manifests to this crate version, and first checks legacy prepared/resume and
-native/WASM adapter compatibility. It then installs the tracked integration
-extension from `tests/support/sdk` into that copy. The extension uses the SDK's
-actual `SourceHost`, key provider, callback leases and Promise I/O bridge.
-
-Nine cases compare native and real browser report JSON and canonical MP4 hashes:
-clear/AES ranges, clear/AES dual input, clock reset, gap collapse, gap splitting,
-preserved fragmented gaps and codec-change splitting. Output Promise completion
-is awaited. `target/sdk-compat/evidence.json` records the SDK revision and upstream
-source digest. The SDK checkout and locks are unchanged; the extension is an
-upstream integration fixture, and SDK product rollout is a separate downstream
-release activity.

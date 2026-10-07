@@ -1,5 +1,5 @@
 #![cfg(feature = "default-source")]
-use hls_transmux::{ByteRange, HttpRequestPolicy, ReqwestSource, Source, SourceLocation};
+use hls_engine::legacy::{ByteRange, HttpRequestPolicy, ReqwestSource, Source, SourceLocation};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -81,7 +81,7 @@ async fn read(
     server: &Server,
     concurrency: usize,
     range: Option<&ByteRange>,
-) -> hls_transmux::Result<Vec<u8>> {
+) -> hls_engine::legacy::Result<Vec<u8>> {
     if concurrency > 1 {
         let SourceLocation::Url(mut url) = server.location.clone() else {
             unreachable!()
@@ -227,7 +227,7 @@ async fn malformed_range_and_permanent_status_never_retry() {
 
 #[derive(Debug)]
 struct Cancel(tokio::sync::watch::Sender<bool>);
-impl hls_transmux::CancelToken for Cancel {
+impl hls_engine::legacy::CancelToken for Cancel {
     fn is_cancelled(&self) -> bool {
         *self.0.borrow()
     }
@@ -244,7 +244,7 @@ impl hls_transmux::CancelToken for Cancel {
 }
 #[tokio::test]
 async fn cancellation_interrupts_prefetch_retry_backoff() {
-    use hls_transmux::{
+    use hls_engine::legacy::{
         Error, HlsInput, OutputFormat, TransmuxOptions, transmux_hls_to_writer_async,
     };
     let server = start_server(

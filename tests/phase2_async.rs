@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hls_transmux::{
+use hls_engine::legacy::{
     HlsInput, TrackType, TransmuxOptions, VariantSelection, transmux_hls_to_mp4_async,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

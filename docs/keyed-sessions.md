@@ -5,7 +5,7 @@ probe, timeline, track selection, mux and output core as `prepare_hls`. The old
 entry points, options, error enums and checkpoint schemas remain available.
 
 ```rust,no_run
-use hls_transmux::{
+use hls_engine::legacy::{
     KeyedInput, KeyedInputs, KeyedPrepareOptions, KeyedSessionResult,
     Source, prepare_hls_with_keys,
     crypto::key::KeySession,
@@ -41,7 +41,7 @@ original-sequence IVs, encrypted MAPs, rotation at the same key URI, and METHOD=
 `with_audio` replaces primary embedded audio. Each input advances independently;
 sequence numbers are not used to align the two timelines. Open/EVENT playlists,
 gaps, discontinuities and mid-input container changes remain rejected by this entry;
-use timeline sessions for those policies. The v0.8 [sample profile](sample-encryption.md)
+use timeline sessions for those policies. The [sample profile](sample-encryption.md)
 adds TS SAMPLE-AES AVC/AAC-LC and fMP4 cenc/cbcs AVC/HEVC/AAC-LC.
 CBC and CTR do not authenticate the key or plaintext.
 
@@ -97,9 +97,8 @@ comparison (only MP4 creation/modification timestamps excluded), native file tes
 actual Node/Chrome WASM with asynchronous providers and a non-Send short writer,
 and FFprobe packet/payload/timing plus FFmpeg decode/seek checks. This integration
 does not implement live, subtitles or multi-track selection.
-Run `python3 scripts/verify_sample_crypto.py --ffmpeg --ffmpeg-finalize` for the sample corpus.
 
-Run `python3 scripts/verify_keyed_decode.py` for the Issue #1 regression gate.
+Run `python3 scripts/verify_keyed_decode.py` to check B-frame presentation and audio tails.
 It generates local HEVC/AVC B-frame inputs with FFmpeg, encrypts complete TS/fMP4
 resources (including MAPs) with OpenSSL, and compares every decoded video/audio
 frame against the independent clear input across bytes, file and writer APIs.

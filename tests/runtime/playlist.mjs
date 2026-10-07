@@ -1,4 +1,4 @@
-import { parse, roundtrip, playlist_fixture_text } from '../../target/runtime/pkg/hls_transmux_runtime_tests.js';
+import { parse, roundtrip, playlist_fixture_text } from '../../target/runtime/pkg/hls_engine_runtime_tests.js';
 
 const check = (ok, message) => { if (!ok) throw new Error(message); };
 export async function verify() {

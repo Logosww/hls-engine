@@ -15,7 +15,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 mod bridge {
     use super::suite;
-    use hls_transmux::{crypto::key::*, *};
+    use hls_engine::legacy::{crypto::key::*, *};
     use std::{
         cell::RefCell,
         sync::{Arc, Weak},

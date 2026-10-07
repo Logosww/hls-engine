@@ -15,7 +15,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hls_transmux::{
+use hls_engine::legacy::{
     HlsInput, OutputFormat, ReqwestSource, SourceLocation, TransmuxOptions,
     transmux_hls_to_mp4_async,
 };

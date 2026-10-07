@@ -4,6 +4,10 @@ pub type ContinuousResult<T> = std::result::Result<T, ContinuousError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContinuousErrorKind {
+    AuthenticationFailed,
+    ResumeConflict,
+    ResumeCorruption,
+    ReplayRequired,
     InvalidSubtitle,
     UnsupportedSubtitleProfile,
     MissingSubtitleMapping,
@@ -32,6 +36,22 @@ pub enum ContinuousErrorKind {
     TimeOverflow,
     EmptyInput,
 }
+/// Structured causes retain their typed diagnostics and redacted Display policy.
+#[non_exhaustive]
+pub enum EngineCause<'a> {
+    Resource(&'a ResourceError),
+    Sample(&'a crate::crypto::sample::SampleError),
+    Media(&'a Error),
+}
+impl std::fmt::Debug for EngineCause<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resource(e) => f.debug_tuple("Resource").field(e).finish(),
+            Self::Sample(e) => f.debug_tuple("Sample").field(e).finish(),
+            Self::Media(_) => f.write_str("Media([REDACTED])"),
+        }
+    }
+}
 /// Redacted diagnostics. Inspect typed causes explicitly; they are never formatted here.
 pub struct ContinuousError {
     pub(super) kind: ContinuousErrorKind,
@@ -53,7 +73,38 @@ impl ContinuousError {
         self.kind
     }
     pub fn slot(&self) -> Option<&SegmentSlot> {
-        self.slot.as_ref()
+        self.slot
+            .as_ref()
+            .or_else(|| self.resource().map(|r| r.slot()))
+    }
+    pub fn resource(&self) -> Option<&crate::crypto::key::KeyResource> {
+        self.resource
+            .as_ref()
+            .and_then(|e| e.resource())
+            .or_else(|| self.sample.as_ref().map(|e| e.resource()))
+    }
+    pub fn input_id(&self) -> Option<&InputId> {
+        self.slot().map(|s| s.input_id())
+    }
+    pub fn generation(&self) -> Option<u64> {
+        self.slot().map(|s| s.generation())
+    }
+    pub fn epoch(&self) -> Option<u64> {
+        self.slot().map(|s| s.epoch())
+    }
+    /// Track ID in the encoded input resource, when supplied by sample decryption.
+    pub fn source_track_id(&self) -> Option<u32> {
+        self.sample.as_ref().and_then(|e| e.track_id())
+    }
+    pub fn sample_index(&self) -> Option<usize> {
+        self.sample.as_ref().and_then(|e| e.sample_index())
+    }
+    pub fn cause(&self) -> Option<EngineCause<'_>> {
+        self.resource
+            .as_deref()
+            .map(EngineCause::Resource)
+            .or_else(|| self.sample.as_deref().map(EngineCause::Sample))
+            .or_else(|| self.cause.as_deref().map(EngineCause::Media))
     }
     pub fn resource_error(&self) -> Option<&ResourceError> {
         self.resource.as_deref()
@@ -157,6 +208,28 @@ impl Default for ContinuousLimits {
     }
 }
 impl ContinuousLimits {
+    pub fn queued_descriptors(&self) -> usize {
+        self.descriptors
+    }
+    pub fn queued_metadata_bytes(&self) -> usize {
+        self.metadata
+    }
+    pub fn history_entries(&self) -> usize {
+        self.history
+    }
+    pub fn samples(&self) -> usize {
+        self.samples
+    }
+    pub fn sample_bytes(&self) -> usize {
+        self.sample_bytes
+    }
+    pub fn probe_segments(&self) -> usize {
+        self.probe
+    }
+    pub fn max_skew(&self) -> MediaTime {
+        self.skew
+    }
+
     pub fn with_queue(mut self, descriptors: usize, metadata_bytes: usize) -> Self {
         self.descriptors = descriptors;
         self.metadata = metadata_bytes;
@@ -216,6 +289,46 @@ impl Default for ContinuousOptions {
     }
 }
 impl ContinuousOptions {
+    pub fn mode(&self) -> ContinuousMode {
+        self.mode
+    }
+    pub fn limits(&self) -> &ContinuousLimits {
+        &self.limits
+    }
+    pub fn resources(&self) -> &ResourceOptions {
+        &self.resources
+    }
+    pub fn missing_segments(&self) -> MissingSegmentPolicy {
+        self.missing
+    }
+    pub fn gap_policy(&self) -> GapPolicy {
+        self.gaps
+    }
+    pub fn change_policy(&self) -> TimelineChangePolicy {
+        self.changes
+    }
+    pub fn tail_policy(&self) -> TailDurationPolicy {
+        self.tail
+    }
+    pub fn duration_limit(&self) -> Option<MediaTime> {
+        self.duration
+    }
+    pub fn range(&self) -> Option<PresentationRange> {
+        self.range
+    }
+    pub fn anchors(&self) -> &[ContinuousAnchor] {
+        &self.anchors
+    }
+    pub fn input_timeout(&self) -> std::time::Duration {
+        self.timeout
+    }
+
+    /// Opt in to HLS draft-22 GCM (also requires `experimental-gcm`).
+    pub fn with_experimental_gcm(mut self, enabled: bool) -> Self {
+        self.resources = self.resources.with_experimental_gcm(enabled);
+        self
+    }
+
     pub fn with_mode(mut self, mode: ContinuousMode) -> Self {
         self.mode = mode;
         self
@@ -305,6 +418,22 @@ pub struct ContinuousAnchor {
     pub(super) presentation: MediaTime,
 }
 impl ContinuousAnchor {
+    pub fn input_id(&self) -> &InputId {
+        &self.input
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn source_time(&self) -> MediaTime {
+        self.source
+    }
+    pub fn presentation_time(&self) -> MediaTime {
+        self.presentation
+    }
+
     pub fn new(
         input: InputId,
         generation: u64,
@@ -321,11 +450,16 @@ impl ContinuousAnchor {
         }
     }
 }
+#[derive(Clone)]
 pub struct ContinuousInput {
     pub(super) id: InputId,
     pub(super) source: Arc<dyn Source>,
 }
 impl ContinuousInput {
+    pub fn input_id(&self) -> &InputId {
+        &self.id
+    }
+
     pub fn new(id: InputId, source: Arc<dyn Source>) -> Self {
         Self { id, source }
     }
@@ -552,3 +686,39 @@ impl SnapshotAcceptance {
         self.duplicates
     }
 }
+
+use crate::state_codec::{state_enum, state_struct};
+state_enum!(ContinuousEndReason { 0 => Eof, 1 => Stop, 2 => DurationLimit });
+state_struct!(ContinuousInputProgress {
+    input,
+    discovered,
+    accepted,
+    downloaded,
+    decrypted,
+    committed,
+    watermark
+});
+state_struct!(ContinuousOutputReport {
+    index,
+    collected_bytes,
+    classic_index_samples,
+    media
+});
+state_struct!(ContinuousMapping {
+    input,
+    generation,
+    epoch,
+    track,
+    source,
+    presentation,
+    output,
+    output_start,
+    configuration,
+    pdt
+});
+state_struct!(ContinuousPeaks {
+    queued,
+    metadata,
+    samples,
+    sample_bytes
+});

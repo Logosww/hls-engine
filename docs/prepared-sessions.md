@@ -1,11 +1,11 @@
-# hls-transmux 0.5 prepared sessions / 双路接入
+# Prepared sessions / 双路接入
 
 The prepared API accepts **already selected media playlists**, not a master
 playlist or language preference. The SDK owns rendition discovery/defaults,
 subtitle parsing, HTTP policy, JS AbortSignal bridging and consumer close/abort.
 
 ```rust,no_run
-use hls_transmux::*;
+use hls_engine::legacy::*;
 
 # async fn run() -> SessionResult<()> {
 let inputs = HlsInputs::new(HlsInput::Url("https://cdn.test/video.m3u8".into()))
@@ -65,7 +65,7 @@ that shared origin; tracks are never independently zeroed. Conversion uses check
 integer arithmetic, rounding toward zero by less than one destination tick.
 Negative PTS/CTS remain legal even though output DTS must be nonnegative.
 
-Since 0.6.2, prepared fMP4 represents each track's initial decode offset with a
+Prepared fMP4 represents each track's initial decode offset with a
 leading empty edit and writes track-local `tfdt` values. Apply the edit to recover
 the shared movie clock; demuxed packet PTS/DTS and session reports retain the
 mapping above. This prevents file players from counting the initial offset twice

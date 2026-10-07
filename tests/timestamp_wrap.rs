@@ -1,6 +1,6 @@
 //! End-to-end TS wrap across segments and checkpoint recovery.
 #![cfg(not(target_arch = "wasm32"))]
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},

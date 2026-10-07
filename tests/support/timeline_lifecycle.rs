@@ -207,7 +207,7 @@ async fn cancel_and_drop_release_pending_output_leases() {
 
 #[tokio::test]
 async fn cancel_and_drop_abort_pending_key_resolution_once() {
-    use hls_transmux::crypto::key::*;
+    use hls_engine::legacy::crypto::key::*;
     struct PendingKey(Arc<Counts>);
     impl KeyProvider for PendingKey {
         fn resolve(&self, _: KeyRequest) -> KeyFuture<KeyResolution> {

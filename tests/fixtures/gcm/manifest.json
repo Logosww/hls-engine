@@ -1,0 +1,72 @@
+{
+  "license": "MIT",
+  "generator": "OpenSSL-backed AES-256-GCM with 16-byte IV; fixed synthetic fixtures",
+  "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "vectorClearHex": "484c532064726166742d323220757365732061207369787465656e2d627974652049562e",
+  "vectorSha256": "55758fea412f4a0705069eb258f5250a7eb1b409ff1e983d4e97bfee6b76cfe4",
+  "resources": [
+    {
+      "file": "resource-0.gcm",
+      "source": "media/ts_avc_regular/seg0.ts",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "sha256": "351d0d5bed0a833fdb8885a87f8fa54c8cc2b3137552f32afdfdb6a1f23f0956",
+      "clearSha256": "fb0201bbf7aa14dae95749359830f248eeae70ff82d7a83b331ccd44a9fb08be"
+    },
+    {
+      "file": "resource-1.gcm",
+      "source": "media/fmp4_avc_regular/init.fmp4",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "sha256": "d257a8a18a20299d7c105abcce62946de40a071ddd9b81b5548cb33d93be26ee",
+      "clearSha256": "a64cb8a894478b1dc5f75db2c096ac931e1d7b3e7ac5fec90bad93c4b9c1902d"
+    },
+    {
+      "file": "resource-2.gcm",
+      "source": "media/fmp4_avc_regular/seg0.m4s",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "sha256": "fa66758146ea317a3a996e87450bece4342d3f2ad9a87ffffaf2bda0e8eb903b",
+      "clearSha256": "9d59d22a29d50c8001c75eef4d16e49c86400c8b75d97e3e36b64cc983af8c57"
+    },
+    {
+      "file": "resource-3.gcm",
+      "source": "packed_aac/clear/seg0.bin",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "sha256": "343e2d3f0d58cb7b401d359b08fec48d386515836ccf839f2998e8cc9dc92993",
+      "clearSha256": "7fea523d878420f5736b0fdba75e767d192e31371c19fd4364a8f5e09d8cc183"
+    },
+    {
+      "file": "resource-4.gcm",
+      "source": "media/fmp4_avc_regular/seg1.m4s",
+      "keyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "sha256": "cc4ae01a48ce58199334c5c3819b2208fb84838fc80f7d4220ceec2a1053a3f0",
+      "clearSha256": "75f4693237561d1d49c8841d6f520310c529f381ccc6f77f8cb2b6dbc5e4ae7a"
+    },
+    {
+      "file": "resource-5.gcm",
+      "source": "media/fmp4_avc_regular/seg2.m4s",
+      "keyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "sha256": "96a4694ef3b6e7e73766bb68044aea859956d1ac0423ca9550e9419cb8fc2052",
+      "clearSha256": "4de272518eff9b4a848c4660116c690c4e3a79afa6dd60fbcd2442a630faa471"
+    },
+    {
+      "file": "resource-6.gcm",
+      "source": "sample_crypto/fmp4_aac_clear/init.mp4",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "sha256": "ce18bcb8deef3dc519071358358f170f77d91949b3c6ea9c0b2a21194d072305",
+      "clearSha256": "466384561b782c8768dedf6fd5b3f66b6d322cc120d04a28fcc5e45e1b74f34c"
+    },
+    {
+      "file": "resource-7.gcm",
+      "source": "sample_crypto/fmp4_aac_clear/seg1.m4s",
+      "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "sha256": "bc6a29f07713edf995a910a193736d3d4084e23ff220813aaeb2f8ec3ae3d850",
+      "clearSha256": "21e7d6430ee600a051f9ea4d7a5399f15299723a503192c0e199e232dd7788c4"
+    },
+    {
+      "file": "resource-8.gcm",
+      "source": "sample_crypto/fmp4_aac_clear/seg1.m4s",
+      "keyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "sha256": "605a2857e672b36ef849b1c4c681c968ba8df61b582975ed0ff89420d715efaf",
+      "clearSha256": "21e7d6430ee600a051f9ea4d7a5399f15299723a503192c0e199e232dd7788c4"
+    }
+  ]
+}

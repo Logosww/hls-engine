@@ -1,7 +1,7 @@
 #[path = "support/crypto_corpus.rs"]
 mod corpus;
 use futures_util::{FutureExt, task::noop_waker};
-use hls_transmux::{
+use hls_engine::legacy::{
     MemorySource, Source, SourceLocation, TextResource,
     crypto::{key::*, resource::*},
     parse_playlist_snapshot,
@@ -228,7 +228,7 @@ struct ControlledSource {
 impl Source for ControlledSource {
     fn create_session_with_options(
         &self,
-        options: &hls_transmux::SourceSessionOptions,
+        options: &hls_engine::legacy::SourceSessionOptions,
     ) -> Option<Arc<dyn Source>> {
         assert!(options.demand_driven());
         assert!(options.max_resource_bytes().is_some());
@@ -244,19 +244,19 @@ impl Source for ControlledSource {
     fn read_text<'a>(
         &'a self,
         _: &'a SourceLocation,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<TextResource>> + Send + 'a>> {
         unreachable!()
     }
     fn read_bytes<'a>(
         &'a self,
         _: &'a SourceLocation,
-        _: Option<&'a hls_transmux::ByteRange>,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+        _: Option<&'a hls_engine::legacy::ByteRange>,
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<Vec<u8>>> + Send + 'a>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
             match self.mode {
                 0 => futures_util::future::pending().await,
-                1 => Err(hls_transmux::Error::invalid("RAW-CREDENTIALS")),
+                1 => Err(hls_engine::legacy::Error::invalid("RAW-CREDENTIALS")),
                 _ => Ok(vec![0; 32]),
             }
         })
@@ -381,7 +381,7 @@ async fn native_file_limit_applies_before_loading_large_file_and_ranges_seek() {
     );
     let error = s
         .read(
-            Arc::new(hls_transmux::ReqwestSource::new()),
+            Arc::new(hls_engine::legacy::ReqwestSource::new()),
             ResourceRequest::media(&snapshot, 0).unwrap(),
         )
         .await
@@ -405,7 +405,7 @@ async fn native_file_limit_applies_before_loading_large_file_and_ranges_seek() {
     );
     let output = s
         .read(
-            Arc::new(hls_transmux::ReqwestSource::new()),
+            Arc::new(hls_engine::legacy::ReqwestSource::new()),
             ResourceRequest::media(&snapshot, 0).unwrap(),
         )
         .await
@@ -507,7 +507,7 @@ async fn http_announced_size_limit_keeps_typed_resource_failure() {
     );
     let result = s
         .read(
-            Arc::new(hls_transmux::ReqwestSource::new()),
+            Arc::new(hls_engine::legacy::ReqwestSource::new()),
             ResourceRequest::media(&snapshot, 0).unwrap(),
         )
         .await;

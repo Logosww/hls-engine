@@ -1,4 +1,4 @@
-import {run_multitrack, profile_multitrack} from '../../target/runtime/pkg/hls_transmux_runtime_tests.js';
+import {run_multitrack, profile_multitrack} from '../../target/runtime/pkg/hls_engine_runtime_tests.js';
 export async function verify(memory) {
   let calls=0;
   const before=memory.buffer.byteLength;
@@ -15,7 +15,7 @@ export async function verify(memory) {
   }
   const heap=()=>globalThis.process?.memoryUsage?.().heapUsed??globalThis.performance?.memory?.usedJSHeapSize??null;
   const measurements=[];
-  for(const count of [8,64,256]) {
+  for(const count of [64,512,4096]) {
     const wasmBytesBefore=memory.buffer.byteLength,jsHeapBefore=heap();
     const [row]=JSON.parse(await profile_multitrack(count));
     measurements.push({...row,wasmBytesBefore,wasmBytesAfter:memory.buffer.byteLength,jsHeapBefore,jsHeapAfter:heap()});

@@ -1,5 +1,5 @@
 [package]
-name = "hls-transmux-runtime-tests"
+name = "hls-engine-runtime-tests"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -8,10 +8,10 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-ffmpeg-finalize = ["hls-transmux/ffmpeg-finalize"]
+ffmpeg-finalize = ["hls-engine/ffmpeg-finalize"]
 
 [dependencies]
-hls-transmux = { path = "../..", default-features = false, features = ["serde"] }
+hls-engine = { path = "../..", default-features = false, features = ["serde", "experimental-gcm"] }
 futures = "=0.3.32"
 sha2 = "0.10"
 serde_json = "1"

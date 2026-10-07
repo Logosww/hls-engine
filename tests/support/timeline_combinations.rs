@@ -1,6 +1,6 @@
 use super::*;
 use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
-use hls_transmux::{crypto::key::*, playlist::*};
+use hls_engine::legacy::{crypto::key::*, playlist::*};
 
 // Synthetic test keys. Bind the selected key to the explicit IV so MAP and
 // media requests exercise distinct declarations, including after clock resets.

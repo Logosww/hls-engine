@@ -1,7 +1,7 @@
 //! Actual schema-v1 checkpoints/prefix emitted by v0.3.0 at commit 8cde2e3.
 #![cfg(all(feature = "serde", not(target_arch = "wasm32")))]
 mod common;
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{

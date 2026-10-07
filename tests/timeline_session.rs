@@ -1,4 +1,4 @@
-use hls_transmux::{crypto::resource::*, *};
+use hls_engine::legacy::{crypto::resource::*, *};
 use std::sync::Arc;
 #[allow(dead_code)]
 #[path = "support/keyed_corpus.rs"]
@@ -126,7 +126,7 @@ fn snapshot_input(text: &str, segments: &[(&str, &[u8])]) -> KeyedInputs {
     source_input(text, Arc::new(source))
 }
 fn source_input(text: &str, source: Arc<dyn Source>) -> KeyedInputs {
-    use hls_transmux::playlist::*;
+    use hls_engine::legacy::playlist::*;
     let snapshot = parse_playlist_snapshot(
         &TextResource {
             location: SourceLocation::Url(
@@ -317,7 +317,7 @@ async fn output_failure_does_not_emit_completion() {
 }
 #[test]
 fn old_capability_does_not_inherit_new_timeline_support() {
-    use hls_transmux::capabilities::*;
+    use hls_engine::legacy::capabilities::*;
     let input = KeyedInputCapability::new(
         KeyedContainer::TransportStream,
         KeyedEncryption::Clear,
@@ -659,7 +659,7 @@ async fn all_gap_and_outside_ranges_have_distinct_errors() {
 
 #[tokio::test]
 async fn explicit_anchor_must_agree_with_pdt_and_reference_existing_epoch() {
-    use hls_transmux::playlist::InputId;
+    use hls_engine::legacy::playlist::InputId;
     let input = || {
         snapshot_input(
             "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PROGRAM-DATE-TIME:2026-10-05T00:00:00Z\n#EXTINF:2,\na.ts\n#EXT-X-DISCONTINUITY\n#EXT-X-PROGRAM-DATE-TIME:2026-10-05T00:00:03Z\n#EXTINF:2,\nb.ts\n#EXT-X-ENDLIST\n",
@@ -757,7 +757,7 @@ async fn reread_rejects_changed_content_before_demux_or_output() {
 
 #[tokio::test]
 async fn cue_mapping_splits_gap_and_obeys_collapse_and_output_origins() {
-    use hls_transmux::playlist::InputId;
+    use hls_engine::legacy::playlist::InputId;
     let input = InputId::new("primary").unwrap();
     let keys = || suite::keys(Arc::new(suite::corpus::Provider));
     let preserved = prepare_hls_timeline(gap_input(), keys(), options())
@@ -1078,7 +1078,7 @@ async fn map_redeclaration_with_identical_configuration_keeps_one_output() {
 
 #[tokio::test]
 async fn external_audio_reset_requires_cross_input_evidence() {
-    use hls_transmux::playlist::*;
+    use hls_engine::legacy::playlist::*;
     let primary = || {
         snapshot_input(
             "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2,\nb.ts\n#EXT-X-ENDLIST\n",
@@ -1165,7 +1165,7 @@ async fn external_audio_reset_requires_cross_input_evidence() {
 
 #[tokio::test]
 async fn reset_after_wrap_does_not_inherit_the_previous_epoch_wrap_cycle() {
-    use hls_transmux::playlist::InputId;
+    use hls_engine::legacy::playlist::InputId;
     let fixture = include_bytes!("fixtures/media/ts_avc_video_only/seg0.ts");
     let first = clocks::shift_ts(fixture.to_vec(), (1 << 33) - 180_000);
     let text = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:2,\nb.ts\n#EXT-X-ENDLIST\n";

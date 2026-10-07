@@ -1502,3 +1502,17 @@ impl PreparedTransmux {
         Ok(self.report())
     }
 }
+
+impl crate::state_codec::StateCodec for MediaTime {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.ticks.put(out);
+        self.timescale.put(out);
+    }
+    fn get(r: &mut crate::state_codec::Reader<'_>) -> crate::state_codec::DecodeResult<Self> {
+        Self::new(
+            crate::state_codec::StateCodec::get(r)?,
+            crate::state_codec::StateCodec::get(r)?,
+        )
+        .map_err(|_| ())
+    }
+}

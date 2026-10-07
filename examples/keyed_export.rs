@@ -3,7 +3,7 @@
 #[path = "../tests/support/keyed_corpus.rs"]
 #[allow(dead_code)]
 mod suite;
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::{path::PathBuf, sync::Arc};
 fn main() {
     let directory = PathBuf::from(std::env::args().nth(1).expect("output directory"));

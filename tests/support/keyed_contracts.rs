@@ -1,4 +1,4 @@
-use hls_transmux::{capabilities::*, crypto::key::*, *};
+use hls_engine::legacy::{capabilities::*, crypto::key::*, *};
 use std::sync::{Arc, Mutex};
 #[path = "keyed_corpus.rs"]
 #[allow(dead_code)]

@@ -1,5 +1,5 @@
 //! Sample-path requested allocation and first-write measurements (not total RSS).
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::{
     pin::Pin,
     sync::Arc,
@@ -48,7 +48,9 @@ impl tokio::io::AsyncWrite for Sink {
         panic!("caller owns writer")
     }
 }
-pub async fn run(provider: Arc<dyn hls_transmux::crypto::key::KeyProvider>) -> serde_json::Value {
+pub async fn run(
+    provider: Arc<dyn hls_engine::legacy::crypto::key::KeyProvider>,
+) -> serde_json::Value {
     let mut rows = Vec::new();
     for name in ["fmp4_avc_cenc", "fmp4_hevc_cbcs", "ts_avc_sample"] {
         let inputs = KeyedInputs::new(crate::sample_corpus::input(name, "primary"));

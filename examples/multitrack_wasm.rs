@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 //! Small clear-fixture bridge. The bounded resource map belongs to this example;
 //! production hosts use a demand-driven Source/Promise bridge (see SDK tests).
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use std::{
     cell::RefCell,
     future::Future,

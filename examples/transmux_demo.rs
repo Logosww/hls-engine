@@ -21,18 +21,18 @@
 //!     --variant <v>     = variant selection: `highest`, `lowest`, or a numeric
 //!                         index (overrides positional variant-index).
 
-use hls_transmux::{
+use hls_engine::legacy::{
     FinalizeBackend, HlsInput, OutputFormat, TransmuxOptions, VariantSelection,
     transmux_hls_to_mp4_async,
 };
 #[cfg(feature = "default-source")]
 use {
-    hls_transmux::{ReqwestSource, SourceLocation},
+    hls_engine::legacy::{ReqwestSource, SourceLocation},
     std::sync::Arc,
 };
 
 #[tokio::main]
-async fn main() -> hls_transmux::Result<()> {
+async fn main() -> hls_engine::legacy::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // Parse flags that take a value: --concurrency <n>, --variant <v>.
@@ -44,16 +44,16 @@ async fn main() -> hls_transmux::Result<()> {
     let mut iter = args.iter().peekable();
     while let Some(arg) = iter.next() {
         if arg == "--concurrency" {
-            let n = iter
-                .next()
-                .ok_or_else(|| hls_transmux::Error::invalid("--concurrency requires a value"))?;
+            let n = iter.next().ok_or_else(|| {
+                hls_engine::legacy::Error::invalid("--concurrency requires a value")
+            })?;
             concurrency = n.parse().map_err(|_| {
-                hls_transmux::Error::invalid("--concurrency value must be a number")
+                hls_engine::legacy::Error::invalid("--concurrency value must be a number")
             })?;
         } else if arg == "--variant" {
             let v = iter
                 .next()
-                .ok_or_else(|| hls_transmux::Error::invalid("--variant requires a value"))?;
+                .ok_or_else(|| hls_engine::legacy::Error::invalid("--variant requires a value"))?;
             variant_flag = Some(v.clone());
         } else {
             remaining.push(arg);
@@ -94,7 +94,7 @@ async fn main() -> hls_transmux::Result<()> {
         eprintln!(
             "    cargo run --example transmux_demo -- https://example.com/master.m3u8 out.mp4 --variant highest --concurrency 8"
         );
-        return Err(hls_transmux::Error::unsupported(
+        return Err(hls_engine::legacy::Error::unsupported(
             "missing required <playlist-url-or-path> argument",
         ));
     };
@@ -116,7 +116,7 @@ async fn main() -> hls_transmux::Result<()> {
             "highest" => VariantSelection::HighestBandwidth,
             "lowest" => VariantSelection::LowestBandwidth,
             s => VariantSelection::Index(s.parse().map_err(|_| {
-                hls_transmux::Error::invalid(
+                hls_engine::legacy::Error::invalid(
                     "--variant must be `highest`, `lowest`, or a numeric index",
                 )
             })?),
@@ -167,7 +167,7 @@ async fn main() -> hls_transmux::Result<()> {
         let source = ReqwestSource::with_concurrency(concurrency);
         let location = SourceLocation::Url(
             url::Url::parse(&url)
-                .map_err(|e| hls_transmux::Error::invalid(format!("invalid URL: {e}")))?,
+                .map_err(|e| hls_engine::legacy::Error::invalid(format!("invalid URL: {e}")))?,
         );
         HlsInput::custom(Arc::new(source), location)
     } else if is_http {

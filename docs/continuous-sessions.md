@@ -1,4 +1,4 @@
-# Continuous sessions (v0.9)
+# Continuous sessions
 
 `ContinuousSession` accepts selected typed Live/EVENT or VOD snapshots while its
 caller polls an output future. It starts writing after bounded media probing;
@@ -8,7 +8,7 @@ The core owns reconciliation, decryption, presentation time, backpressure and mu
 The additive API preserves the finite prepared/timeline APIs, their public struct
 literals, error matches, and `with_audio()` replacement semantics. It does not
 provide a persistent checkpoint. Complete-resource AES-128, TS AVC/AAC-LC
-SAMPLE-AES, and fMP4 AVC/HEVC/AAC-LC cenc/cbcs reuse the v0.8 crypto profiles.
+SAMPLE-AES, and fMP4 AVC/HEVC/AAC-LC cenc/cbcs reuse the supported sample-encryption profiles.
 Clear TS/fMP4 support the existing AVC/HEVC/AAC-LC tracks. Track selection is fixed:
 a single input, or a primary plus one selected replacement audio input.
 
@@ -35,7 +35,7 @@ unless the runner is also being polled.
   revision strings, non-Send Promise writer, explicit cancellation and bounded
   fixture resources. Production streaming sources should use a demand-driven
   `Source`, as exercised by the SDK harness.
-- [Node example test](../scripts/test_continuous_wasm.mjs): delayed WritableStream
+- [Node example test](https://github.com/Logosww/hls-engine/blob/main/scripts/test_continuous_wasm.mjs): delayed WritableStream
   writes, stop, and caller-owned close after the core has flushed.
 
 Run the native example with `cargo run --example continuous_demo -- input.m3u8
@@ -170,5 +170,6 @@ Serde writes wide integer fields as decimal strings, including values above 2^53
 Use `capabilities::query_continuous_capability(ContinuousCapabilityQuery)` with
 input, output, memory capacity and host waiter constraints. Admission and media
 validation remain runtime requirements; this is not an unconditional `live=true`.
-No LL-HLS partial segments, multi-audio, subtitles, Packed AAC, GCM or new durable
-resume are added. See the [v0.9 verification record](release-0.9.0.md).
+This compatibility entry is single-input. Use the root Engine API for selected
+multi-track, Packed AAC, experimental GCM and native durable recovery. LL-HLS
+partial segments remain unsupported.

@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hls_transmux::{
+use hls_engine::legacy::{
     HlsInput, MemorySource, OutputFormat, SourceLocation, TransmuxOptions,
     transmux_hls_to_mp4_bytes, transmux_hls_to_writer_async,
 };
@@ -49,10 +49,10 @@ fn parse_segment_uris(playlist_text: &str) -> Vec<String> {
 ///
 /// In a browser, this step would use `fetch()` to load the playlist and
 /// each segment, then hand the bytes to `MemorySource`.
-fn prefetch_from_disk(playlist_path: &Path) -> hls_transmux::Result<(String, MemorySource)> {
+fn prefetch_from_disk(playlist_path: &Path) -> hls_engine::legacy::Result<(String, MemorySource)> {
     // Read playlist text.
     let playlist_text = std::fs::read_to_string(playlist_path).map_err(|e| {
-        hls_transmux::Error::invalid(format!(
+        hls_engine::legacy::Error::invalid(format!(
             "failed to read playlist '{}': {e}",
             playlist_path.display()
         ))
@@ -69,7 +69,7 @@ fn prefetch_from_disk(playlist_path: &Path) -> hls_transmux::Result<(String, Mem
     for uri in &segment_uris {
         let segment_path = base_dir.join(uri);
         let segment_bytes = std::fs::read(&segment_path).map_err(|e| {
-            hls_transmux::Error::invalid(format!(
+            hls_engine::legacy::Error::invalid(format!(
                 "failed to read segment '{}': {e}",
                 segment_path.display()
             ))
@@ -87,11 +87,11 @@ fn prefetch_from_disk(playlist_path: &Path) -> hls_transmux::Result<(String, Mem
 }
 
 #[tokio::main]
-async fn main() -> hls_transmux::Result<()> {
+async fn main() -> hls_engine::legacy::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let playlist_path = args.first().ok_or_else(|| {
-        hls_transmux::Error::unsupported(
+        hls_engine::legacy::Error::unsupported(
             "usage: cargo run --example wasm_demo -- <playlist.m3u8> [output.mp4]",
         )
     })?;
@@ -143,7 +143,7 @@ async fn main() -> hls_transmux::Result<()> {
 
     // Write classic MP4 to disk.
     std::fs::write(&output_path, &mp4_bytes).map_err(|e| {
-        hls_transmux::Error::invalid(format!("failed to write output '{}': {e}", output_path))
+        hls_engine::legacy::Error::invalid(format!("failed to write output '{}': {e}", output_path))
     })?;
     println!("  → wrote classic MP4 to: {output_path}");
     println!();
@@ -168,7 +168,10 @@ async fn main() -> hls_transmux::Result<()> {
 
     let fmp4_path = format!("{}.fmp4", output_path);
     std::fs::write(&fmp4_path, &fmp4_buf).map_err(|e| {
-        hls_transmux::Error::invalid(format!("failed to write fmp4 output '{}': {e}", fmp4_path))
+        hls_engine::legacy::Error::invalid(format!(
+            "failed to write fmp4 output '{}': {e}",
+            fmp4_path
+        ))
     })?;
     println!("  → wrote fragmented MP4 to: {fmp4_path}");
     println!();

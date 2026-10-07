@@ -1,4 +1,4 @@
-import { run_keys as run_suite, inspect } from '../../target/runtime/pkg/hls_transmux_runtime_tests.js';
+import { run_keys as run_suite, inspect } from '../../target/runtime/pkg/hls_engine_runtime_tests.js';
 const check = (ok, message) => { if (!ok) throw new Error(message); };
 export async function verify() {
   const calls = new Map(), aborts = new Map(), controllers = new Map(), pending = new Set();

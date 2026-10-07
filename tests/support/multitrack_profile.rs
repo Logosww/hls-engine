@@ -1,5 +1,5 @@
 use super::sample_corpus as sample;
-use hls_transmux::{playlist::*, *};
+use hls_engine::legacy::{playlist::*, *};
 use std::{
     cell::Cell,
     pin::Pin,
@@ -49,7 +49,7 @@ impl tokio::io::AsyncWrite for Sink {
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn run() -> serde_json::Value {
-    serde_json::json!({"fragmented":run_counts(&[8,64,256]).await,"classic":run_counts_inner(&[8,64,256],true).await})
+    serde_json::json!({"fragmented":run_counts(&[64,512,4096]).await,"classic":run_counts_inner(&[64,512,4096],true).await})
 }
 pub async fn run_counts(counts: &[u64]) -> serde_json::Value {
     run_counts_inner(counts, false).await
@@ -219,8 +219,9 @@ fn snapshot(id: &InputId, start: u64, segments: u64, revision: u64) -> PlaylistS
         let nanos = (start + i) * 94 * 1024 * 1_000_000_000 / 48000;
         let seconds = nanos / 1_000_000_000;
         text.push_str(&format!(
-            "#EXT-X-PROGRAM-DATE-TIME:2026-10-06T00:{:02}:{:02}.{:09}Z\n#EXTINF:2.005333333,\nmedia\n",
-            seconds / 60,
+            "#EXT-X-PROGRAM-DATE-TIME:2026-10-06T{:02}:{:02}:{:02}.{:09}Z\n#EXTINF:2.005333333,\nmedia\n",
+            seconds / 3600,
+            seconds / 60 % 60,
             seconds % 60,
             nanos%1_000_000_000
         ));

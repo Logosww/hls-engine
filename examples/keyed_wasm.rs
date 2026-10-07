@@ -1,6 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 //! Host supplies bounded resource buffers and asynchronous key resolution; no HTTP credentials enter reports.
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 struct Clock(std::sync::atomic::AtomicU64);

@@ -50,6 +50,9 @@ pub(super) struct State {
     pub metadata: usize,
     pub peaks: ContinuousPeaks,
     pub completed: VecDeque<ContinuousOutputReport>,
+    // Publication wins cancellation, but a fallible checkpoint callback still
+    // determines the terminal result. Do not expose Completed before it returns.
+    pub published: bool,
 }
 pub(super) struct Shared {
     pub inner: std::sync::Mutex<State>,
@@ -116,7 +119,7 @@ impl ContinuousHandle {
         snapshot: &PlaylistSnapshot,
     ) -> ContinuousResult<SnapshotAcceptance> {
         snapshot
-            .validate_continuous()
+            .validate_engine(self.shared.options.resources.experimental_gcm())
             .map_err(|_| fail(ContinuousErrorKind::UnsupportedPlaylist))?;
         if snapshot.context().input_id() != input {
             return Err(fail(ContinuousErrorKind::UnknownInput));
@@ -361,7 +364,7 @@ impl ContinuousHandle {
     }
     pub(super) fn drain(&self, reason: ContinuousEndReason) {
         let mut state = self.shared.inner.lock().unwrap();
-        if !state.state.terminal() && state.reason.is_none() {
+        if !state.state.terminal() && !state.published && state.reason.is_none() {
             state.reason = Some(reason);
             state.paused = false;
             state.state = ContinuousState::Draining;
@@ -375,7 +378,7 @@ impl ContinuousHandle {
     }
     pub fn cancel(&self) {
         let state = self.shared.inner.lock().unwrap();
-        if !state.state.terminal() {
+        if !state.state.terminal() && !state.published {
             self.shared.signal.mark_cancelled();
         }
         drop(state);

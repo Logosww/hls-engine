@@ -1,4 +1,4 @@
-use hls_transmux::{playlist::*, *};
+use hls_engine::legacy::{playlist::*, *};
 use std::{future::Future, pin::Pin, sync::Arc};
 #[allow(dead_code)]
 #[path = "support/sample_crypto.rs"]
@@ -399,7 +399,7 @@ async fn native_classic_preserves_all_tracks_and_metadata() {
 
 #[test]
 fn capability_queries_keep_legacy_restrictions_and_reject_unverified_players() {
-    use hls_transmux::capabilities::*;
+    use hls_engine::legacy::capabilities::*;
     let packed = KeyedInputCapability::new(
         KeyedContainer::PackedAac,
         KeyedEncryption::SampleAes,
@@ -448,6 +448,9 @@ fn capability_queries_keep_legacy_restrictions_and_reject_unverified_players() {
     ] {
         let decision = query_multitrack_capability(&query.clone().with_playback(target));
         assert!(!decision.supported());
+        assert!(decision.container_supported());
+        assert!(decision.container_rejections().is_empty());
+        assert!(!decision.playback_supported());
         assert_eq!(decision.playback_rejection(), Some(reason));
     }
     assert!(
@@ -907,7 +910,7 @@ async fn pending_cue_admission_wakes_on_independent_end_and_cancel() {
 
 #[test]
 fn classic_known_decode_gaps_use_native_edits() {
-    use hls_transmux::capabilities::*;
+    use hls_engine::legacy::capabilities::*;
     let input = KeyedInputCapability::new(
         KeyedContainer::FragmentedMp4,
         KeyedEncryption::Clear,

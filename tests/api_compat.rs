@@ -1,5 +1,5 @@
 //! Explicit v0.4.0 public literals and exhaustive matches must still compile.
-use hls_transmux::*;
+use hls_engine::legacy::*;
 #[test]
 fn v040_public_interface_remains_source_compatible() {
     let options = TransmuxOptions {

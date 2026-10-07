@@ -83,6 +83,8 @@ pub(crate) struct EncodedPacket {
 /// Unified demux output shared by the MPEG-TS and ISOBMFF demuxers.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DemuxOutput {
+    pub resource_digest: Option<[u8; 32]>,
+    pub map_digest: Option<[u8; 32]>,
     pub packed_anchor: Option<u64>,
     pub packets: Vec<EncodedPacket>,
     pub video_timescale: Option<u32>,
@@ -97,4 +99,75 @@ pub(crate) struct DemuxOutput {
     pub audio_specific_config: Option<Vec<u8>>,
     pub sample_rate: Option<u32>,
     pub channel_count: Option<u8>,
+}
+
+use crate::state_codec::{state_enum, state_struct};
+state_enum!(TrackType { 0 => Video, 1 => Audio });
+state_enum!(Codec { 0 => Avc, 1 => Aac, 2 => Hevc });
+state_enum!(StreamKind { 0 => Avc, 1 => Aac, 2 => Hevc });
+state_struct!(TrackInfo {
+    track_type,
+    codec,
+    timescale,
+    duration,
+    sample_count,
+    width,
+    height,
+    sample_rate,
+    channel_count
+});
+state_struct!(TransmuxReport {
+    segment_count,
+    tracks,
+    duration,
+    duration_timescale,
+    bytes_written
+});
+state_struct!(PacketTiming {
+    edit_offset,
+    timescale,
+    dts,
+    pts,
+    duration
+});
+
+impl crate::state_codec::StateCodec for DemuxOutput {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.resource_digest.put(out);
+        self.map_digest.put(out);
+        self.packed_anchor.put(out);
+        self.video_timescale.put(out);
+        self.audio_timescale.put(out);
+        self.saw_video.put(out);
+        self.saw_audio.put(out);
+        self.vps.put(out);
+        self.sps.put(out);
+        self.pps.put(out);
+        self.width.put(out);
+        self.height.put(out);
+        self.audio_specific_config.put(out);
+        self.sample_rate.put(out);
+        self.channel_count.put(out);
+    }
+    fn get(r: &mut crate::state_codec::Reader<'_>) -> crate::state_codec::DecodeResult<Self> {
+        use crate::state_codec::StateCodec;
+        Ok(Self {
+            resource_digest: StateCodec::get(r)?,
+            map_digest: StateCodec::get(r)?,
+            packets: vec![],
+            packed_anchor: StateCodec::get(r)?,
+            video_timescale: StateCodec::get(r)?,
+            audio_timescale: StateCodec::get(r)?,
+            saw_video: StateCodec::get(r)?,
+            saw_audio: StateCodec::get(r)?,
+            vps: StateCodec::get(r)?,
+            sps: StateCodec::get(r)?,
+            pps: StateCodec::get(r)?,
+            width: StateCodec::get(r)?,
+            height: StateCodec::get(r)?,
+            audio_specific_config: StateCodec::get(r)?,
+            sample_rate: StateCodec::get(r)?,
+            channel_count: StateCodec::get(r)?,
+        })
+    }
 }

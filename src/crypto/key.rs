@@ -41,12 +41,21 @@ pub trait KeyClock: ProviderBounds {
     fn now(&self) -> u64;
 }
 
-/// Owned AES-128 bytes. No Clone or serialization; the last shared owner wipes this buffer.
+/// Owned AES key bytes. No Clone or serialization; the last shared owner wipes this buffer.
 pub struct SecretKey(Zeroizing<Vec<u8>>);
 impl SecretKey {
     pub fn new(bytes: Vec<u8>) -> Result<Self, KeyError> {
         let bytes = Zeroizing::new(bytes);
         if bytes.len() != 16 {
+            return Err(KeyError::new(KeyErrorKind::InvalidKey));
+        }
+        Ok(Self(bytes))
+    }
+    /// Construct the 32-byte key for the fixed experimental GCM profile.
+    #[cfg(feature = "experimental-gcm")]
+    pub fn aes256(bytes: Vec<u8>) -> Result<Self, KeyError> {
+        let bytes = Zeroizing::new(bytes);
+        if bytes.len() != 32 {
             return Err(KeyError::new(KeyErrorKind::InvalidKey));
         }
         Ok(Self(bytes))
@@ -96,6 +105,7 @@ impl fmt::Debug for ProviderFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeyErrorKind {
+    ResumeConflict,
     Cancelled,
     BudgetExceeded,
     Unsupported,
@@ -326,6 +336,13 @@ impl AvailableKey {
             kid: None,
         }
     }
+    #[cfg(feature = "experimental-gcm")]
+    pub fn aes256_gcm(secret: SecretKey) -> Self {
+        Self {
+            method: EncryptionMethod::Aes256Gcm,
+            ..Self::aes128(secret)
+        }
+    }
     pub fn sample_aes(secret: SecretKey) -> Self {
         Self {
             method: EncryptionMethod::SampleAes,
@@ -514,6 +531,7 @@ struct State {
 }
 /// One owner per operation and authorization scope. Dropping it cancels every waiter.
 pub struct KeySession {
+    gcm: bool,
     state: Arc<Mutex<State>>,
     provider: Arc<dyn KeyProvider>,
     clock: Arc<dyn KeyClock>,
@@ -522,6 +540,9 @@ pub struct KeySession {
     options: KeySessionOptions,
 }
 impl KeySession {
+    pub(crate) fn enable_gcm(&mut self, enabled: bool) {
+        self.gcm = enabled;
+    }
     // Keep shared ownership identical across targets; WASM providers may own JS values.
     #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new(
@@ -546,6 +567,7 @@ impl KeySession {
             return Err(KeyError::new(KeyErrorKind::InvalidOptions));
         }
         Ok(Self {
+            gcm: false,
             state: Arc::new(Mutex::new(State {
                 cancelled: false,
                 next_revision: 0,
@@ -602,7 +624,11 @@ impl KeySession {
         if !matches!(
             first.method(),
             EncryptionMethod::Aes128 | EncryptionMethod::SampleAes | EncryptionMethod::SampleAesCtr
-        ) {
+        ) && !(cfg!(feature = "experimental-gcm")
+            && self.gcm
+            && *first.method() == EncryptionMethod::Aes256Gcm
+            && first.explicit_iv().is_none())
+        {
             return Err(KeyError::new(KeyErrorKind::Unsupported));
         }
         let mut selected = Vec::new();
@@ -723,6 +749,16 @@ impl KeySession {
                         });
                     }
                     KeyResolution::Available(value) => {
+                        let expected_len = if *reference.method() == EncryptionMethod::Aes256Gcm {
+                            32
+                        } else {
+                            16
+                        };
+                        if value.secret.expose().len() != expected_len {
+                            return Err(
+                                KeyError::new(KeyErrorKind::InvalidKey).for_reference(&reference)
+                            );
+                        }
                         if value.method != *reference.method() || value.kid != request.resource.kid
                         {
                             return Err(KeyError::new(KeyErrorKind::ConflictingMetadata)

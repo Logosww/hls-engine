@@ -10,12 +10,6 @@
 *.swo
 .DS_Store
 
-docs/planning/*
-!docs/planning/v0.8.0-implementation-plan.md
-!docs/planning/v0.9.0-implementation-plan.md
-!docs/planning/v0.10.0-implementation-plan.md
-!docs/planning/roadmap.md
-
 # Former standalone WASM example build artifacts
 /examples/keyed-wasm/
 

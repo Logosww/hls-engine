@@ -1,5 +1,5 @@
 //! cargo run --example prepared_demo -- primary.m3u8 audio.m3u8 output.mp4 [bytes|fragmented|native|ffmpeg]
-use hls_transmux::*;
+use hls_engine::legacy::*;
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();

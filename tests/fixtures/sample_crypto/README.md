@@ -14,17 +14,11 @@ inline-only and auxiliary-only variants and a fragment-local seig KID override.
 The variant keeps Shaka ciphertext intact and uses the same public key for the
 second test KID; it is not evidence of an independent encryption implementation.
 
-```
-python3 scripts/verify_sample_crypto.py
-python3 scripts/verify_sample_crypto.py --generate --packager /path/to/packager
-python3 scripts/verify_sample_crypto.py --ffmpeg --ffmpeg-finalize
-```
-
-Regeneration changes fixtures only with `--generate`. Verification and decode
-write evidence under `target/sample-output`. No network, packager, or FFmpeg is
-required to run the retained Rust tests. Runtime tests embed this same corpus.
+The retained Rust tests verify fixture hashes and compare clear/encrypted output.
+Runtime tests embed the same corpus; they need no network or packager. Generation
+commands and public test parameters are preserved in `manifest.json`.
 
 Additional 1/2-byte AVC-prefix multirun fixtures use OpenSSL CTR over the existing
-independent clear corpus, via `scripts/sample_fixture_layout.py`. The manifest
+independent clear corpus using OpenSSL. The manifest
 records source hashes, OpenSSL version and commands. Prefix bytes are encrypted,
 so these also verify that normalization waits for decryption.

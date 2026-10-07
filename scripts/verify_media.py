@@ -27,7 +27,7 @@ def packets(path):
     # FFprobe's HLS demuxer repeats the first AAC packet for audio-only TS.
     # Probe the physical continuous TS bytes instead, preserving all timestamps.
     if path.suffix == '.m3u8' and '#EXT-X-MAP' not in path.read_text():
-        with tempfile.TemporaryDirectory(prefix='hls-transmux-reference-') as directory:
+        with tempfile.TemporaryDirectory(prefix='hls-engine-reference-') as directory:
             joined = pathlib.Path(directory) / 'reference.ts'
             with joined.open('wb') as sink:
                 for uri in path.read_text().splitlines():
@@ -418,7 +418,7 @@ def main():
     run('cargo', 'build', '--offline', '--example', 'transmux_demo')
     demo = str(ROOT / 'target/debug/examples/transmux_demo')
     passed = rejected = 0
-    with tempfile.TemporaryDirectory(prefix='hls-transmux-media-') as directory:
+    with tempfile.TemporaryDirectory(prefix='hls-engine-media-') as directory:
         folder = pathlib.Path(directory)
         for case in manifest['cases']:
             name = case['name']

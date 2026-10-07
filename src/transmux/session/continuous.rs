@@ -11,6 +11,8 @@ mod subtitles;
 pub use multitrack::*;
 pub use subtitles::*;
 mod output;
+mod recovery;
+pub use recovery::*;
 #[cfg(feature = "serde")]
 mod wire;
 pub use control::ContinuousHandle;
@@ -22,6 +24,7 @@ pub use output::ContinuousFileProvider;
 pub use output::{ContinuousOutputRequest, ContinuousWriterProvider};
 
 pub struct ContinuousSession {
+    recovery: Option<EngineCheckpoint>,
     keep_embedded: bool,
     multi: Option<Arc<std::sync::Mutex<multitrack::MultiState>>>,
     shared: Arc<Shared>,
@@ -69,6 +72,7 @@ impl ContinuousSession {
                 metadata: 0,
                 peaks: ContinuousPeaks::default(),
                 completed: VecDeque::new(),
+                published: false,
             }),
             signal: Arc::new(Signal::new()),
             options: control_options,
@@ -90,6 +94,7 @@ impl ContinuousSession {
             })
             .collect();
         Ok(Self {
+            recovery: None,
             keep_embedded,
             multi: None,
             shared,
@@ -263,10 +268,19 @@ fn output_error(cause: Error) -> ContinuousError {
     e
 }
 fn resource_error(resource: ResourceError) -> ContinuousError {
-    let kind = if resource.kind() == ResourceErrorKind::Cancelled {
-        ContinuousErrorKind::Cancelled
-    } else {
-        ContinuousErrorKind::Resource
+    if resource
+        .key_error()
+        .is_some_and(|e| e.kind() == crate::crypto::key::KeyErrorKind::ResumeConflict)
+    {
+        return ContinuousError {
+            resource: Some(Box::new(resource)),
+            ..fail(ContinuousErrorKind::ResumeConflict)
+        };
+    }
+    let kind = match resource.kind() {
+        ResourceErrorKind::Cancelled => ContinuousErrorKind::Cancelled,
+        ResourceErrorKind::AuthenticationFailed => ContinuousErrorKind::AuthenticationFailed,
+        _ => ContinuousErrorKind::Resource,
     };
     ContinuousError {
         resource: Some(Box::new(resource)),

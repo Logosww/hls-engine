@@ -115,7 +115,9 @@ fn resource_failure(error: &ResourceError) -> KeyedFailure {
             KeyErrorKind::Unavailable => F::ProviderUnavailable,
             KeyErrorKind::Provider => F::ProviderFailure,
             KeyErrorKind::InvalidKey => F::InvalidKey,
-            KeyErrorKind::ConflictingMetadata => F::InvalidEncryptionMetadata,
+            KeyErrorKind::ResumeConflict | KeyErrorKind::ConflictingMetadata => {
+                F::InvalidEncryptionMetadata
+            }
             KeyErrorKind::Expired => F::KeyExpired,
             KeyErrorKind::InvalidOptions | KeyErrorKind::RevisionOverflow => F::InvalidInputs,
         };
@@ -133,7 +135,9 @@ fn resource_failure(error: &ResourceError) -> KeyedFailure {
         | ResourceErrorKind::BudgetExceeded
         | ResourceErrorKind::CounterOverflow => F::BudgetExceeded,
         ResourceErrorKind::Read => F::Read,
-        ResourceErrorKind::InvalidCiphertextLength | ResourceErrorKind::Decrypt => F::Decrypt,
+        ResourceErrorKind::InvalidCiphertextLength
+        | ResourceErrorKind::Decrypt
+        | ResourceErrorKind::AuthenticationFailed => F::Decrypt,
         ResourceErrorKind::MediaValidation => {
             if matches!(error.raw_cause(), Some(Error::Unsupported(_))) {
                 F::UnsupportedCombination

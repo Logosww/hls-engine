@@ -1,4 +1,4 @@
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::sync::Arc;
 #[path = "support/keyed_corpus.rs"]
 mod suite;
@@ -71,7 +71,7 @@ async fn native_files_match_clear_outputs() {
 }
 
 use futures_util::{FutureExt, task::noop_waker};
-use hls_transmux::crypto::{key::*, resource::*};
+use hls_engine::legacy::crypto::{key::*, resource::*};
 use std::{
     future::Future,
     pin::Pin,

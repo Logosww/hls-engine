@@ -635,3 +635,101 @@ mod wire {
         }
     }
 }
+
+use crate::state_codec::{Reader, StateCodec};
+type CueReplayIdentity = ([u8; 32], Option<(MediaTime, MediaTime)>);
+fn cue_identity(cue: &SubtitleCue) -> [u8; 32] {
+    let mut bytes = Vec::new();
+    cue.generation.put(&mut bytes);
+    cue.epoch.put(&mut bytes);
+    cue.start.put(&mut bytes);
+    cue.end.put(&mut bytes);
+    cue.identifier.put(&mut bytes);
+    cue.payload.put(&mut bytes);
+    cue.settings.put(&mut bytes);
+    crate::resume::digest(&bytes)
+}
+impl MultiState {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn save_subtitles(&self, out: &mut Vec<u8>) {
+        self.subtitles.len().put(out);
+        for lane in &self.subtitles {
+            lane.track.put(out);
+            lane.sealed.put(out);
+            lane.mapping.put(out);
+            lane.ended.put(out);
+            lane.output.put(out);
+            lane.queue
+                .iter()
+                .map(|q| (cue_identity(&q.cue), q.mapped))
+                .collect::<Vec<_>>()
+                .put(out);
+        }
+    }
+    pub(super) fn restore_subtitles(
+        &mut self,
+        r: &mut Reader<'_>,
+        terminal: bool,
+    ) -> ContinuousResult<()> {
+        let bad = || fail(ContinuousErrorKind::ResumeCorruption);
+        let n = usize::get(r).map_err(|_| bad())?;
+        if n != self.subtitles.len() {
+            return Err(fail(ContinuousErrorKind::ResumeConflict));
+        }
+        for lane in &mut self.subtitles {
+            if <OutputTrackId as StateCodec>::get(r).map_err(|_| bad())? != lane.track {
+                return Err(bad());
+            }
+            lane.sealed = StateCodec::get(r).map_err(|_| bad())?;
+            lane.mapping = StateCodec::get(r).map_err(|_| bad())?;
+            lane.ended |= bool::get(r).map_err(|_| bad())?;
+            lane.output = u64::get(r).map_err(|_| bad())?;
+            let required: Vec<CueReplayIdentity> = StateCodec::get(r).map_err(|_| bad())?;
+            if terminal {
+                lane.queue.clear();
+                continue;
+            }
+            let mut queue = Vec::new();
+            for (digest, mapped) in required {
+                let index = lane
+                    .queue
+                    .iter()
+                    .position(|q| cue_identity(&q.cue) == digest)
+                    .ok_or_else(|| fail(ContinuousErrorKind::ReplayRequired))?;
+                let mut cue = lane.queue.remove(index);
+                cue.mapped = mapped;
+                queue.push(cue);
+            }
+            // Replayed cues already wholly sealed must not re-enter the output.
+            for mut cue in lane.queue.drain(..) {
+                if lane
+                    .mapping
+                    .is_some_and(|(g, e, _)| (cue.cue.generation, cue.cue.epoch) < (g, e))
+                {
+                    // A still-active cue from an earlier epoch is present in
+                    // `required`; all other earlier cues have already drained.
+                    continue;
+                }
+                if let Some((g, e, shift)) = lane.mapping
+                    && (cue.cue.generation, cue.cue.epoch) == (g, e)
+                {
+                    let start = add(cue.cue.start, shift)?;
+                    let end = add(cue.cue.end, shift)?;
+                    if let Some(sealed) = lane.sealed {
+                        if !cmp(end, sealed)?.is_gt() {
+                            continue;
+                        }
+                        cue.mapped = Some((max(start, sealed)?, end));
+                    } else {
+                        cue.mapped = Some((start, end));
+                    }
+                }
+                queue.push(cue);
+            }
+            lane.queue = queue;
+        }
+        self.subtitle_history_truncated = true;
+        self.subtitle_reports.clear();
+        Ok(())
+    }
+}

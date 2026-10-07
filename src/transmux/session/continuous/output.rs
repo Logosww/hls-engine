@@ -35,6 +35,26 @@ pub trait ContinuousFileProvider {
     ) -> Pin<Box<dyn Future<Output = ContinuousResult<std::path::PathBuf>> + 'a>>;
 }
 trait Target {
+    fn recoverable(&self) -> bool {
+        false
+    }
+    fn begin<'a>(
+        &'a mut self,
+        _session: &'a ContinuousSession,
+        _engine: &'a Engine,
+    ) -> Pin<Box<dyn Future<Output = ContinuousResult<()>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn checkpoint<'a>(
+        &'a mut self,
+        _writer: &'a mut Self::Writer,
+        _session: &'a ContinuousSession,
+        _engine: &'a Engine,
+        _sequence: u32,
+        _sealing: bool,
+    ) -> Pin<Box<dyn Future<Output = ContinuousResult<()>> + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
     type Writer: AsyncWrite + Unpin;
     fn acquire<'a>(
         &'a mut self,
@@ -173,9 +193,17 @@ impl ContinuousSession {
         }
     }
     async fn run<T: Target>(&self, target: &mut T) -> ContinuousResult<ContinuousReport> {
+        if self.recovery.is_some() && !target.recoverable() {
+            return Err(fail(ContinuousErrorKind::InvalidOptions));
+        }
         self.emit(ContinuousEvent::State(ContinuousState::Preparing))?;
         self.pause_boundary().await?;
-        let mut engine = match Engine::prepare(self).await {
+        let prepared = if let Some(checkpoint) = &self.recovery {
+            Engine::restore(self, &checkpoint.state).await
+        } else {
+            Engine::prepare(self).await
+        };
+        let mut engine = match prepared {
             Ok(engine) => engine,
             Err(error) if error.kind() == ContinuousErrorKind::EmptyInput => {
                 let state = self.shared.inner.lock().unwrap();
@@ -198,7 +226,14 @@ impl ContinuousSession {
             }
             Err(error) => return Err(error),
         };
-        if self.options.range.is_some() {
+        // Cross-check checkpoint metadata before acquire is allowed to truncate
+        // an uncommitted tail. A valid envelope alone cannot establish this.
+        if let Some(checkpoint) = &self.recovery
+            && (engine.output != checkpoint.output || engine.part_bytes != checkpoint.bytes)
+        {
+            return Err(fail(ContinuousErrorKind::ResumeCorruption));
+        }
+        if self.options.range.is_some() && self.recovery.is_none() {
             engine.seek(self).await?;
         }
         let request = |engine: &Engine| ContinuousOutputRequest {
@@ -223,15 +258,28 @@ impl ContinuousSession {
                 .collect(),
         };
         let (tracks, offsets) = engine.mux_tracks(self);
+        self.wait(target.begin(self, &engine)).await?;
         let mut writer = self.wait(target.acquire(request(&engine))).await?;
-        let mut mux = FragmentedMp4Muxer::new(tracks);
-        let header = mux
-            .write_header_with_offsets(&offsets)
-            .map_err(output_error)?;
-        self.write(&mut writer, &header).await?;
-        engine.bytes += header.len() as u64;
-        engine.part_bytes += header.len() as u64;
-        while let Some((input, mut batch)) = engine.next(self).await? {
+        let mut mux = if let Some(checkpoint) = &self.recovery
+            && checkpoint.bytes != 0
+        {
+            FragmentedMp4Muxer::new_with_sequence(tracks, checkpoint.sequence)
+        } else {
+            let mux = FragmentedMp4Muxer::new(tracks);
+            let header = mux
+                .write_header_with_offsets(&offsets)
+                .map_err(output_error)?;
+            self.write(&mut writer, &header).await?;
+            engine.bytes += header.len() as u64;
+            engine.part_bytes += header.len() as u64;
+            mux
+        };
+        let terminal = self.recovery.as_ref().is_some_and(|c| c.finalizing);
+        while let Some((input, mut batch)) = if terminal {
+            None
+        } else {
+            engine.next(self).await?
+        } {
             if batch.descriptor.gap() {
                 self.write(&mut writer, &[]).await?;
                 engine.gaps += 1;
@@ -245,9 +293,56 @@ impl ContinuousSession {
                     presentation_start: batch.shift,
                 })?;
                 self.commit(input, &batch.descriptor, engine.bytes)?;
+                self.wait(target.checkpoint(
+                    &mut writer,
+                    self,
+                    &engine,
+                    mux.next_sequence(),
+                    false,
+                ))
+                .await?;
                 continue;
             }
             if batch.changed {
+                if target.recoverable() {
+                    // Persist replay and publication intent before publishing the old
+                    // child. Then persist the next lease before creating its file.
+                    engine.replay_front(input, batch);
+                    self.wait(target.checkpoint(
+                        &mut writer,
+                        self,
+                        &engine,
+                        mux.next_sequence(),
+                        true,
+                    ))
+                    .await?;
+                    let mut old = engine.output_report();
+                    self.wait(target.finish(&mut writer, &mut old, false))
+                        .await?;
+                    engine.bytes = engine
+                        .bytes
+                        .checked_sub(engine.part_bytes)
+                        .and_then(|n| n.checked_add(old.media.bytes_written))
+                        .ok_or_else(|| fail(ContinuousErrorKind::TimeOverflow))?;
+                    self.record_output(&old);
+                    engine.outputs.push_back(old.clone());
+                    engine.retain_history(self);
+                    self.emit(ContinuousEvent::Output(old))?;
+                    batch = engine.take_front(input);
+                    engine.split(self, input, batch)?;
+                    let (tracks, offsets) = engine.mux_tracks(self);
+                    self.wait(target.checkpoint(&mut writer, self, &engine, 1, false))
+                        .await?;
+                    writer = self.wait(target.acquire(request(&engine))).await?;
+                    mux = FragmentedMp4Muxer::new(tracks);
+                    let header = mux
+                        .write_header_with_offsets(&offsets)
+                        .map_err(output_error)?;
+                    self.write(&mut writer, &header).await?;
+                    engine.bytes += header.len() as u64;
+                    engine.part_bytes += header.len() as u64;
+                    continue;
+                }
                 let previous = engine.output_report();
                 engine.split(self, input, batch)?;
                 let (tracks, offsets) = engine.mux_tracks(self);
@@ -300,6 +395,8 @@ impl ContinuousSession {
             engine.retain_history(self);
             engine.budget(self)?;
             self.commit(input, &batch.descriptor, engine.bytes)?;
+            self.wait(target.checkpoint(&mut writer, self, &engine, mux.next_sequence(), false))
+                .await?;
             if self
                 .options
                 .duration
@@ -327,6 +424,8 @@ impl ContinuousSession {
             }
         }
         self.state(ContinuousState::Finalizing)?;
+        self.wait(target.checkpoint(&mut writer, self, &engine, mux.next_sequence(), false))
+            .await?;
         // Validate fallible timeline arithmetic before a native publication boundary.
         let _ = engine.report(self)?;
         self.complete_output(target, &mut writer, &mut engine)
@@ -619,3 +718,7 @@ mod native {
         }
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "recovery_output.rs"]
+mod recovery_output;

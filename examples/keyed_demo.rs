@@ -2,7 +2,7 @@
 //! Key files are resolved from KEY URIs. HTTP/CDM authorization belongs to another provider.
 #[cfg(all(not(target_arch = "wasm32"), feature = "default-source"))]
 mod native {
-    use hls_transmux::{crypto::key::*, playlist::*, *};
+    use hls_engine::legacy::{crypto::key::*, playlist::*, *};
     use std::sync::Arc;
     use tokio::io::AsyncReadExt;
     struct Clock(std::time::Instant);

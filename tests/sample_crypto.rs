@@ -11,7 +11,7 @@ async fn external_packager_clear_samples_and_timelines_match() {
     );
 }
 
-use hls_transmux::{
+use hls_engine::legacy::{
     crypto::{key::*, resource::*, sample::*},
     *,
 };

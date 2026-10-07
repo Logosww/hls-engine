@@ -1,4 +1,4 @@
-use hls_transmux::{SourceLocation, TextResource, parse_playlist_snapshot, playlist::*};
+use hls_engine::legacy::{SourceLocation, TextResource, parse_playlist_snapshot, playlist::*};
 
 fn resource(content: &str) -> TextResource {
     TextResource {
@@ -480,7 +480,7 @@ fn serde_archive_is_lossless_and_rejects_numeric_or_forged_projections() {
 
 #[tokio::test]
 async fn prepared_api_keeps_rejecting_key_including_none_before_media_reads() {
-    use hls_transmux::{HlsInput, HlsInputs, MemorySource, PrepareOptions, prepare_hls};
+    use hls_engine::legacy::{HlsInput, HlsInputs, MemorySource, PrepareOptions, prepare_hls};
     use std::sync::Arc;
     for key in ["METHOD=NONE", "METHOD=AES-128,URI=\"k\""] {
         let text = vod(&format!("#EXT-X-KEY:{key}\n#EXTINF:1,\na"));
@@ -494,8 +494,11 @@ async fn prepared_api_keeps_rejecting_key_including_none_before_media_reads() {
             .await
             .err()
             .unwrap();
-        assert!(matches!(error.error(), hls_transmux::Error::Unsupported(_)));
-        assert_eq!(error.phase(), hls_transmux::SessionPhase::Playlist);
+        assert!(matches!(
+            error.error(),
+            hls_engine::legacy::Error::Unsupported(_)
+        ));
+        assert_eq!(error.phase(), hls_engine::legacy::SessionPhase::Playlist);
     }
 }
 
@@ -515,7 +518,7 @@ fn absolute_native_file_paths_are_not_provider_schemes() {
 
 #[tokio::test]
 async fn prepared_vod_without_endlist_remains_supported() {
-    use hls_transmux::{HlsInput, HlsInputs, MemorySource, PrepareOptions, prepare_hls};
+    use hls_engine::legacy::{HlsInput, HlsInputs, MemorySource, PrepareOptions, prepare_hls};
     use std::sync::Arc;
     let text = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\na.ts\n";
     assert_eq!(

@@ -231,6 +231,13 @@ pub struct PlaylistDuration {
     timescale: u32,
 }
 impl PlaylistDuration {
+    pub(crate) fn from_time(value: crate::MediaTime) -> crate::Result<Self> {
+        Ok(Self {
+            ticks: u64::try_from(value.ticks())
+                .map_err(|_| crate::Error::InvalidInput("negative gap duration".into()))?,
+            timescale: value.timescale(),
+        })
+    }
     pub fn ticks(&self) -> u64 {
         self.ticks
     }
@@ -443,6 +450,19 @@ pub enum ResourceComparison {
     NeedsReconciliation,
 }
 impl SegmentDescriptor {
+    pub(crate) fn recovery_gap(slot: SegmentSlot, duration: PlaylistDuration) -> Self {
+        Self {
+            slot,
+            location: ResourceLocation(SourceLocation::File("hls-engine-evicted".into())),
+            range: None,
+            duration,
+            program_date_time: None,
+            gap: true,
+            discontinuity: false,
+            map: None,
+            keys: KeyContext { candidates: vec![] },
+        }
+    }
     pub fn slot(&self) -> &SegmentSlot {
         &self.slot
     }
@@ -629,7 +649,7 @@ impl PlaylistSnapshot {
     /// Open-input manifest validation. Execution and incremental identity checks
     /// are performed by `ContinuousSession`; this does not change finite profiles.
     pub fn validate_continuous(&self) -> Result<(), PlaylistRejection> {
-        self.validate_media_profile(true, true)
+        self.validate_media_profile(true, true, false)
     }
     fn validate_finite_profile(
         &self,
@@ -645,12 +665,16 @@ impl PlaylistSnapshot {
         if self.0.segments.is_empty() {
             return Err(PlaylistRejection::Empty);
         }
-        self.validate_media_profile(timeline, samples)
+        self.validate_media_profile(timeline, samples, false)
+    }
+    pub(crate) fn validate_engine(&self, gcm: bool) -> Result<(), PlaylistRejection> {
+        self.validate_media_profile(true, true, gcm && cfg!(feature = "experimental-gcm"))
     }
     fn validate_media_profile(
         &self,
         timeline: bool,
         samples: bool,
+        gcm: bool,
     ) -> Result<(), PlaylistRejection> {
         let target = self
             .0
@@ -684,6 +708,8 @@ impl PlaylistSnapshot {
                     }
                     match first.method {
                         EncryptionMethod::Aes128 => {}
+                        EncryptionMethod::Aes256Gcm
+                            if gcm && keys.candidates.iter().all(|k| k.iv.is_none()) => {}
                         EncryptionMethod::SampleAes | EncryptionMethod::SampleAesCtr => {
                             if !samples {
                                 return Err(PlaylistRejection::SampleEncryption);
@@ -726,5 +752,103 @@ impl PlaylistSnapshot {
             }
         }
         Ok(())
+    }
+}
+
+impl crate::state_codec::StateCodec for InputId {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.0.put(out);
+    }
+    fn get(r: &mut crate::state_codec::Reader<'_>) -> crate::state_codec::DecodeResult<Self> {
+        Self::new(<String as crate::state_codec::StateCodec>::get(r)?).map_err(|_| ())
+    }
+}
+crate::state_codec::state_struct!(SegmentSlot {
+    input_id,
+    generation,
+    sequence,
+    epoch
+});
+
+impl KeyReference {
+    pub(crate) fn checkpoint_identity(&self) -> [u8; 32] {
+        use crate::state_codec::StateCodec;
+        let mut bytes = Vec::new();
+        self.method.as_str().to_owned().put(&mut bytes);
+        location_identity(&self.location).put(&mut bytes);
+        self.format.put(&mut bytes);
+        self.versions.put(&mut bytes);
+        self.iv.put(&mut bytes);
+        self.extensions.len().put(&mut bytes);
+        for (name, value) in &self.extensions {
+            name.put(&mut bytes);
+            value.put(&mut bytes);
+        }
+        crate::resume::digest(&bytes)
+    }
+}
+fn location_identity(location: &ResourceLocation) -> [u8; 32] {
+    let bytes = match location.location() {
+        SourceLocation::Url(u) => u.as_str().as_bytes(),
+        SourceLocation::File(p) => p.as_os_str().as_encoded_bytes(),
+    };
+    crate::resume::digest(bytes)
+}
+impl SegmentDescriptor {
+    pub(crate) fn checkpoint_identity(&self) -> [u8; 32] {
+        use crate::state_codec::StateCodec;
+        let mut bytes = Vec::new();
+        self.slot.put(&mut bytes);
+        location_identity(&self.location).put(&mut bytes);
+        self.range
+            .map(|r| (r.byte_range().offset, r.byte_range().length))
+            .put(&mut bytes);
+        self.duration.ticks.put(&mut bytes);
+        self.duration.timescale.put(&mut bytes);
+        self.program_date_time.put(&mut bytes);
+        self.gap.put(&mut bytes);
+        // Absolute epoch is already part of the slot. A rolling manifest can
+        // replace the leading discontinuity marker with DISCONTINUITY-SEQUENCE.
+        self.keys
+            .candidates
+            .iter()
+            .map(KeyReference::checkpoint_identity)
+            .collect::<Vec<_>>()
+            .put(&mut bytes);
+        self.map
+            .as_ref()
+            .map(|m| {
+                let mut b = Vec::new();
+                location_identity(&m.location).put(&mut b);
+                m.range
+                    .map(|r| (r.byte_range().offset, r.byte_range().length))
+                    .put(&mut b);
+                m.keys
+                    .candidates
+                    .iter()
+                    .map(KeyReference::checkpoint_identity)
+                    .collect::<Vec<_>>()
+                    .put(&mut b);
+                crate::resume::digest(&b)
+            })
+            .put(&mut bytes);
+        crate::resume::digest(&bytes)
+    }
+}
+
+impl crate::state_codec::StateCodec for PlaylistDuration {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.ticks.put(out);
+        self.timescale.put(out);
+    }
+    fn get(r: &mut crate::state_codec::Reader<'_>) -> crate::state_codec::DecodeResult<Self> {
+        let value = Self {
+            ticks: u64::get(r)?,
+            timescale: u32::get(r)?,
+        };
+        if value.timescale == 0 {
+            return Err(());
+        }
+        Ok(value)
     }
 }

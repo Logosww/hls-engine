@@ -1,5 +1,5 @@
 //! No JS bindings required: execute the actual wasm through scripts/test_wasm_session.mjs.
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::{
     future::Future,
     pin::Pin,

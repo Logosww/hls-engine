@@ -2,7 +2,7 @@
   "generator": "packager version v3.9.3-0a8ba4f-release",
   "generatorSha256": "b3049e743451aab5c2cd7b1316a4ce055682c41effe06a49e2e6c95a9243d351",
   "license": "Synthetic repository MIT media; Shaka Packager Apache-2.0 tool",
-  "nalWidthGenerator": "scripts/sample_fixture_layout.py with openssl enc -aes-128-ctr -nopad; 8-byte per-sample IV padded with eight zero counter bytes",
+  "nalWidthGenerator": "OpenSSL AES-128-CTR, 8-byte per-sample IV padded with eight zero counter bytes",
   "openssl": "LibreSSL 3.3.6",
   "key": "2b7e151628aed2a6abf7158809cf4f3c",
   "kid": "00112233445566778899aabbccddeeff",

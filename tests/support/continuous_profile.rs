@@ -1,5 +1,5 @@
 use super::sample_corpus as sample;
-use hls_transmux::{playlist::*, *};
+use hls_engine::legacy::{playlist::*, *};
 use std::{
     cell::Cell,
     pin::Pin,

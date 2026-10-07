@@ -99,7 +99,11 @@ pub enum CapabilityRequirement {
     CompatibleTimelineAndConfiguration,
     ProviderResolution,
     CompleteEncryptionBoundaries,
+    GcmDraft22Authentication,
     CallerOwnedWriterCompletion,
+    NativeCheckpointPersistence,
+    ReplayIdentityValidation,
+    StableKeyVersion,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyedInputCapability {
@@ -614,6 +618,7 @@ pub struct MultiTrackCapabilityQuery {
     capacity: Option<usize>,
     waiter: bool,
     resume: bool,
+    experimental_gcm: bool,
 }
 impl MultiTrackCapabilityQuery {
     pub fn new(
@@ -635,6 +640,7 @@ impl MultiTrackCapabilityQuery {
             capacity: None,
             waiter: false,
             resume: false,
+            experimental_gcm: false,
         }
     }
     pub fn with_audio(mut self, id: crate::playlist::InputId, input: KeyedInputCapability) -> Self {
@@ -676,6 +682,10 @@ impl MultiTrackCapabilityQuery {
         self.waiter = available;
         self
     }
+    pub fn with_experimental_gcm(mut self, enabled: bool) -> Self {
+        self.experimental_gcm = enabled;
+        self
+    }
     pub fn with_resume(mut self, value: bool) -> Self {
         self.resume = value;
         self
@@ -697,12 +707,25 @@ impl MultiTrackCapabilityRejection {
 #[derive(Debug, Clone)]
 pub struct MultiTrackCapabilityDecision {
     rejections: Vec<MultiTrackCapabilityRejection>,
+    container_rejections: Vec<MultiTrackCapabilityRejection>,
     requirements: Vec<CapabilityRequirement>,
     playback_rejection: Option<MultiTrackPlaybackRejection>,
 }
 impl MultiTrackCapabilityDecision {
     pub fn supported(&self) -> bool {
         self.rejections.is_empty()
+    }
+    /// Whether the engine can preserve the requested media in its output container,
+    /// independently of limitations in the requested player.
+    pub fn container_supported(&self) -> bool {
+        self.container_rejections.is_empty()
+    }
+    pub fn container_rejections(&self) -> &[MultiTrackCapabilityRejection] {
+        &self.container_rejections
+    }
+    /// Whether both engine output and the selected playback target support the request.
+    pub fn playback_supported(&self) -> bool {
+        self.container_supported() && self.playback_rejection.is_none()
     }
     pub fn rejections(&self) -> &[MultiTrackCapabilityRejection] {
         &self.rejections
@@ -721,11 +744,47 @@ pub fn query_multitrack_capability(
     use CapabilityDimension as D;
     let mut result = MultiTrackCapabilityDecision {
         rejections: vec![],
+        container_rejections: vec![],
         requirements: vec![],
         playback_rejection: None,
     };
+    let native_recovery = query.resume
+        && cfg!(not(target_arch = "wasm32"))
+        && matches!(
+            query.output,
+            KeyedOutput::FragmentedFile | KeyedOutput::Mp4File | KeyedOutput::NativeStreamingFile
+        );
+    if native_recovery {
+        result.requirements.extend([
+            CapabilityRequirement::NativeCheckpointPersistence,
+            CapabilityRequirement::ReplayIdentityValidation,
+        ]);
+        if query
+            .inputs
+            .iter()
+            .any(|(_, input)| input.encryption != KeyedEncryption::Clear)
+        {
+            result
+                .requirements
+                .push(CapabilityRequirement::StableKeyVersion);
+        }
+    }
     for (index, (id, input)) in query.inputs.iter().enumerate() {
         let mut selected = input.clone();
+        if selected.encryption == KeyedEncryption::Aes256Gcm
+            && query.experimental_gcm
+            && cfg!(feature = "experimental-gcm")
+        {
+            selected.encryption = KeyedEncryption::Aes128;
+            if !result
+                .requirements
+                .contains(&CapabilityRequirement::GcmDraft22Authentication)
+            {
+                result
+                    .requirements
+                    .push(CapabilityRequirement::GcmDraft22Authentication);
+            }
+        }
         if selected.container == KeyedContainer::PackedAac {
             selected.container = KeyedContainer::TransportStream;
             if selected.codecs != [KeyedCodec::AacLc] {
@@ -738,7 +797,7 @@ pub fn query_multitrack_capability(
         let q = KeyedCapabilityQuery::new(selected, query.output)
             .with_source_mode(query.mode)
             .with_range(query.range)
-            .with_resume(query.resume);
+            .with_resume(query.resume && !native_recovery);
         let q = ContinuousCapabilityQuery::new(TimelineCapabilityQuery::new(q))
             .with_host_waiter(query.waiter);
         let q = if let Some(capacity) = query.capacity {
@@ -792,6 +851,13 @@ pub fn query_multitrack_capability(
     }
     use MultiTrackPlayback as P;
     use MultiTrackPlaybackRejection as PR;
+    if query.subtitles && query.subtitle_profile != SubtitleProfile::WvttPlainText {
+        result.rejections.push(MultiTrackCapabilityRejection {
+            input: None,
+            dimension: D::Subtitles,
+        });
+    }
+    result.container_rejections = result.rejections.clone();
     let classic = matches!(
         query.output,
         KeyedOutput::Mp4Bytes | KeyedOutput::Mp4File | KeyedOutput::NativeStreamingFile
@@ -809,9 +875,7 @@ pub fn query_multitrack_capability(
         P::Iina if classic => Some(PR::ClassicEditTimeline),
         _ => None,
     };
-    if result.playback_rejection.is_some()
-        || (query.subtitles && query.subtitle_profile != SubtitleProfile::WvttPlainText)
-    {
+    if result.playback_rejection.is_some() {
         result.rejections.push(MultiTrackCapabilityRejection {
             input: None,
             dimension: if query.subtitles {

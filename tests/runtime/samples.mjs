@@ -1,4 +1,4 @@
-import { run_samples, profile_samples } from '../../target/runtime/pkg/hls_transmux_runtime_tests.js';
+import { run_samples, profile_samples } from '../../target/runtime/pkg/hls_engine_runtime_tests.js';
 export async function verify(memory) {
   let calls=0, kids=0;
   const before=memory.buffer.byteLength;

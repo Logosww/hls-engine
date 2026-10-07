@@ -17,7 +17,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 mod bridge {
     use super::suite;
-    use hls_transmux::crypto::key::*;
+    use hls_engine::legacy::crypto::key::*;
     use std::sync::Arc;
     use wasm_bindgen::prelude::*;
     struct Provider {

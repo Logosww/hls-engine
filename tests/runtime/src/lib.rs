@@ -2,6 +2,7 @@
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 pub mod continuous;
 pub mod contracts;
+pub mod engine_gcm;
 pub mod keys;
 pub mod multitrack;
 pub mod playlist;
@@ -17,6 +18,7 @@ pub fn native_report() -> serde_json::Value {
     }
     serde_json::json!({
         "playlist": json(playlist::fixture()),
+        "engine_gcm": json(engine_gcm::native_suite()),
         "keys": json(keys::native_suite()),
         "resources": json(resources::native_suite()),
         "prepared": json(prepared::native_suite()),

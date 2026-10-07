@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use hls_transmux::{
+use hls_engine::legacy::{
     HlsInput, OutputFormat, ReqwestSource, SourceLocation, TransmuxOptions, VariantSelection,
     transmux_hls_to_mp4_async,
 };
@@ -476,7 +476,7 @@ async fn shared_source_sessions_are_independent_sequentially_and_concurrently() 
         );
         async move {
             let mut bytes = Vec::new();
-            hls_transmux::transmux_hls_to_writer_async(
+            hls_engine::legacy::transmux_hls_to_writer_async(
                 input,
                 &mut bytes,
                 TransmuxOptions {
@@ -502,7 +502,7 @@ async fn shared_source_sessions_are_independent_sequentially_and_concurrently() 
 
 #[derive(Debug)]
 struct SessionCancel(tokio::sync::watch::Sender<bool>);
-impl hls_transmux::CancelToken for SessionCancel {
+impl hls_engine::legacy::CancelToken for SessionCancel {
     fn is_cancelled(&self) -> bool {
         *self.0.borrow()
     }
@@ -524,7 +524,7 @@ async fn cancelling_one_shared_source_session_does_not_cancel_another() {
     let trigger = token.clone();
     let left = async {
         let mut bytes = Vec::new();
-        hls_transmux::transmux_hls_to_writer_async(
+        hls_engine::legacy::transmux_hls_to_writer_async(
             HlsInput::custom(source.clone(), location.clone()),
             &mut bytes,
             TransmuxOptions {
@@ -542,7 +542,7 @@ async fn cancelling_one_shared_source_session_does_not_cancel_another() {
     };
     let right = async {
         let mut bytes = Vec::new();
-        hls_transmux::transmux_hls_to_writer_async(
+        hls_engine::legacy::transmux_hls_to_writer_async(
             HlsInput::custom(source.clone(), location.clone()),
             &mut bytes,
             TransmuxOptions {
@@ -556,6 +556,9 @@ async fn cancelling_one_shared_source_session_does_not_cancel_another() {
         tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(left, right) })
             .await
             .unwrap();
-    assert!(matches!(cancelled, Err(hls_transmux::Error::Cancelled)));
+    assert!(matches!(
+        cancelled,
+        Err(hls_engine::legacy::Error::Cancelled)
+    ));
     assert_eq!(complete.unwrap().segment_count, 6);
 }

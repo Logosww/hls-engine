@@ -1,4 +1,4 @@
-import { run_resources as run_suite, cancel_resource as cancel_active } from '../../target/runtime/pkg/hls_transmux_runtime_tests.js';
+import { run_resources as run_suite, cancel_resource as cancel_active } from '../../target/runtime/pkg/hls_engine_runtime_tests.js';
 export async function verify() {
   const keyA = Uint8Array.from('2b7e151628aed2a6abf7158809cf4f3c'.match(/../g), x => parseInt(x,16));
   const keyB = Uint8Array.from('603deb1015ca71be2b73aef0857d7781'.match(/../g), x => parseInt(x,16));

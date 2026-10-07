@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hls_transmux::{
+use hls_engine::legacy::{
     ByteRange, CancelToken, Error, HlsInput, OutputFormat, Source, SourceLocation, TextResource,
     TransmuxOptions, TransmuxProgress, TransmuxResumeState, transmux_hls_to_mp4_async,
 };
@@ -56,7 +56,7 @@ impl Source for MockSource {
     fn read_text<'a>(
         &'a self,
         _location: &'a SourceLocation,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<TextResource>> + Send + 'a>> {
         let text = self.playlist.clone();
         Box::pin(async move {
             Ok(TextResource {
@@ -70,7 +70,7 @@ impl Source for MockSource {
         &'a self,
         location: &'a SourceLocation,
         _range: Option<&'a ByteRange>,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<Vec<u8>>> + Send + 'a>> {
         let bytes = common::continuous_ts(
             (*self.segment_bytes).clone(),
             common::segment_index(location),
@@ -167,7 +167,7 @@ async fn progress_fires_per_segment() {
     let opts = TransmuxOptions {
         output_format: OutputFormat::FragmentedMp4,
         on_progress: Some(Arc::new(move |p: TransmuxProgress| {
-            if p.stage != hls_transmux::TransmuxStage::Completed {
+            if p.stage != hls_engine::legacy::TransmuxStage::Completed {
                 events_cb.lock().unwrap().push(p);
             }
         })),
@@ -321,7 +321,7 @@ async fn check_resume_produces_identical_output(write_mfra: bool) {
         write_mfra,
         resume: Some(r),
         on_progress: Some(Arc::new(move |p: TransmuxProgress| {
-            if p.stage != hls_transmux::TransmuxStage::Completed {
+            if p.stage != hls_engine::legacy::TransmuxStage::Completed {
                 re_cb.lock().unwrap().push(p);
             }
         })),
@@ -472,7 +472,7 @@ async fn paused_file_with_count(
         TransmuxOptions {
             output_format: format,
             cancel: Some(token),
-            checkpoint_durability: hls_transmux::CheckpointDurability::SyncAll,
+            checkpoint_durability: hls_engine::legacy::CheckpointDurability::SyncAll,
             on_progress: Some(Arc::new(move |p| {
                 *snapshot.lock().unwrap() = Some(p.resume);
                 if p.completed_segments == after {
@@ -606,14 +606,14 @@ impl Source for NoNetwork {
     fn read_text<'a>(
         &'a self,
         _: &'a SourceLocation,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<TextResource>> + Send + 'a>> {
         panic!("finalize must not read playlist")
     }
     fn read_bytes<'a>(
         &'a self,
         _: &'a SourceLocation,
         _: Option<&'a ByteRange>,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<Vec<u8>>> + Send + 'a>> {
         panic!("finalize must not read media")
     }
 }
@@ -622,7 +622,10 @@ impl Source for NoNetwork {
 async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
     let (output, checkpoint) =
         paused_file_with_count("finalize-retry", OutputFormat::StreamingMp4, 1, 1).await;
-    assert_eq!(checkpoint.stage, hls_transmux::TransmuxStage::Finalizing);
+    assert_eq!(
+        checkpoint.stage,
+        hls_engine::legacy::TransmuxStage::Finalizing
+    );
     let partial = output.with_file_name("output.partial.mp4");
     let original = std::fs::read(&partial).unwrap();
     // An existing complete target remains unchanged on validation failure.
@@ -630,7 +633,7 @@ async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
     let mut invalid = checkpoint.clone();
     invalid.init_digest[0] ^= 1;
     assert!(
-        hls_transmux::finalize_partial_mp4_async(
+        hls_engine::legacy::finalize_partial_mp4_async(
             &partial,
             &output,
             invalid,
@@ -648,7 +651,7 @@ async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
     let blocked = output.with_extension("directory");
     std::fs::create_dir_all(&blocked).unwrap();
     assert!(
-        hls_transmux::finalize_partial_mp4_async(
+        hls_engine::legacy::finalize_partial_mp4_async(
             &partial,
             &blocked,
             checkpoint.clone(),
@@ -685,7 +688,7 @@ async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
     assert!(!partial.exists());
     assert_eq!(
         events.lock().unwrap().last().unwrap().stage,
-        hls_transmux::TransmuxStage::Completed
+        hls_engine::legacy::TransmuxStage::Completed
     );
     let reference = output.with_extension("reference.mp4");
     transmux_hls_to_mp4_async(mock_input(1), &reference, TransmuxOptions::default())
@@ -699,7 +702,7 @@ async fn finalize_failure_preserves_partial_and_retry_uses_zero_network() {
     assert_eq!(actual, expected);
     // Repeated stale finalize checkpoints cannot damage the completed target.
     assert!(
-        hls_transmux::finalize_partial_mp4_async(
+        hls_engine::legacy::finalize_partial_mp4_async(
             &partial,
             &output,
             checkpoint,
@@ -785,7 +788,7 @@ async fn finalize_cpu_cancellation_waits_for_worker_and_preserves_target() {
     std::fs::write(&output, b"complete target").unwrap();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        hls_transmux::finalize_partial_mp4_async(
+        hls_engine::legacy::finalize_partial_mp4_async(
             &partial,
             &output,
             checkpoint,
@@ -813,7 +816,7 @@ impl Source for FailSecond {
     fn read_text<'a>(
         &'a self,
         location: &'a SourceLocation,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<TextResource>> + Send + 'a>> {
         Box::pin(async move {
             Ok(TextResource {
                 content: playlist_with(3),
@@ -825,7 +828,7 @@ impl Source for FailSecond {
         &'a self,
         _: &'a SourceLocation,
         _: Option<&'a ByteRange>,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<Vec<u8>>> + Send + 'a>> {
         Box::pin(async move {
             if self.reads.fetch_add(1, Ordering::SeqCst) == 2 {
                 Err(Error::Http("injected network failure".into()))
@@ -890,9 +893,15 @@ async fn streaming_completed_progress_matches_final_output() {
     .unwrap();
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].stage, hls_transmux::TransmuxStage::Finalizing);
+    assert_eq!(
+        events[0].stage,
+        hls_engine::legacy::TransmuxStage::Finalizing
+    );
     let completed = &events[1];
-    assert_eq!(completed.stage, hls_transmux::TransmuxStage::Completed);
+    assert_eq!(
+        completed.stage,
+        hls_engine::legacy::TransmuxStage::Completed
+    );
     assert_eq!(completed.bytes_written, report.bytes_written);
     assert_eq!(completed.resume.bytes_written, report.bytes_written);
     assert_eq!(completed.resume.duration_ms, report.duration);

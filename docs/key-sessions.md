@@ -1,12 +1,12 @@
-# Key sessions (v0.6)
+# Key sessions
 
-`crypto::key` provides operation-scoped AES key resolution over P1 playlist
+`crypto::key` provides operation-scoped AES key resolution over typed playlist
 metadata. It performs no HTTP, decryption or media execution.
 Legacy `Source`, prepared sessions, errors and checkpoint serialization are unchanged.
 
 ```rust,no_run
 use std::sync::Arc;
-use hls_transmux::{crypto::key::*, playlist::SegmentDescriptor};
+use hls_engine::legacy::{crypto::key::*, playlist::SegmentDescriptor};
 
 async fn resolve(
     provider: Arc<dyn KeyProvider>,
@@ -87,7 +87,7 @@ slot, including shared requests and cache hits until delivered. Admission return
 existing work finishes. There is no hidden or unbounded admission queue. Successful,
 failed, dropped and cancelled waiters release their slots. `stats()` counts current
 core-owned entries, not host Promise allocations or caller-held resolved keys.
-Resource byte caps and media pipeline backpressure belong to P3/P4, not this module.
+Resource byte caps and media pipeline backpressure belong to resource and writer modules, not this module.
 
 ## Cancellation and sensitive data
 

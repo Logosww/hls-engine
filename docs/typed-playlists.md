@@ -1,4 +1,4 @@
-# Typed playlist metadata (v0.6)
+# Typed playlist metadata
 
 `parse_playlist_snapshot` parses a selected media playlist without fetching any
 resource. The immutable result preserves encryption and timeline metadata for
@@ -9,8 +9,8 @@ For execution, combine [key sessions](key-sessions.md) with the
 keys or decrypt resources.
 
 ```rust
-use hls_transmux::{parse_playlist_snapshot, SourceLocation, TextResource};
-use hls_transmux::playlist::{InputId, PlaylistContext};
+use hls_engine::legacy::{parse_playlist_snapshot, SourceLocation, TextResource};
+use hls_engine::legacy::playlist::{InputId, PlaylistContext};
 
 let resource = TextResource {
     content: "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.5,\na.ts\n#EXT-X-ENDLIST\n".into(),
@@ -77,8 +77,8 @@ ordinal. Reuse a revision only when reparsing that snapshot. They are finite
 snapshot identities, not rolling-window key epochs. When both descriptors carry
 KEY/MAP declarations from different revisions, comparison returns
 `NeedsReconciliation`. The caller must not treat this as a duplicate or accepted
-update. Cross-snapshot alignment and incremental admission remain v0.9 work;
-P1 provides no update/commit API. A resource identity describes metadata, not
+update. Engine handles reconcile incremental snapshots at admission. A resource
+identity describes metadata, not
 content integrity or a resolved provider key version.
 
 ## Serde / JavaScript transport
@@ -92,7 +92,7 @@ fields even when their values would fit JavaScript's exact integer range.
 
 ```rust,ignore
 let archive = serde_json::to_string(&snapshot)?;
-let restored: hls_transmux::playlist::PlaylistSnapshot = serde_json::from_str(&archive)?;
+let restored: hls_engine::legacy::playlist::PlaylistSnapshot = serde_json::from_str(&archive)?;
 assert_eq!(restored, snapshot);
 ```
 
@@ -122,8 +122,8 @@ impose a total memory limit; bound manifest size before parsing untrusted input.
 
 `cargo test --features serde --test typed_playlist` covers metadata, numeric and
 range boundaries, key/MAP transitions, preflight, identity and archive validation.
-The normal compatibility suite includes existing prepared and released v0.3/v0.4
-checkpoint tests plus exhaustive v0.5 role/phase matches.
+CI covers prepared-session compatibility, retained checkpoint fixtures and
+exhaustive role/phase matching.
 
 [Runtime regression](runtime-tests.md) compares native Rust with
 actual WASM in Node, performs a JavaScript JSON round trip, and rejects numeric

@@ -844,11 +844,11 @@ async fn finalize_impl(
 /// # Example
 ///
 /// ```no_run
-/// use hls_transmux::{
+/// use hls_engine::legacy::{
 ///     HlsInput, OutputFormat, TransmuxOptions, transmux_hls_to_writer_async,
 /// };
 ///
-/// # async fn run() -> hls_transmux::Result<()> {
+/// # async fn run() -> hls_engine::legacy::Result<()> {
 /// let mut buf: Vec<u8> = Vec::new();
 /// let report = transmux_hls_to_writer_async(
 ///     HlsInput::Path("playlist.m3u8".into()),
@@ -976,11 +976,11 @@ async fn transmux_writer_impl<W: tokio::io::AsyncWrite + Send + Unpin>(
 /// # Example
 ///
 /// ```no_run
-/// use hls_transmux::{
+/// use hls_engine::legacy::{
 ///     HlsInput, TransmuxOptions, transmux_hls_to_mp4_bytes,
 /// };
 ///
-/// # async fn run() -> hls_transmux::Result<()> {
+/// # async fn run() -> hls_engine::legacy::Result<()> {
 /// let (bytes, report) = transmux_hls_to_mp4_bytes(
 ///     HlsInput::Path("playlist.m3u8".into()),
 ///     TransmuxOptions::default(),
@@ -2127,6 +2127,8 @@ fn check_media_config(previous: &mut Option<DemuxOutput>, current: &DemuxOutput)
         }
     } else {
         *previous = Some(DemuxOutput {
+            resource_digest: None,
+            map_digest: None,
             packed_anchor: None,
             packets: Vec::new(),
             video_timescale: current.video_timescale,

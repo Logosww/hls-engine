@@ -2,7 +2,7 @@
 //! cargo run --example multitrack_demo -- video.m3u8 en.m3u8 ja.m3u8 output.mp4
 #[cfg(all(not(target_arch = "wasm32"), feature = "default-source"))]
 mod native {
-    use hls_transmux::{crypto::key::*, playlist::*, *};
+    use hls_engine::legacy::{crypto::key::*, playlist::*, *};
     use std::sync::Arc;
     struct Keys;
     impl KeyProvider for Keys {

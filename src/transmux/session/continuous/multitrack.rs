@@ -137,6 +137,7 @@ impl OutputTrackInfo {
     }
 }
 
+#[derive(Clone)]
 pub struct MultiTrackInputs {
     inputs: Vec<ContinuousInput>,
     embedded: EmbeddedAudio,
@@ -361,6 +362,23 @@ impl MultiState {
     }
 }
 impl MultiTrackSession {
+    /// Restore a native file session. Re-submit required snapshots and subtitle cues
+    /// before running the file writer; validation precedes any output modification.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn restore(
+        inputs: MultiTrackInputs,
+        keys: KeySession,
+        options: ContinuousOptions,
+        checkpoint: EngineCheckpoint,
+    ) -> ContinuousResult<Self> {
+        let mut session = Self::new(inputs, keys, options)?;
+        if session.state.lock().unwrap().configuration != checkpoint.configuration {
+            return Err(fail(ContinuousErrorKind::ResumeConflict));
+        }
+        session.core.recovery = Some(checkpoint);
+        Ok(session)
+    }
+
     pub fn new(
         inputs: MultiTrackInputs,
         keys: KeySession,
@@ -403,7 +421,7 @@ impl MultiTrackSession {
         {
             return Err(fail(ContinuousErrorKind::InvalidOptions));
         }
-        let mut identity = b"hls-transmux-multitrack-v1".to_vec();
+        let mut identity = b"hls-engine-configuration-v2".to_vec();
         identity.push(u8::from(inputs.embedded == EmbeddedAudio::Keep));
         identity.extend_from_slice(&(inputs.inputs.len() as u32).to_be_bytes());
         identity.extend_from_slice(&(inputs.subtitles.len() as u32).to_be_bytes());
@@ -434,23 +452,51 @@ impl MultiTrackSession {
         }
         // Commit the mapping policy as well as the immutable selection. This is
         // configuration identity only; it does not create a resumable checkpoint.
-        field(&format!("{:?}", options.mode));
-        field(&format!("{:?}", options.gaps));
-        field(&format!("{:?}", options.changes));
-        field(&format!("{:?}", options.range));
-        field(&format!("{:?}", options.duration));
+        field(match options.mode {
+            ContinuousMode::Vod => "vod",
+            ContinuousMode::Open => "open",
+        });
+        field(match options.gaps {
+            GapPolicy::Preserve => "preserve",
+            GapPolicy::Collapse => "collapse",
+        });
+        field(match options.changes {
+            TimelineChangePolicy::Fail => "fail",
+            TimelineChangePolicy::Split => "split",
+        });
+        field(match options.missing {
+            MissingSegmentPolicy::Fail => "fail",
+            MissingSegmentPolicy::Skip => "skip",
+            MissingSegmentPolicy::Split => "split",
+        });
+        field(if options.resources.experimental_gcm() {
+            "gcm-draft22"
+        } else {
+            "stable"
+        });
+        let mut time = |v: Option<MediaTime>| {
+            field(if v.is_some() { "some" } else { "none" });
+            if let Some(v) = v {
+                field(&v.ticks.to_string());
+                field(&v.timescale.to_string());
+            }
+        };
+        time(options.range.map(|r| r.start()));
+        time(options.range.map(|r| r.end()));
+        time(options.duration);
+        time(match options.tail {
+            TailDurationPolicy::RequireEvidence => None,
+            TailDurationPolicy::Explicit(t) => Some(t),
+        });
+        field(&options.anchors.len().to_string());
         for anchor in &options.anchors {
             field(anchor.input.as_str());
             field(&anchor.generation.to_string());
             field(&anchor.epoch.to_string());
-            field(&format!(
-                "{}/{}",
-                anchor.source.ticks, anchor.source.timescale
-            ));
-            field(&format!(
-                "{}/{}",
-                anchor.presentation.ticks, anchor.presentation.timescale
-            ));
+            field(&anchor.source.ticks.to_string());
+            field(&anchor.source.timescale.to_string());
+            field(&anchor.presentation.ticks.to_string());
+            field(&anchor.presentation.timescale.to_string());
         }
         let configuration = crate::resume::digest(&identity);
         let state = Arc::new(std::sync::Mutex::new(MultiState {
@@ -481,6 +527,18 @@ impl MultiTrackSession {
         core.keep_embedded = inputs.embedded == EmbeddedAudio::Keep;
         core.multi = Some(state.clone());
         Ok(Self { core, state })
+    }
+    /// Recoverable native fMP4/classic output. Split children append
+    /// `.part-000001.mp4`, etc. Each `.hls-partial` sibling is retained for recovery;
+    /// the caller persists every checkpoint atomically, including acquisition intent.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn write_recoverable_to_file(
+        self,
+        path: impl AsRef<Path>,
+        recovery: RecoveryOptions,
+    ) -> ContinuousResult<MultiTrackReport> {
+        let media = self.core.recoverable_file(path.as_ref(), recovery).await?;
+        Ok(self.state.lock().unwrap().report(media))
     }
     pub fn handle(&self) -> MultiTrackHandle {
         MultiTrackHandle {
@@ -527,5 +585,34 @@ impl MultiTrackSession {
     ) -> ContinuousResult<MultiTrackReport> {
         let media = self.core.write_to_file(path, options).await?;
         Ok(self.state.lock().unwrap().report(media))
+    }
+}
+
+use crate::state_codec::{StateCodec, state_enum, state_struct};
+state_struct!(TrackMetadata {
+    language,
+    name,
+    default,
+    group
+});
+state_enum!(OutputTrackKind {0 => Video, 1 => Audio, 2 => Subtitle});
+state_enum!(OutputTrackCodec {0 => Avc, 1 => Hevc, 2 => AacLc, 3 => Wvtt});
+state_struct!(OutputTrackInfo {
+    id,
+    output,
+    input,
+    kind,
+    codec,
+    metadata,
+    timescale,
+    duration,
+    samples
+});
+impl StateCodec for OutputTrackId {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.0.put(out);
+    }
+    fn get(r: &mut crate::state_codec::Reader<'_>) -> crate::state_codec::DecodeResult<Self> {
+        Ok(Self(u32::get(r)?))
     }
 }

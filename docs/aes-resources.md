@@ -1,4 +1,4 @@
-# AES-128 resources (v0.6)
+# AES-128 resources
 
 `crypto::resource` prepares complete clear or AES-128 HLS resources using typed
 playlists and operation-owned key sessions. The additive
@@ -7,7 +7,7 @@ with the shared prepared media pipeline. Legacy entry points remain unchanged.
 
 ```rust,no_run
 use std::sync::Arc;
-use hls_transmux::{Source, playlist::PlaylistSnapshot,
+use hls_engine::legacy::{Source, playlist::PlaylistSnapshot,
     crypto::{key::KeySession, resource::*}};
 
 async fn read_first(source: Arc<dyn Source>, keys: KeySession,
@@ -18,7 +18,7 @@ async fn read_first(source: Arc<dyn Source>, keys: KeySession,
 }
 ```
 
-A request is derived from a P1 snapshot that passes `validate_finite_vod()`;
+A request is derived from a typed snapshot that passes `validate_finite_vod()`;
 open/EVENT/empty/I-frame/sample-encrypted/GCM/gap/discontinuity inputs are rejected
 before source/key work. `ResourceRequest::map` uses the MAP's frozen declaration
 and encryption context. Constructors check the finite snapshot; later prepared
@@ -48,7 +48,7 @@ existing init codec/config parsing, or complete moof/mdat pairs and required
 fragment headers. Sample-protection/group metadata is rejected in this profile.
 These are container checks, not full media demux or codec/packet validation.
 Matching MAP, sample offsets, codec payloads, timestamps and mux compatibility are
-validated by the shared media core in the P4 keyed prepared entry.
+validated by the shared media core in the keyed prepared entry.
 
 CBC provides no authentication. Wrong keys normally fail padding or structure;
 a wrong IV may preserve padding, and some corruptions can pass both checks. Do not
@@ -75,7 +75,7 @@ byte pool large enough for one maximum-size resource. Admission reserves a known
 range length or the entire per-resource cap before any read starts. Reservations
 cover reading, waiting for a key, decryption and validation. Full budgets return
 `BudgetExceeded` without queuing more work; callers wait for active work to finish
-before retrying. P2 key limits remain independently enforced.
+before retrying. Key-session limits remain independently enforced.
 
 Each read requests an isolated, demand-driven `Source` session with a byte cap;
 only isolated sessions receive `stop_session` on completion/drop. Built-in HTTP
@@ -99,7 +99,7 @@ promise to yield within an individual AES call on the browser event loop.
 omits bytes from Debug/serialization. Capacity is released when `read` completes;
 caller-retained clear resources, source/host allocations, demux copies, output
 buffers and classic MP4 indexes are outside these admission counters. This is not
-a total RSS cap. Public `read` does not cache resources. The P4 adapter retains
+a total RSS cap. Public `read` does not cache resources. The keyed adapter retains
 one MAP per input and checks its complete descriptor and current key resolution
 before reuse. The result retains its immutable descriptor, selected key
 reference/version, resolution revision and IV. Caller caches must also include
@@ -107,8 +107,7 @@ operation scope and full descriptor/version; never cache clear bytes by URI alon
 
 ## Dependencies and evidence
 
-P3 uses pinned RustCrypto `aes 0.8.4` / `cbc 0.1.2` with cipher 0.4 and zeroize.
-This retains the P0 tested combination, rather than asserting it is the latest.
+The crate uses pinned RustCrypto `aes 0.8.4` / `cbc 0.1.2` with cipher 0.4 and zeroize.
 Both crates use MIT OR Apache-2.0 licensing. AES and CBC are delegated to these
 libraries; no AES round function is implemented here. Owned secret/plain buffers
 and enabled library key schedules are wiped on drop, without a guarantee for JS,
@@ -119,8 +118,6 @@ Reference review: [AES manifest](https://raw.githubusercontent.com/RustCrypto/bl
 [RustCrypto block ciphers](https://github.com/RustCrypto/block-ciphers),
 [RFC 8216](https://www.rfc-editor.org/rfc/rfc8216.html) and
 [RustSec advisory database](https://github.com/RustSec/advisory-db).
-The scoped advisory inventory and runtime verification are recorded in
-[Archived dependency review and verification](release-0.6.0-evidence.json); they are not a cryptographic security audit.
 
 `tests/aes128_resource.rs` exercises independent retained media, rotation/NONE,
 MAP/sequence IVs, ordinary/range resources, malformed length/padding/container,

@@ -145,7 +145,7 @@ pub trait Source: Send + Sync + std::fmt::Debug {
 ///
 /// ```no_run
 /// use std::sync::Arc;
-/// use hls_transmux::{HlsInput, ReqwestSource, SourceLocation};
+/// use hls_engine::legacy::{HlsInput, ReqwestSource, SourceLocation};
 /// use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 ///
 /// let mut headers = HeaderMap::new();
@@ -755,10 +755,10 @@ fn apply_range(bytes: Vec<u8>, range: Option<&ByteRange>) -> Result<Vec<u8>> {
 /// ```no_run
 /// use std::collections::HashMap;
 /// use std::sync::Arc;
-/// use hls_transmux::{HlsInput, MemorySource, OutputFormat, SourceLocation,
+/// use hls_engine::legacy::{HlsInput, MemorySource, OutputFormat, SourceLocation,
 ///     TransmuxOptions, transmux_hls_to_writer_async};
 ///
-/// # async fn run() -> hls_transmux::Result<()> {
+/// # async fn run() -> hls_engine::legacy::Result<()> {
 /// let mut texts = HashMap::new();
 /// texts.insert(
 ///     "https://example.com/media.m3u8".to_string(),

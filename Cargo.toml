@@ -1,17 +1,16 @@
 [package]
-name = "hls-transmux"
-version = "0.10.0"
+name = "hls-engine"
+version = "1.0.0"
 edition = "2024"
-description = "A small, dependency-light HLS → MP4 transmuxer for Rust (TS/fMP4 in, MP4/CMAF out)."
+description = "HLS media engine for Rust: shared native/WASM decryption, timelines, multi-track sessions and MP4 output."
 license = "MIT"
-repository = "https://github.com/Logosww/hls-transmux"
-homepage = "https://github.com/Logosww/hls-transmux"
+repository = "https://github.com/Logosww/hls-engine"
+homepage = "https://github.com/Logosww/hls-engine"
 readme = "README.md"
 keywords = ["hls", "mp4", "transmux", "cmaf", "isobmff"]
 categories = ["multimedia::video", "multimedia"]
-# Public guides are required by include_str! even when a workspace ignores docs.
-# Keep planning, the nested runtime test crate and generated artifacts outside the archive.
-include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes", "/.github/**", "/src/**", "/tests/**", "/examples/*.rs", "/scripts/*.py", "/scripts/*.mjs", "/scripts/*.swift", "/docs/*.md", "/docs/*.json"]
+# Publish code, examples, API guides and their fixtures. CI tooling stays in Git.
+include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes", "/src/**", "/tests/**", "!/tests/runtime/**", "/examples/*.rs", "/docs/*.md"]
 
 [features]
 default = ["default-source"]
@@ -30,8 +29,11 @@ ffmpeg-finalize = ["dep:ffmpeg-next"]
 # persist the resume checkpoint directly via e.g. `serde_json`. Off by default;
 # callers may also serialize the versioned checkpoint fields without this feature.
 serde = ["dep:serde"]
+# Fixed HLS draft-22 whole-resource profile; also requires runtime opt-in.
+experimental-gcm = ["dep:aes-gcm"]
 
 [dependencies]
+aes-gcm = { version = "=0.10.3", optional = true, default-features = false, features = ["aes", "alloc", "zeroize"] }
 aes = { version = "=0.8.4", features = ["zeroize"] }
 cbc = { version = "=0.1.2", default-features = false, features = ["block-padding", "zeroize"] }
 futures-util = { version = "0.3.32", default-features = false, features = ["std", "async-await"] }
@@ -91,4 +93,8 @@ required-features = ["serde"]
 [[example]]
 name = "multitrack_wasm"
 crate-type = ["cdylib"]
+required-features = ["serde"]
+
+[[example]]
+name = "engine_budget"
 required-features = ["serde"]

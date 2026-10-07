@@ -1,5 +1,5 @@
 use super::sample_corpus as sample;
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 

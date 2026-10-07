@@ -2471,3 +2471,75 @@ fn wvtt_entry() -> Vec<u8> {
         out.extend_from_slice(&boxed(b"vttC", |o| o.extend_from_slice(b"WEBVTT")));
     })
 }
+
+use crate::state_codec::{DecodeResult, Reader, StateCodec, state_struct};
+state_struct!(FragmentedTrack {
+    metadata,
+    track_id,
+    timescale,
+    kind
+});
+impl StateCodec for VideoCodec {
+    fn put(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Avc { avcc } => {
+                0u8.put(out);
+                avcc.put(out);
+            }
+            Self::Hevc { hvcc } => {
+                1u8.put(out);
+                hvcc.put(out);
+            }
+        }
+    }
+    fn get(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        match u8::get(r)? {
+            0 => Ok(Self::Avc { avcc: Vec::get(r)? }),
+            1 => Ok(Self::Hevc { hvcc: Vec::get(r)? }),
+            _ => Err(()),
+        }
+    }
+}
+impl StateCodec for FragmentedTrackKind {
+    fn put(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Wvtt => 0u8.put(out),
+            Self::Video {
+                width,
+                height,
+                codec,
+            } => {
+                1u8.put(out);
+                width.put(out);
+                height.put(out);
+                codec.put(out);
+            }
+            Self::Audio {
+                sample_rate,
+                channel_count,
+                audio_specific_config,
+            } => {
+                2u8.put(out);
+                sample_rate.put(out);
+                channel_count.put(out);
+                audio_specific_config.put(out);
+            }
+        }
+    }
+    fn get(r: &mut Reader<'_>) -> DecodeResult<Self> {
+        match u8::get(r)? {
+            0 => Ok(Self::Wvtt),
+            1 => Ok(Self::Video {
+                width: u16::get(r)?,
+                height: u16::get(r)?,
+                codec: VideoCodec::get(r)?,
+            }),
+            2 => Ok(Self::Audio {
+                sample_rate: u32::get(r)?,
+                channel_count: u8::get(r)?,
+                audio_specific_config: Vec::get(r)?,
+            }),
+            _ => Err(()),
+        }
+    }
+}

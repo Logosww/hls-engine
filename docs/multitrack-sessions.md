@@ -1,10 +1,10 @@
-# Fixed multi-track sessions (v0.10)
+# Fixed multi-track sessions
 
 `MultiTrackSession` muxes a fixed selection using the continuous execution core.
 Use `ContinuousMode::Vod` for finite ENDLIST snapshots, or `Open` for Live/EVENT.
 The caller selects renditions, parses playlists and supplies subtitle cues. The
 session does not select renditions, parse WebVTT files, change tracks or transcode.
-See [the acceptance record](release-0.10.0.md) before enabling a player.
+See [player capabilities and limits](support.md) before enabling a player.
 
 ## Configure and run
 
@@ -131,8 +131,7 @@ fail; changes between segments obey fail/split.
 mode/range, sink, subtitle profile and playback target; input-specific rejections
 carry `InputId`. Use `SubtitleProfile::WvttPlainText`. Styled WebVTT and FFmpeg finalization fail closed. ShakaAdapter denotes **single-text-track
 extraction followed by the pinned MP4 VTT parser/display adapter**, not direct
-mixed-file support or an audio extraction service. The adapter is shipped in
-[scripts/shaka_wvtt_adapter.mjs](../scripts/shaka_wvtt_adapter.mjs).
+mixed-file support or an audio extraction service. The application supplies this text-track adapter.
 
 `playback_rejection()` distinguishes browser track selection, missing wvtt decoder,
 subtitle settings fidelity, classic edit-list playback and decode-gap restrictions.
@@ -142,20 +141,15 @@ Generic DirectBrowser is rejected after actual blob/MSE tests. FFmpeg/IINA class
 playback is rejected because the default edit-list path can lose/mis-time samples;
 fMP4 A/V remains available explicitly. Container support never implies player support.
 
-## WASM and downstream integration
+## WASM integration
 
 [MultiRecorder](../examples/multitrack_wasm.rs) is a small clear-fixture bridge with
 fixed audio IDs, cue JSON, decimal-string wide integers and a Promise writer.
 Its 32 MiB resource map is an example host limit, not a production fetch cache.
 Build with `--no-default-features --features serde --target wasm32-unknown-unknown
---example multitrack_wasm`, then use wasm-bindgen 0.2.100. Production SDK tests use
-its real SourceHost, key provider and Promise/writable bridge in an isolated copy:
+--example multitrack_wasm`, then use wasm-bindgen 0.2.100.
 
-```sh
-python3 scripts/verify_sdk.py /path/to/hls-downloader
-```
-
-This does not modify the SDK checkout or enable product capabilities. Migration
+Migration
 from a replaced audio input to several retained tracks requires the new entry,
 explicit embedded-audio choice, stable input IDs, a host waiter and the separate
 multi-track report. Existing consumers need no source/schema migration.

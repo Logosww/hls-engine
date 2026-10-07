@@ -1,4 +1,4 @@
-use hls_transmux::{playlist::*, *};
+use hls_engine::legacy::{playlist::*, *};
 use std::sync::{Arc, Mutex};
 #[allow(dead_code)]
 #[path = "support/sample_crypto.rs"]
@@ -796,7 +796,7 @@ async fn stop_before_any_media_is_a_successful_empty_recording() {
 
 #[tokio::test]
 async fn cancel_interrupts_key_wait_and_capacity_wait() {
-    use hls_transmux::crypto::key::*;
+    use hls_engine::legacy::crypto::key::*;
     struct Pending;
     impl KeyProvider for Pending {
         fn resolve(&self, _: KeyRequest) -> KeyFuture<KeyResolution> {

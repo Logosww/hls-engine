@@ -1,5 +1,5 @@
 //! Independent Shaka media, shared by native and actual WASM tests.
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 pub const KEY: [u8; 16] = [

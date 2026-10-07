@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hls_transmux::{
+use hls_engine::legacy::{
     FinalizeBackend, HlsInput, OutputFormat, TransmuxOptions, transmux_hls_to_mp4_async,
 };
 

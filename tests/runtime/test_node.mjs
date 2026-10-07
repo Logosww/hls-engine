@@ -7,7 +7,7 @@ import { verify } from './harness.mjs';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const unhandled = [];
 process.on('unhandledRejection', error => unhandled.push(String(error)));
-const wasm = await readFile(new URL('../../target/runtime/pkg/hls_transmux_runtime_tests_bg.wasm', import.meta.url));
+const wasm = await readFile(new URL('../../target/runtime/pkg/hls_engine_runtime_tests_bg.wasm', import.meta.url));
 const result = await verify(wasm, progress => console.error('Node:', JSON.stringify(progress)));
 await new Promise(resolve => setImmediate(resolve));
 assert.deepEqual(unhandled, []);

@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hls_transmux::{
+use hls_engine::legacy::{
     ByteRange, Error, HlsInput, OutputFormat, Source, SourceLocation, TextResource,
     TransmuxOptions, TransmuxProgress, TransmuxResumeState, transmux_hls_to_mp4_async,
     transmux_hls_to_mp4_bytes, transmux_hls_to_writer_async,
@@ -63,7 +63,7 @@ impl Source for MockSource {
     fn read_text<'a>(
         &'a self,
         _location: &'a SourceLocation,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<TextResource>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<TextResource>> + Send + 'a>> {
         let text = self.playlist.clone();
         Box::pin(async move {
             Ok(TextResource {
@@ -77,7 +77,7 @@ impl Source for MockSource {
         &'a self,
         location: &'a SourceLocation,
         _range: Option<&'a ByteRange>,
-    ) -> Pin<Box<dyn Future<Output = hls_transmux::Result<Vec<u8>>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = hls_engine::legacy::Result<Vec<u8>>> + Send + 'a>> {
         let bytes = common::continuous_ts(
             (*self.segment_bytes).clone(),
             common::segment_index(location),
@@ -395,7 +395,7 @@ async fn writer_progress_reports_bytes_written() {
         TransmuxOptions {
             output_format: OutputFormat::FragmentedMp4,
             on_progress: Some(Arc::new(move |p: TransmuxProgress| {
-                if p.stage != hls_transmux::TransmuxStage::Completed {
+                if p.stage != hls_engine::legacy::TransmuxStage::Completed {
                     events_cb.lock().unwrap().push(p);
                 }
             })),

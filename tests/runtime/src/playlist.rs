@@ -1,5 +1,5 @@
 //! Test-only binding of the production parser and validated snapshot archive.
-use hls_transmux::{
+use hls_engine::legacy::{
     SourceLocation, TextResource, parse_playlist_snapshot,
     playlist::{InputId, PlaylistContext, PlaylistSnapshot},
 };

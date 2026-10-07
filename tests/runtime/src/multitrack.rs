@@ -27,7 +27,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(js_name=profile_multitrack)]
 pub async fn profile(count: u32) -> String {
-    assert!([8, 64, 256].contains(&count));
+    assert!([8, 64, 256, 512, 4096].contains(&count));
     crate::multitrack_profile::run_counts(&[u64::from(count)])
         .await
         .to_string()

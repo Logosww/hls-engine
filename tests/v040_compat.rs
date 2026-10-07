@@ -1,6 +1,6 @@
 //! Artifacts produced by the unmodified v0.4.0 tree at commit 20f1593.
 #![cfg(all(feature = "serde", not(target_arch = "wasm32")))]
-use hls_transmux::*;
+use hls_engine::legacy::*;
 use std::sync::Arc;
 #[tokio::test]
 async fn released_v040_fmp4_checkpoint_resumes_with_legacy_timescales() {

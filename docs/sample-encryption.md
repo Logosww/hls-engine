@@ -1,11 +1,10 @@
 # Sample encryption
 
-Implemented in v0.8.0; see the [release evidence](release-0.8.0.md) for verified
-combinations. Existing keyed and timeline entry points select the
+Engine, keyed and timeline entry points select the
 sample path automatically. Legacy and public resource-only APIs keep their
 previous clear/AES-128 contracts.
 
-Version 0.9 connects these same protection profiles to selected Live/EVENT through
+The same protection profiles apply to selected Live/EVENT through
 [continuous sessions](continuous-sessions.md); finite entry points retain their
 finite-input semantics.
 

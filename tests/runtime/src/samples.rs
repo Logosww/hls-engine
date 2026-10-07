@@ -15,7 +15,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod bridge {
     use super::suite;
-    use hls_transmux::{crypto::key::*, playlist::EncryptionMethod};
+    use hls_engine::legacy::{crypto::key::*, playlist::EncryptionMethod};
     use wasm_bindgen::prelude::*;
     pub(crate) struct Provider(pub(crate) js_sys::Function);
     impl KeyProvider for Provider {
@@ -29,7 +29,7 @@ pub(crate) mod bridge {
                     JsValue::from_str(&k.iter().map(|b| format!("{b:02x}")).collect::<String>())
                 })
                 .unwrap_or(JsValue::NULL),
-                &JsValue::from_bool(matches!(r.reference().location().location(),hls_transmux::SourceLocation::Url(url) if url.path().ends_with("/packed-rotated-key"))),
+                &JsValue::from_bool(matches!(r.reference().location().location(),hls_engine::legacy::SourceLocation::Url(url) if url.path().ends_with("/packed-rotated-key"))),
             );
             Box::pin(async move {
                 let v = match result {

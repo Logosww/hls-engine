@@ -98,7 +98,7 @@ def main():
     args = parser.parse_args()
     run('cargo', 'build', '--locked', '--manifest-path', 'tests/runtime/Cargo.toml',
         '--target-dir', 'target', '--target', 'wasm32-unknown-unknown', '--lib')
-    run('wasm-bindgen', 'target/wasm32-unknown-unknown/debug/hls_transmux_runtime_tests.wasm',
+    run('wasm-bindgen', 'target/wasm32-unknown-unknown/debug/hls_engine_runtime_tests.wasm',
         '--target', 'web', '--out-dir', 'target/runtime/pkg')
     run('node', 'tests/runtime/test_node.mjs')
     if args.browser:

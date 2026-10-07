@@ -37,6 +37,7 @@ struct Lane {
     end: MediaTime,
     gap: MediaTime,
     split_pending: bool,
+    recovery_boundary: bool,
     mapping_dirty: bool,
 }
 impl Lane {
@@ -53,6 +54,7 @@ impl Lane {
             end: zero(),
             gap: zero(),
             split_pending: false,
+            recovery_boundary: false,
             mapping_dirty: false,
         }
     }
@@ -174,7 +176,11 @@ impl ContinuousSession {
                 )
                 .await
                 .map_err(|e| {
-                    let kind = if e.kind() == crate::crypto::sample::SampleErrorKind::Cancelled {
+                    let kind = if e.key_error().is_some_and(|k| {
+                        k.kind() == crate::crypto::key::KeyErrorKind::ResumeConflict
+                    }) {
+                        ContinuousErrorKind::ResumeConflict
+                    } else if e.kind() == crate::crypto::sample::SampleErrorKind::Cancelled {
                         ContinuousErrorKind::Cancelled
                     } else {
                         ContinuousErrorKind::Media
@@ -184,6 +190,10 @@ impl ContinuousSession {
                         ..fail(kind)
                     }
                 })?;
+                if self.resources.recovery_enabled() {
+                    data.resource_digest = Some(crate::resume::digest(bytes.bytes()));
+                    data.map_digest = map.as_ref().map(|m| crate::resume::digest(m.bytes()));
+                }
                 self.resources
                     .sample_decrypted(&request, bytes.bytes().len() as u64)
                     .map_err(resource_error)?;
@@ -228,6 +238,7 @@ impl ContinuousSession {
             lane.progress.watermark = Some(descriptor.slot().clone());
             lane.progress.clone()
         };
+        self.resources.committed_keys(descriptor.slot());
         self.shared.signal.wake();
         self.emit(ContinuousEvent::Committed {
             input: progress,
@@ -236,6 +247,15 @@ impl ContinuousSession {
     }
 }
 impl Engine {
+    pub(super) fn replay_front(&mut self, input: usize, batch: Batch) {
+        self.lanes[input].pending.push_front(batch);
+    }
+    pub(super) fn take_front(&mut self, input: usize) -> Batch {
+        self.lanes[input]
+            .pending
+            .pop_front()
+            .expect("saved split batch")
+    }
     pub async fn prepare(session: &ContinuousSession) -> ContinuousResult<Self> {
         let mut engine = Self {
             lanes: (0..session.sources.len()).map(|_| Lane::new()).collect(),
@@ -897,10 +917,27 @@ impl Engine {
                 return Err(fail(ContinuousErrorKind::SkewTimeout));
             }
         }
-        Ok(Some((
-            input,
-            self.lanes[input].pending.pop_front().unwrap(),
-        )))
+        let lane = &mut self.lanes[input];
+        let mut batch = lane.pending.pop_front().unwrap();
+        if batch.descriptor.gap() {
+            lane.recovery_boundary = true;
+        } else if lane.recovery_boundary {
+            if let Some(packet) = batch
+                .data
+                .packets
+                .iter()
+                .find(|p| !matches!(p.kind, StreamKind::Aac))
+                && !independent(packet).map_err(timeline_error)?
+            {
+                return Err(at(
+                    ContinuousErrorKind::MissingRandomAccess,
+                    &batch.descriptor,
+                ));
+            }
+            batch.changed |= session.options.missing == MissingSegmentPolicy::Split;
+            lane.recovery_boundary = false;
+        }
+        Ok(Some((input, batch)))
     }
     pub fn samples(
         &mut self,
@@ -1339,5 +1376,482 @@ impl Engine {
             return Err(fail(ContinuousErrorKind::BudgetExceeded));
         }
         Ok(())
+    }
+}
+
+use crate::state_codec::{DecodeResult, Reader, StateCodec, state_struct};
+state_struct!(TrackKey { input, kind });
+
+// Only metadata and hashes enter the archive; replay supplies every packet byte.
+impl Engine {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resources_for_checkpoint(&self, session: &ContinuousSession) -> ContinuousResult<Vec<u8>> {
+        if session.shared.inner.lock().unwrap().state == ContinuousState::Finalizing {
+            return Ok(vec![0; 8]);
+        }
+        session
+            .resources
+            .save_recovery_keys()
+            .map_err(resource_error)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn save(&self, session: &ContinuousSession) -> ContinuousResult<Vec<u8>> {
+        let mut out = Vec::new();
+        self.resources_for_checkpoint(session)?.put(&mut out);
+        self.tracks.put(&mut out);
+        self.track_keys.put(&mut out);
+        self.offsets.put(&mut out);
+        self.origin.put(&mut out);
+        self.common.put(&mut out);
+        self.reports.put(&mut out);
+        self.ends.put(&mut out);
+        self.bytes.put(&mut out);
+        self.part_bytes.put(&mut out);
+        self.segments.put(&mut out);
+        self.duration.put(&mut out);
+        self.output.put(&mut out);
+        self.mappings.put(&mut out);
+        self.outputs.put(&mut out);
+        self.truncated.put(&mut out);
+        self.gaps.put(&mut out);
+        self.wall.put(&mut out);
+        self.selected_start.put(&mut out);
+        self.selected_end.put(&mut out);
+        self.common_gap.put(&mut out);
+        self.lanes.len().put(&mut out);
+        for lane in &self.lanes {
+            lane.config.put(&mut out);
+            lane.epoch.put(&mut out);
+            lane.shift.put(&mut out);
+            lane.clock.put(&mut out);
+            lane.last.put(&mut out);
+            lane.delta.put(&mut out);
+            lane.end.put(&mut out);
+            lane.gap.put(&mut out);
+            lane.split_pending.put(&mut out);
+            lane.recovery_boundary.put(&mut out);
+            lane.mapping_dirty.put(&mut out);
+            let terminal =
+                session.shared.inner.lock().unwrap().state == ContinuousState::Finalizing;
+            let pending = if terminal { 0 } else { lane.pending.len() };
+            pending.put(&mut out);
+            for batch in lane.pending.iter().take(pending) {
+                batch.descriptor.slot().put(&mut out);
+                batch.descriptor.checkpoint_identity().put(&mut out);
+                batch.descriptor.duration().put(&mut out);
+                batch.shift.put(&mut out);
+                batch.new_epoch.put(&mut out);
+                batch.changed.put(&mut out);
+                batch.data.put(&mut out);
+                batch.data.packets.len().put(&mut out);
+                for p in &batch.data.packets {
+                    crate::resume::digest(&p.data).put(&mut out);
+                    p.kind.put(&mut out);
+                    p.timing.put(&mut out);
+                    p.pts_90k.put(&mut out);
+                    p.dts_90k.put(&mut out);
+                    p.duration.put(&mut out);
+                    p.is_key.put(&mut out);
+                    p.is_length_prefixed.put(&mut out);
+                }
+            }
+        }
+        let state = session.shared.inner.lock().unwrap();
+        state.reason.put(&mut out);
+        for lane in &state.lanes {
+            lane.progress.put(&mut out);
+            lane.generation.put(&mut out);
+            lane.revision.put(&mut out);
+            lane.media_sequence.put(&mut out);
+            lane.last.put(&mut out);
+            lane.restart.put(&mut out);
+            lane.ended.put(&mut out);
+            lane.queue
+                .iter()
+                .take(if state.state == ContinuousState::Finalizing {
+                    0
+                } else {
+                    lane.queue.len()
+                })
+                .map(|d| (d.slot().clone(), d.checkpoint_identity(), d.duration()))
+                .collect::<Vec<_>>()
+                .put(&mut out);
+        }
+        if let Some(multi) = &session.multi {
+            let multi = multi.lock().unwrap();
+            multi.tracks.put(&mut out);
+            multi.track_history_truncated.put(&mut out);
+            multi.save_subtitles(&mut out);
+        } else {
+            return Err(fail(ContinuousErrorKind::InvalidOptions));
+        }
+        if out.len() > session.options.limits.metadata {
+            return Err(fail(ContinuousErrorKind::BudgetExceeded));
+        }
+        Ok(out)
+    }
+
+    pub(super) async fn restore(
+        session: &ContinuousSession,
+        bytes: &[u8],
+    ) -> ContinuousResult<Self> {
+        let bad = || fail(ContinuousErrorKind::ResumeCorruption);
+        if bytes.len() > session.options.limits.metadata {
+            return Err(fail(ContinuousErrorKind::BudgetExceeded));
+        }
+        let terminal = session.recovery.as_ref().is_some_and(|c| c.finalizing);
+        let mut r = Reader(bytes);
+        let keys: Vec<u8> = StateCodec::get(&mut r).map_err(|_| bad())?;
+        if !terminal {
+            session
+                .resources
+                .restore_recovery_keys(&keys)
+                .map_err(resource_error)?;
+        }
+        let mut engine = (|| -> DecodeResult<Self> {
+            Ok(Self {
+                tracks: StateCodec::get(&mut r)?,
+                track_keys: StateCodec::get(&mut r)?,
+                offsets: StateCodec::get(&mut r)?,
+                origin: StateCodec::get(&mut r)?,
+                common: StateCodec::get(&mut r)?,
+                reports: StateCodec::get(&mut r)?,
+                ends: StateCodec::get(&mut r)?,
+                bytes: StateCodec::get(&mut r)?,
+                part_bytes: StateCodec::get(&mut r)?,
+                segments: StateCodec::get(&mut r)?,
+                duration: StateCodec::get(&mut r)?,
+                output: StateCodec::get(&mut r)?,
+                mappings: StateCodec::get(&mut r)?,
+                outputs: StateCodec::get(&mut r)?,
+                truncated: StateCodec::get(&mut r)?,
+                gaps: StateCodec::get(&mut r)?,
+                wall: StateCodec::get(&mut r)?,
+                selected_start: StateCodec::get(&mut r)?,
+                selected_end: StateCodec::get(&mut r)?,
+                common_gap: StateCodec::get(&mut r)?,
+                lanes: vec![],
+            })
+        })()
+        .map_err(|_| bad())?;
+        let count = usize::get(&mut r).map_err(|_| bad())?;
+        if count != session.sources.len()
+            || count == 0
+            || engine.tracks.len() != engine.track_keys.len()
+            || engine.tracks.len() != engine.offsets.len()
+            || engine.tracks.len() != engine.reports.len()
+            || engine.tracks.len() != engine.ends.len()
+            || engine.track_keys.iter().any(|t| t.input >= count)
+            || engine.tracks.iter().any(|t| t.timescale == 0)
+            || engine.bytes < engine.part_bytes
+        {
+            return Err(bad());
+        }
+        let find = |slot: &SegmentSlot,
+                    digest: [u8; 32],
+                    duration: crate::playlist::PlaylistDuration|
+         -> ContinuousResult<(SegmentDescriptor, bool)> {
+            let state = session.shared.inner.lock().unwrap();
+            let lane = state
+                .lanes
+                .iter()
+                .find(|l| &l.id == slot.input_id())
+                .ok_or_else(|| fail(ContinuousErrorKind::ResumeConflict))?;
+            if let Some(descriptor) = lane
+                .queue
+                .iter()
+                .chain(&lane.history)
+                .find(|d| d.slot() == slot)
+            {
+                if descriptor.checkpoint_identity() != digest || descriptor.duration() != duration {
+                    return Err(fail(ContinuousErrorKind::ResumeConflict));
+                }
+                return Ok((descriptor.clone(), false));
+            }
+            // Only an explicitly advanced live window proves eviction. Omitted
+            // snapshots or holes inside a retained window still require replay.
+            if session.options.mode == ContinuousMode::Open
+                && session.options.missing != MissingSegmentPolicy::Fail
+                && lane.generation == Some(slot.generation())
+                && lane.media_sequence.is_some_and(|n| n > slot.sequence())
+            {
+                return Ok((
+                    SegmentDescriptor::recovery_gap(slot.clone(), duration),
+                    true,
+                ));
+            }
+            Err(fail(ContinuousErrorKind::ReplayRequired))
+        };
+        let mut pending_slots = vec![vec![]; count];
+        let mut collapsed_intervals = vec![Vec::new(); count];
+        for (input, slots) in pending_slots.iter_mut().enumerate() {
+            let mut lane = (|| -> DecodeResult<Lane> {
+                Ok(Lane {
+                    config: StateCodec::get(&mut r)?,
+                    epoch: StateCodec::get(&mut r)?,
+                    shift: StateCodec::get(&mut r)?,
+                    clock: StateCodec::get(&mut r)?,
+                    last: StateCodec::get(&mut r)?,
+                    delta: StateCodec::get(&mut r)?,
+                    end: StateCodec::get(&mut r)?,
+                    gap: StateCodec::get(&mut r)?,
+                    split_pending: StateCodec::get(&mut r)?,
+                    recovery_boundary: StateCodec::get(&mut r)?,
+                    mapping_dirty: StateCodec::get(&mut r)?,
+                    map: None,
+                    pending: VecDeque::new(),
+                })
+            })()
+            .map_err(|_| bad())?;
+            let n = usize::get(&mut r).map_err(|_| bad())?;
+            if n > session.options.limits.descriptors {
+                return Err(bad());
+            }
+            let mut collapsed = zero();
+            for _ in 0..n {
+                let slot = SegmentSlot::get(&mut r).map_err(|_| bad())?;
+                let digest = StateCodec::get(&mut r).map_err(|_| bad())?;
+                let duration = StateCodec::get(&mut r).map_err(|_| bad())?;
+                let (descriptor, evicted) = find(&slot, digest, duration)?;
+                let mut batch = (|| -> DecodeResult<Batch> {
+                    Ok(Batch {
+                        descriptor,
+                        shift: StateCodec::get(&mut r)?,
+                        new_epoch: StateCodec::get(&mut r)?,
+                        changed: StateCodec::get(&mut r)?,
+                        data: StateCodec::get(&mut r)?,
+                    })
+                })()
+                .map_err(|_| bad())?;
+                let samples = usize::get(&mut r).map_err(|_| bad())?;
+                if samples > session.options.limits.samples {
+                    return Err(bad());
+                }
+                let mut raw = if batch.descriptor.gap() {
+                    DemuxOutput::default()
+                } else {
+                    session
+                        .load(input, &mut lane.map, &batch.descriptor)
+                        .await?
+                };
+                if batch.descriptor.map().is_none() && !batch.new_epoch {
+                    // TS parameter sets may be carried from an earlier segment
+                    // of the same epoch, just as they are during initial input.
+                    raw.sps = raw.sps.or_else(|| batch.data.sps.clone());
+                    raw.pps = raw.pps.or_else(|| batch.data.pps.clone());
+                    raw.vps = raw.vps.or_else(|| batch.data.vps.clone());
+                    raw.width = raw.width.or(batch.data.width);
+                    raw.height = raw.height.or(batch.data.height);
+                }
+                if let (Some(raw_anchor), Some(saved_anchor)) =
+                    (raw.packed_anchor, batch.data.packed_anchor)
+                {
+                    if raw_anchor != saved_anchor % (1 << 33) {
+                        return Err(fail(ContinuousErrorKind::ResumeConflict));
+                    }
+                    raw.packed_anchor = Some(saved_anchor);
+                }
+                let mut actual_config = Vec::new();
+                let mut saved_config = Vec::new();
+                raw.put(&mut actual_config);
+                batch.data.put(&mut saved_config);
+                if !evicted && actual_config != saved_config {
+                    return Err(fail(ContinuousErrorKind::ResumeConflict));
+                }
+                let mut payloads = std::collections::HashMap::<[u8; 32], VecDeque<Vec<u8>>>::new();
+                for packet in raw.packets.drain(..) {
+                    payloads
+                        .entry(crate::resume::digest(&packet.data))
+                        .or_default()
+                        .push_back(packet.data);
+                }
+                for _ in 0..samples {
+                    let digest: [u8; 32] = StateCodec::get(&mut r).map_err(|_| bad())?;
+                    let data = if evicted {
+                        vec![]
+                    } else {
+                        payloads
+                            .get_mut(&digest)
+                            .and_then(|p| p.pop_front())
+                            .ok_or_else(|| fail(ContinuousErrorKind::ResumeConflict))?
+                    };
+                    let packet = (|| -> DecodeResult<EncodedPacket> {
+                        Ok(EncodedPacket {
+                            data,
+                            kind: StateCodec::get(&mut r)?,
+                            timing: StateCodec::get(&mut r)?,
+                            pts_90k: StateCodec::get(&mut r)?,
+                            dts_90k: StateCodec::get(&mut r)?,
+                            duration: StateCodec::get(&mut r)?,
+                            is_key: StateCodec::get(&mut r)?,
+                            is_length_prefixed: StateCodec::get(&mut r)?,
+                        })
+                    })()
+                    .map_err(|_| bad())?;
+                    if packet.timing.is_some_and(|t| t.timescale == 0) {
+                        return Err(bad());
+                    }
+                    batch.data.packets.push(packet);
+                }
+                batch.shift = sub(batch.shift, collapsed)?;
+                if evicted {
+                    // The checkpoint may retain only a trimmed tail of a resource.
+                    // Report that exact interval, never the whole manifest duration.
+                    let mut start = None;
+                    let mut end = None;
+                    for packet in &batch.data.packets {
+                        let t = packet.timing.ok_or_else(bad)?;
+                        let a = add(pts(packet), batch.shift)?;
+                        let duration = if t.duration == 0 {
+                            lane.delta
+                                .ok_or_else(|| fail(ContinuousErrorKind::MissingTailDuration))?
+                        } else {
+                            MediaTime {
+                                ticks: i128::from(t.duration),
+                                timescale: t.timescale,
+                            }
+                        };
+                        let b = add(a, duration)?;
+                        start = Some(start.map_or(Ok(a), |old| min(old, a))?);
+                        end = Some(end.map_or(Ok(b), |old| max(old, b))?);
+                    }
+                    if let (Some(start), Some(end)) = (start, end) {
+                        let declared_gap = batch
+                            .descriptor
+                            .duration()
+                            .media_time()
+                            .map_err(media_error)?;
+                        let duration = sub(end, start)?;
+                        batch.descriptor = SegmentDescriptor::recovery_gap(
+                            slot.clone(),
+                            crate::playlist::PlaylistDuration::from_time(duration)
+                                .map_err(media_error)?,
+                        );
+                        batch.shift = start;
+                        if session.options.gaps == GapPolicy::Collapse {
+                            // A/V packet endpoints need not coincide. Collapse
+                            // the declared common interval just as normal GAP
+                            // admission does, rather than the union of tails.
+                            collapsed_intervals[input].push((add(start, collapsed)?, declared_gap));
+                            collapsed = add(collapsed, declared_gap)?;
+                        }
+                    }
+                    batch.data = DemuxOutput::default();
+                    batch.changed = false;
+                    lane.split_pending |= session.options.missing == MissingSegmentPolicy::Split;
+                }
+                slots.push(slot);
+                lane.pending.push_back(batch);
+            }
+            if collapsed.ticks != 0 {
+                lane.shift = sub(lane.shift, collapsed)?;
+                lane.end = sub(lane.end, collapsed)?;
+                lane.mapping_dirty = true;
+            }
+            engine.lanes.push(lane);
+        }
+        // Collapse is meaningful across inputs only when the evicted intervals
+        // establish the same common clock. Check before any output acquisition.
+        for intervals in collapsed_intervals.iter().skip(1) {
+            if intervals.len() != collapsed_intervals[0].len() {
+                return Err(fail(ContinuousErrorKind::TimelineAmbiguous));
+            }
+            for ((start, duration), (other_start, other_duration)) in
+                intervals.iter().zip(&collapsed_intervals[0])
+            {
+                if !cmp(*start, *other_start)?.is_eq() || !cmp(*duration, *other_duration)?.is_eq()
+                {
+                    return Err(fail(ContinuousErrorKind::TimelineAmbiguous));
+                }
+            }
+        }
+        let reason: Option<ContinuousEndReason> = StateCodec::get(&mut r).map_err(|_| bad())?;
+        for (index, slots) in pending_slots.iter().enumerate() {
+            let mut progress = ContinuousInputProgress::get(&mut r).map_err(|_| bad())?;
+            let generation: Option<u64> = StateCodec::get(&mut r).map_err(|_| bad())?;
+            let revision: Option<u64> = StateCodec::get(&mut r).map_err(|_| bad())?;
+            let media_sequence: Option<u64> = StateCodec::get(&mut r).map_err(|_| bad())?;
+            let last: Option<u64> = StateCodec::get(&mut r).map_err(|_| bad())?;
+            let restart: Option<u64> = StateCodec::get(&mut r).map_err(|_| bad())?;
+            let ended = bool::get(&mut r).map_err(|_| bad())?;
+            let required: Vec<(SegmentSlot, [u8; 32], crate::playlist::PlaylistDuration)> =
+                StateCodec::get(&mut r).map_err(|_| bad())?;
+            let mut evicted = Vec::new();
+            for (slot, digest, duration) in &required {
+                let (descriptor, synthesized) = find(slot, *digest, *duration)?;
+                if synthesized {
+                    evicted.push(descriptor);
+                }
+            }
+            let mut state = session.shared.inner.lock().unwrap();
+            let lane = &mut state.lanes[index];
+            if terminal {
+                lane.generation = generation;
+                lane.queue.clear();
+            } else if lane.revision < revision || lane.media_sequence < media_sequence {
+                return Err(fail(ContinuousErrorKind::ResumeConflict));
+            }
+            if lane.id != progress.input || lane.generation != generation {
+                return Err(fail(ContinuousErrorKind::ResumeConflict));
+            }
+            let newly_accepted = lane
+                .queue
+                .iter()
+                .filter(|d| last.is_none_or(|n| d.slot().sequence() > n))
+                .count() as u64;
+            progress.discovered = progress
+                .discovered
+                .checked_add(newly_accepted)
+                .ok_or_else(bad)?;
+            progress.accepted = progress
+                .accepted
+                .checked_add(newly_accepted)
+                .ok_or_else(bad)?;
+            lane.revision = lane.revision.max(revision);
+            lane.media_sequence = lane.media_sequence.max(media_sequence);
+            lane.last = lane.last.max(last);
+            lane.restart = restart;
+            lane.queue.retain(|d| {
+                !slots.contains(d.slot())
+                    && progress.watermark.as_ref().is_none_or(|w| {
+                        d.slot().generation() > w.generation()
+                            || (d.slot().generation() == w.generation()
+                                && d.slot().sequence() > w.sequence())
+                    })
+            });
+            for descriptor in evicted.into_iter().rev() {
+                lane.queue.push_front(descriptor);
+            }
+            lane.progress = progress;
+            lane.ended |= ended;
+            lane.outstanding = lane.queue.len() + slots.len();
+        }
+        {
+            let mut state = session.shared.inner.lock().unwrap();
+            state.reason = reason;
+            state.queued = state.lanes.iter().map(|l| l.queue.len()).sum();
+            state.metadata = state
+                .lanes
+                .iter()
+                .flat_map(|l| &l.queue)
+                .map(metadata_bytes)
+                .sum();
+        }
+        if let Some(multi) = &session.multi {
+            let mut multi = multi.lock().unwrap();
+            multi.tracks = Vec::get(&mut r).map_err(|_| bad())?;
+            multi.track_history_truncated = bool::get(&mut r).map_err(|_| bad())?;
+            multi.restore_subtitles(&mut r, terminal)?;
+        } else {
+            return Err(bad());
+        }
+        if !r.0.is_empty() {
+            return Err(bad());
+        }
+        engine.budget(session)?;
+        if engine.bytes != 0 {
+            let _ = engine.report(session)?;
+        }
+        Ok(engine)
     }
 }

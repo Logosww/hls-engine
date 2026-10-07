@@ -1,26 +1,10 @@
-# Runtime regression tests
+# CI and runtime verification
 
-The repository's `tests/runtime/` crate binds the production parser, key sessions,
-resource decryption, keyed prepared core and SDK adapter to one test-only WASM
-module. It compares native Rust results with actual Node/WASM and real Chrome.
-The root integration tests continue to cover the public APIs directly.
-
-The runtime suite covers lossless playlist archives and JS round trips, provider
-coalescing/expiry/invalidation, synchronous reentry, cancellation/abort, late
-Promise success/rejection, resource budgets, 96 clear/AES prepared combinations,
-stage counters, capability queries and the exact `examples/keyed_wasm.rs` adapter.
-The adapter includes rejected, unavailable and wrong-length key responses.
-
-The development timeline suite compares clear/AES-128 range output hashes,
-mapping reports and lossless integer transport. It also runs the same 12
-near/far/full-range/long-GOP budget cases on Native, Node WASM and Chrome;
-[planning-state measurements](benchmarks.md) distinguish retained records from
-total memory and quantify reads before the first output write.
-
-The v0.9 continuous suite adds 34 open-input output/report comparisons and
-8/64/256-epoch allocation, WASM-page, JS-heap and first-write measurements. The
-real SDK harness also checks rolling admission, stop/drain, close failure and
-continuous Promise cancellation/rejection. See [v0.9 evidence](release-0.9.0.md).
+The repository's `tests/runtime/` crate binds the production parser, crypto,
+Engine and compatibility APIs to a test-only WASM module. Native Rust, actual
+Node WASM and real Chrome compare output hashes, reports and lossless integer
+transport. The host bridge covers key Promises, synchronous reentry, rejection,
+late settlement, cancellation and writable backpressure.
 
 Run from the repository root:
 
@@ -29,35 +13,30 @@ cargo test --locked --manifest-path tests/runtime/Cargo.toml --target-dir target
 cargo fmt --manifest-path tests/runtime/Cargo.toml -- --check
 cargo clippy --locked --manifest-path tests/runtime/Cargo.toml --target-dir target --all-targets -- -D warnings
 python3 scripts/verify_runtime.py --browser
+python3 scripts/verify_engine_recovery.py
+python3 scripts/verify_package.py
 ```
 
-Install the wasm32-unknown-unknown target and wasm-bindgen CLI 0.2.100 first. The
-runner requires Node; `--browser` additionally requires Chrome/Chromium on
-macOS/Linux. Set `HLS_TEST_CHROME` to select another executable. Node and browser
-checks write separate reports under `target/runtime/`; CI uploads both.
+Install `wasm32-unknown-unknown`, Node and wasm-bindgen CLI 0.2.100 first. Browser
+checks need Chrome/Chromium on macOS/Linux; `HLS_TEST_CHROME` selects the executable.
+Independent media checks also require FFmpeg and FFprobe. FFmpeg-backed Cargo
+builds need the FFmpeg 9 development libraries and pkg-config.
 
-This suite runs from the repository and is excluded from the published crate.
-For the published WASM adapter, [package verification](release-0.6.0.md) builds
-and executes `examples/keyed_wasm.rs` from an extracted crate archive.
+The CI feature matrix covers the default source, serde, no-default-feature and
+experimental GCM combinations on Linux, macOS and Windows. macOS additionally
+runs the FFmpeg backend and independent packet, decoded-frame and subtitle checks.
+The recovery corpus interrupts every checkpoint, compares recovered files with
+complete execution and checks split-output publication. Test-only I/O hooks also
+inject file errors and real process exits; they are absent from production builds.
 
-Independent output inspection uses the root `keyed_export` example through
-`python3 scripts/verify_keyed.py --ffmpeg`. It creates real native outputs for
-FFprobe packet/payload/timing comparisons and FFmpeg decode/seek checks.
+Package verification runs `cargo publish --dry-run`, inspects the archive,
+validates documentation links, and builds and tests extracted native/WASM
+examples. Scripts remain in the Git checkout and operate on the extracted crate.
+Development reports, CI configuration and the nested runtime crate are excluded
+from the package. Schema-1 compatibility is checked against artifacts generated
+from the preserved baseline commit, rather than recreated by the current encoder.
 
-The earlier phase prototypes were retired on 2026-10-05. Their M0 decisions and
-phase evidence are archived under `docs/planning/`; the original v0.6 runtime
-results remain in [release evidence](release-0.6.0-evidence.json). Experiments for
-future sample encryption, open input or subtitles do not expand the delivered
-v0.6 scope.
-
-Downstream compatibility can be checked with
-`python3 scripts/verify_sdk.py /path/to/hls-downloader`. It copies the SDK's Rust
-adapters and fixtures into `target/sdk-compat`, patches Cargo to this crate, runs
-the SDK's native prepared/resume tests, and checks the native workspace and
-browser WASM adapter. It also installs the tracked timeline integration extension
-into the isolated SDK copy and compares nine native/real-Chrome timeline cases
-through the SDK host and Promise bridges. The SDK checkout stays unchanged.
-
-Timeline runtime runs include 15 deterministic cursor-budget cases plus actual
-allocation, first-write, WASM-page and JS-heap measurements. Timing/allocation
-measurements live outside the cross-runtime semantic equality report.
+Logs, measurements and JSON evidence live under `target/` and are uploaded by CI.
+The publish workflow depends on the complete CI workflow for the release tag,
+then verifies package name/version, tag identity and a clean checkout before
+publishing.

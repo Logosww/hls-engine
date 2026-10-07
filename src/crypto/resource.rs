@@ -31,6 +31,7 @@ pub enum ResourceErrorKind {
     Key,
     InvalidCiphertextLength,
     Decrypt,
+    AuthenticationFailed,
     MediaValidation,
     Cancelled,
     CounterOverflow,
@@ -219,6 +220,7 @@ pub struct ResourceOptions {
     max_waiting_bytes: u64,
     max_resources: usize,
     ranges: EncryptedRangePolicy,
+    gcm: bool,
 }
 impl Default for ResourceOptions {
     fn default() -> Self {
@@ -228,10 +230,21 @@ impl Default for ResourceOptions {
             max_waiting_bytes: 32 * 1024 * 1024,
             max_resources: 2,
             ranges: EncryptedRangePolicy::Reject,
+            gcm: false,
         }
     }
 }
 impl ResourceOptions {
+    /// Enable only the fixed HLS draft-22 authenticated resource profile.
+    /// Requires the `experimental-gcm` Cargo feature as well.
+    pub fn with_experimental_gcm(mut self, enabled: bool) -> Self {
+        self.gcm = enabled;
+        self
+    }
+    pub fn experimental_gcm(&self) -> bool {
+        self.gcm && cfg!(feature = "experimental-gcm")
+    }
+
     /// Maximum raw samples retained while processing one resource.
     pub fn with_sample_limit(mut self, samples: usize) -> Self {
         self.max_samples = samples;
@@ -291,6 +304,9 @@ impl ResourceOptions {
         .map_err(|e| e.at(request))
     }
     fn request_size(&self, request: &ResourceRequest) -> ResourceResult<u64> {
+        if gcm_method(request) && !self.experimental_gcm() {
+            return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist));
+        }
         let encrypted = !request.resource.keys().is_clear();
         let range = request.resource.range().map(|r| r.byte_range());
         if encrypted && range.is_some() && self.ranges != EncryptedRangePolicy::CompleteResources {
@@ -303,7 +319,11 @@ impl ResourceOptions {
         if reserved > self.max_resource_bytes {
             return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));
         }
-        if encrypted && !sample_method(request) && range.is_some_and(|r| r.length % 16 != 0) {
+        if encrypted
+            && !sample_method(request)
+            && !gcm_method(request)
+            && range.is_some_and(|r| r.length % 16 != 0)
+        {
             return Err(ResourceError::new(
                 ResourceErrorKind::InvalidCiphertextLength,
             ));
@@ -441,10 +461,12 @@ pub struct ResourceSession {
     state: Arc<Mutex<ResourceStats>>,
     cancel: RequestCancellation,
     observer: Option<ResourceObserver>,
+    recovery: Mutex<Option<RecoveryKeys>>,
 }
 impl ResourceSession {
-    pub fn new(keys: KeySession, options: ResourceOptions) -> ResourceResult<Self> {
+    pub fn new(mut keys: KeySession, options: ResourceOptions) -> ResourceResult<Self> {
         options.validate()?;
+        keys.enable_gcm(options.experimental_gcm());
         Ok(Self {
             keys,
             options,
@@ -456,6 +478,7 @@ impl ResourceSession {
             })),
             cancel: RequestCancellation::new(),
             observer: None,
+            recovery: Mutex::new(None),
         })
     }
     pub(crate) fn with_observer(mut self, observer: ResourceObserver) -> Self {
@@ -552,6 +575,7 @@ impl ResourceSession {
                 if !self.keys.key_is_valid(&key) {
                     return Err(ResourceError::from_key(KeyError::new(KeyErrorKind::Expired)));
                 }
+                self.record_recovery_key(&request.resource, &key).map_err(ResourceError::from_key)?;
                 let old = cached.as_ref().unwrap();
                 if old.key_reference.as_ref() == Some(key.reference())
                     && old.key_version.as_ref() == Some(key.version())
@@ -611,7 +635,7 @@ impl ResourceSession {
         if range.is_some_and(|r| bytes.len() as u64 != r.length) {
             return Err(ResourceError::new(ResourceErrorKind::InvalidRange));
         }
-        if encrypted && (bytes.is_empty() || bytes.len() % 16 != 0) {
+        if encrypted && !gcm_method(request) && (bytes.is_empty() || bytes.len() % 16 != 0) {
             return Err(ResourceError::new(
                 ResourceErrorKind::InvalidCiphertextLength,
             ));
@@ -639,9 +663,17 @@ impl ResourceSession {
                 KeyErrorKind::Expired,
             )));
         }
+        if let Some(key) = &key {
+            self.record_recovery_key(&request.resource, key)
+                .map_err(ResourceError::from_key)?;
+        }
         let iv = key
             .as_ref()
             .map(|key| match key.reference().explicit_iv() {
+                _ if gcm_method(request) => bytes
+                    .get(..16)
+                    .and_then(|v| v.try_into().ok())
+                    .ok_or_else(|| ResourceError::new(ResourceErrorKind::InvalidCiphertextLength)),
                 Some(iv) => Ok(iv),
                 None if request.resource.kind() == KeyResourceKind::Media => {
                     Ok(sequence_iv(request.resource.slot().sequence()))
@@ -650,7 +682,11 @@ impl ResourceSession {
             })
             .transpose()?;
         if let (Some(key), Some(iv)) = (&key, iv) {
-            decrypt(&mut bytes, key.secret().expose(), &iv).map_err(|e| e.with_key(key))?;
+            if gcm_method(request) {
+                decrypt_gcm(&mut bytes, key.secret().expose(), &iv).map_err(|e| e.with_key(key))?;
+            } else {
+                decrypt(&mut bytes, key.secret().expose(), &iv).map_err(|e| e.with_key(key))?;
+            }
             self.observe(request, ResourceStage::Decrypted, bytes.len() as u64)?;
         }
         self.check()?;
@@ -798,11 +834,12 @@ impl ResourceSession {
         &self,
         resource: KeyResource,
     ) -> Result<Arc<ResolvedKey>, KeyError> {
-        let waiter = self.keys.try_resolve(resource)?;
+        let waiter = self.keys.try_resolve(resource.clone())?;
         let key = tokio::select! {biased; _=self.cancel.cancelled()=>return Err(KeyError::new(KeyErrorKind::Cancelled)),result=waiter=>result?};
         if !self.keys.key_is_valid(&key) {
             return Err(KeyError::new(KeyErrorKind::Expired));
         }
+        self.record_recovery_key(&resource, &key)?;
         Ok(key)
     }
     pub(crate) async fn read_encoded(
@@ -922,5 +959,184 @@ mod tests {
                 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255
             ]
         );
+    }
+}
+
+fn gcm_method(request: &ResourceRequest) -> bool {
+    request
+        .resource
+        .keys()
+        .candidates()
+        .first()
+        .is_some_and(|k| *k.method() == crate::playlist::EncryptionMethod::Aes256Gcm)
+}
+fn decrypt_gcm(bytes: &mut Vec<u8>, key: &[u8], iv: &[u8; 16]) -> ResourceResult<()> {
+    #[cfg(feature = "experimental-gcm")]
+    {
+        use aes_gcm::{
+            AesGcm,
+            aead::{AeadInPlace, KeyInit, consts::U16},
+        };
+        if bytes.len() < 32 {
+            return Err(ResourceError::new(
+                ResourceErrorKind::InvalidCiphertextLength,
+            ));
+        }
+        let end = bytes.len() - 16;
+        let tag: [u8; 16] = bytes[end..].try_into().unwrap();
+        let cipher = AesGcm::<aes::Aes256, U16>::new_from_slice(key)
+            .map_err(|_| ResourceError::new(ResourceErrorKind::Decrypt))?;
+        cipher
+            .decrypt_in_place_detached(iv.into(), &[], &mut bytes[16..end], (&tag).into())
+            .map_err(|_| ResourceError::new(ResourceErrorKind::AuthenticationFailed))?;
+        bytes.copy_within(16..end, 0);
+        let size = end - 16;
+        bytes[size..].zeroize();
+        bytes.truncate(size);
+        Ok(())
+    }
+    #[cfg(not(feature = "experimental-gcm"))]
+    {
+        let _ = (bytes, key, iv);
+        Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist))
+    }
+}
+
+#[derive(Clone)]
+struct RecoveryKey {
+    slot: crate::playlist::SegmentSlot,
+    map: bool,
+    reference: [u8; 32],
+    kid: Option<[u8; 16]>,
+    version: Option<[u8; 32]>,
+}
+crate::state_codec::state_struct!(RecoveryKey {
+    slot,
+    map,
+    reference,
+    kid,
+    version
+});
+#[derive(Default)]
+struct RecoveryKeys {
+    current: Vec<RecoveryKey>,
+    expected: Vec<RecoveryKey>,
+}
+impl ResourceSession {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn enable_recovery(&self) {
+        *self.recovery.lock().unwrap() = Some(RecoveryKeys::default());
+    }
+    pub(crate) fn recovery_enabled(&self) -> bool {
+        self.recovery.lock().unwrap().is_some()
+    }
+    fn record_recovery_key(
+        &self,
+        resource: &KeyResource,
+        key: &ResolvedKey,
+    ) -> Result<(), KeyError> {
+        let mut state = self.recovery.lock().unwrap();
+        let Some(state) = state.as_mut() else {
+            return Ok(());
+        };
+        let binding = RecoveryKey {
+            slot: resource.slot().clone(),
+            map: resource.kind() == KeyResourceKind::Map,
+            reference: key.reference().checkpoint_identity(),
+            kid: resource.kid(),
+            version: match key.version() {
+                KeyVersion::Provider(v) => Some(crate::resume::digest(v.as_bytes())),
+                KeyVersion::Revision(_) => None,
+            },
+        };
+        let same = |old: &&RecoveryKey| {
+            old.slot == binding.slot && old.map == binding.map && old.kid == binding.kid
+        };
+        if let Some(expected) = state.expected.iter().find(same)
+            && (binding.reference != expected.reference
+                || binding.version.is_none()
+                || binding.version != expected.version)
+        {
+            return Err(KeyError::new(KeyErrorKind::ResumeConflict));
+        }
+        if let Some(old) = state.current.iter_mut().find(|old| {
+            old.slot == binding.slot && old.map == binding.map && old.kid == binding.kid
+        }) {
+            *old = binding;
+        } else {
+            if state.current.len() >= self.options.max_samples {
+                return Err(KeyError::new(KeyErrorKind::BudgetExceeded));
+            }
+            state.current.push(binding);
+        }
+        Ok(())
+    }
+    pub(crate) fn committed_keys(&self, slot: &crate::playlist::SegmentSlot) {
+        if let Some(state) = self.recovery.lock().unwrap().as_mut() {
+            state.current.retain(|b| &b.slot != slot);
+            state.expected.retain(|b| &b.slot != slot);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn save_recovery_keys(&self) -> ResourceResult<Vec<u8>> {
+        use crate::state_codec::StateCodec;
+        let state = self.recovery.lock().unwrap();
+        let mut bytes = Vec::new();
+        if let Some(state) = state.as_ref() {
+            if state.current.iter().any(|b| b.version.is_none()) {
+                return Err(ResourceError::from_key(KeyError::new(
+                    KeyErrorKind::ResumeConflict,
+                )));
+            }
+            state.current.put(&mut bytes);
+        } else {
+            Vec::<RecoveryKey>::new().put(&mut bytes);
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn restore_recovery_keys(&self, bytes: &[u8]) -> ResourceResult<()> {
+        use crate::state_codec::{Reader, StateCodec};
+        let bad = || ResourceError::from_key(KeyError::new(KeyErrorKind::ResumeConflict));
+        let mut reader = Reader(bytes);
+        let expected = Vec::<RecoveryKey>::get(&mut reader).map_err(|_| bad())?;
+        if !reader.0.is_empty() || expected.iter().any(|b| b.version.is_none()) {
+            return Err(bad());
+        }
+        *self.recovery.lock().unwrap() = Some(RecoveryKeys {
+            expected,
+            current: vec![],
+        });
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "experimental-gcm"))]
+mod gcm_vectors {
+    use super::*;
+
+    #[test]
+    fn independent_non_block_vector_and_wrong_key() {
+        let encoded = include_bytes!("../../tests/fixtures/gcm/vector.gcm");
+        let iv: [u8; 16] = encoded[..16].try_into().unwrap();
+        let key: Vec<_> = (0..32).collect();
+        let mut clear = encoded.to_vec();
+        decrypt_gcm(&mut clear, &key, &iv).unwrap();
+        assert_eq!(clear, b"HLS draft-22 uses a sixteen-byte IV.");
+        let mut bad_key = key;
+        bad_key[0] ^= 1;
+        assert_eq!(
+            decrypt_gcm(&mut encoded.to_vec(), &bad_key, &iv)
+                .unwrap_err()
+                .kind(),
+            ResourceErrorKind::AuthenticationFailed
+        );
+        for length in 0..32 {
+            assert_eq!(
+                decrypt_gcm(&mut encoded[..length].to_vec(), &bad_key, &iv)
+                    .unwrap_err()
+                    .kind(),
+                ResourceErrorKind::InvalidCiphertextLength
+            );
+        }
     }
 }

@@ -14,7 +14,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 mod bridge {
     use super::corpus;
-    use hls_transmux::{
+    use hls_engine::legacy::{
         MemorySource, SourceLocation, TextResource,
         crypto::{key::*, resource::*},
         parse_playlist_snapshot,

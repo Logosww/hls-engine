@@ -3,7 +3,7 @@
 
 use std::{fs, path::PathBuf, sync::Arc};
 
-use hls_transmux::{
+use hls_engine::legacy::{
     Codec, HlsInput, MemorySource, OutputFormat, SourceLocation, TrackType, TransmuxOptions,
     transmux_hls_to_mp4_async,
 };

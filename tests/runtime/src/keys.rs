@@ -1,6 +1,6 @@
 //! Actual production key-session contracts shared by native, Node and Chrome.
 use futures::{FutureExt, task::noop_waker};
-use hls_transmux::{
+use hls_engine::legacy::{
     SourceLocation, TextResource, crypto::key::*, parse_playlist_snapshot, playlist::*,
 };
 use std::sync::{

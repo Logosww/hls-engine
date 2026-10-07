@@ -1,5 +1,5 @@
 //! Deterministic state/read instrumentation shared by native, Node WASM and Chrome.
-use hls_transmux::{crypto::key::*, playlist::*, *};
+use hls_engine::legacy::{crypto::key::*, playlist::*, *};
 use std::{
     future::Future,
     pin::Pin,

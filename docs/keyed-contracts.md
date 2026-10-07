@@ -1,13 +1,13 @@
 # Keyed session diagnostics, progress and capability queries
 
-These additive APIs describe the finite keyed prepared entry (clear/AES-128 since v0.6,
-[finite sample encryption](sample-encryption.md) since v0.8). Legacy `Error`, `SessionPhase`, source
+These APIs describe the finite keyed prepared entry for clear/AES-128 and
+[finite sample encryption](sample-encryption.md). Legacy `Error`, `SessionPhase`, source
 bounds, options literals and checkpoint schemas retain their existing contracts.
 
 ## Query a combination
 
 ```rust
-use hls_transmux::capabilities::*;
+use hls_engine::legacy::capabilities::*;
 let query = KeyedCapabilityQuery::new(
     KeyedInputCapability::new(
         KeyedContainer::TransportStream,
@@ -58,12 +58,12 @@ writer close/abort ownership.
 snapshots and selected, probed tracks. `report.capability_query()` records those
 profiles and the actual successful output mode. It is a description of this
 operation, not permission to reuse keys or accept a rewritten snapshot. Snapshot
-rewrite detection belongs to the P1 resource comparison API; this finite entry
+rewrite detection belongs to the resource comparison API; this finite entry
 has no update/resume method and never accepts a changed snapshot mid-operation.
 
 ## Inspect failures without leaking raw messages
 
-`KeyedSessionError::kind()` retains the broad P4 categories; `failure()` distinguishes
+`KeyedSessionError::kind()` retains the broad error categories; `failure()` distinguishes
 unsupported combinations, provider unavailable/failure, invalid key/IV/encryption
 metadata, expired keys, decrypt failure, clear media validation, read, budget,
 output and cancellation. Malformed playlist syntax/IVs remain typed
@@ -105,8 +105,8 @@ Each input reports `discovered_segments()` (finite total), plus separate
 | committed segments | The shared output core accepted that segment's samples (collector), or completed its fragment write/flush (writer). This is not a durable checkpoint. |
 
 The input convenience accessors count **media only**. In particular,
-`downloaded_bytes()` now uses the final v0.6 ciphertext/source-byte definition;
-the unreleased P4 clear-byte definition is available as `media().clear_bytes()`.
+`downloaded_bytes()` now uses the ciphertext/source-byte definition;
+plaintext byte counts are available as `media().clear_bytes()`.
 `processed_segments()` is an alias for the committed boundary. Output bytes are
 reported separately and include headers/indexes after their write/flush.
 
@@ -129,9 +129,7 @@ flush/publication boundary; the SDK must still finish its owned writer close.
 Tests cover declarative supported/refused dimensions, runtime preflight refusal,
 provider/raw-cause separation, secret scans, intermediate counters, native output,
 and actual Node/Chrome execution of the JS example including rejected/unavailable/
-wrong-length key responses. The P4 output/cancellation/compatibility tests remain
-active. See the [release verification record](release-0.6.0.md); publication remains
-a separate operation.
+wrong-length key responses. CI also covers output, cancellation and compatibility boundaries.
 
 Sample failures expose `SampleError` through `sample_error()`, with non-exhaustive
 kind, resource/track/sample identity, scheme, key reference/version and typed causes.

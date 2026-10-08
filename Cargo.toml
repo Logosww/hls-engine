@@ -1,6 +1,6 @@
 [package]
 name = "hls-engine"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "HLS media engine for Rust: shared native/WASM decryption, timelines, multi-track sessions and MP4 output."
 license = "MIT"

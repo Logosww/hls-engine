@@ -33,7 +33,7 @@ explicit, and video continuation must satisfy random-access requirements.
 | IINA/mpv | Audio/video and audio selection; in-container `wvtt` rendering is not supported by this profile |
 | WebKit native file | Compatible file playback and subtitle rendering; direct multi-track MSE remains rejected |
 | Shaka | `wvtt` needs application extraction to a text track; direct mixed-`mdat` subtitle playback is not supported |
-| FFmpeg classic playback | Interior empty edits are not rendered correctly; select fragmented output for this case |
+| FFmpeg classic playback | AAC gaps use composition offsets; interior empty edits on other tracks are not rendered correctly, so select fragmented output for those cases |
 
 These constraints describe the supported integration paths, not a promise across
 all player releases. Select a player-specific capability profile and obey its

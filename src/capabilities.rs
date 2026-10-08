@@ -659,8 +659,9 @@ impl MultiTrackCapabilityQuery {
         self.subtitles = value;
         self
     }
-    /// Declare interior decode gaps. Native classic output uses edit lists;
-    /// video must resume at a sync sample with non-overlapping presentation runs.
+    /// Declare interior decode gaps. Native classic AAC uses composition offsets;
+    /// other tracks use edit lists, and playback capability checks remain conservative.
+    /// Video must resume at a sync sample with non-overlapping presentation runs.
     pub fn with_decode_gaps(mut self, value: bool) -> Self {
         self.decode_gaps = value;
         self

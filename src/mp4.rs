@@ -198,6 +198,9 @@ impl Mp4Muxer {
         }
         for track in &mut self.tracks {
             normalize_classic_timeline(track.samples_mut())?;
+            if let Mp4Track::Audio { samples, .. } = track {
+                compact_audio_decode_timeline(samples)?;
+            }
         }
         // Validate before table construction so all timeline additions are safe.
         for track in &self.tracks {
@@ -356,8 +359,9 @@ pub(crate) fn normalize_sample_timeline(samples: &mut [Mp4Sample]) -> Result<()>
     Ok(())
 }
 
-// A classic sample table stores a contiguous media timeline. Positive source
-// gaps are preserved separately by edit lists; overlaps cannot be represented.
+// A classic sample table stores a contiguous decode timeline. Positive source
+// gaps are encoded later using audio composition offsets or edit lists;
+// overlapping decode intervals cannot be represented.
 fn normalize_classic_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
     let mut expected = samples.first().map_or(0, |s| s.dts);
     for sample in samples {
@@ -371,6 +375,22 @@ fn normalize_classic_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
             .dts
             .checked_add(u64::from(sample.duration))
             .ok_or_else(|| Error::muxing("sample timeline overflow"))?;
+    }
+    Ok(())
+}
+
+// Keep AAC packets in one decode run and express source gaps with composition
+// offsets. Multiple non-empty audio edits cause demuxers to seek backwards for
+// decoder preroll at every run, replaying packets and changing decoded PCM.
+// PTS and encoded sample durations stay intact: no silence is synthesized and
+// no sample is stretched to occupy a gap.
+fn compact_audio_decode_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
+    let mut cursor = samples.first().map_or(0, |s| s.dts);
+    for sample in samples {
+        sample.dts = cursor;
+        cursor = cursor
+            .checked_add(u64::from(sample.duration))
+            .ok_or_else(|| Error::muxing("audio decode timeline overflow"))?;
     }
     Ok(())
 }
@@ -2050,7 +2070,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_edits_preserve_gaps_and_compact_media_without_stretching_samples() {
+    fn classic_audio_preserves_presentation_gaps_without_repeated_edits() {
         let mut samples = vec![
             sample(34, 34, 1024),
             sample(1058, 1058, 1024),
@@ -2058,18 +2078,51 @@ mod tests {
             sample(5120, 5120, 256),
         ];
         normalize_classic_timeline(&mut samples).unwrap();
+        let source_samples = samples.clone();
+        compact_audio_decode_timeline(&mut samples).unwrap();
+        assert_eq!(
+            samples.iter().map(|s| s.dts).collect::<Vec<_>>(),
+            [34, 1058, 2082, 3106]
+        );
+        assert_eq!(
+            samples.iter().map(|s| s.pts).collect::<Vec<_>>(),
+            [34, 1058, 4096, 5120]
+        );
         let track = audio(samples, 48000);
         let (edits, duration) = classic_edits(&track, 48000).unwrap();
-        assert_eq!(edits, vec![(34, -1), (2048, 0), (2014, -1), (1280, 2048)]);
-        assert_eq!(duration, 3328);
+        assert_eq!(edits, vec![(34, -1), (5342, 0)]);
+        assert_eq!(duration, 5342);
         assert_eq!(track.samples().last().unwrap().duration, 256);
-        let (bytes, infos) = Mp4Muxer::new(vec![track])
+        let (bytes, infos) = Mp4Muxer::new(vec![audio(source_samples, 48000)])
             .write_checked(&|| Ok(()))
             .unwrap();
         assert_eq!(infos[0].duration, 5376);
         assert!(bytes.windows(4).any(|b| b == b"elst"));
+        let ctts = bytes.windows(4).position(|b| b == b"ctts").unwrap();
+        // Two samples at zero offset, then two after the 2014-tick gap.
+        let values: Vec<_> = bytes[ctts + 8..ctts + 28]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_be_bytes(*b))
+            .collect();
+        assert_eq!(values, [2, 2, 0, 2, 2014]);
         let mut overlap = vec![sample(0, 0, 100), sample(90, 90, 100)];
         assert!(normalize_classic_timeline(&mut overlap).is_err());
+    }
+
+    #[test]
+    fn classic_audio_composition_gap_overflow_is_rejected() {
+        let gap = i32::MAX as u64 + 1;
+        let track = audio(
+            vec![sample(0, 0, 1024), sample(1024 + gap, 1024 + gap, 1024)],
+            48000,
+        );
+        assert!(
+            Mp4Muxer::new(vec![track])
+                .write_checked(&|| Ok(()))
+                .is_err()
+        );
     }
 
     #[test]

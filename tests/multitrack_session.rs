@@ -966,7 +966,7 @@ async fn retained_maps_share_one_operation_budget() {
 }
 
 #[tokio::test]
-async fn native_classic_gap_edits_match_memory_finalization() {
+async fn native_classic_audio_gaps_match_memory_finalization() {
     let cases = sample::cases();
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
     let make = || {
@@ -1040,8 +1040,13 @@ async fn native_classic_gap_edits_match_memory_finalization() {
     std::fs::remove_file(path).unwrap();
     assert_eq!(sample::canonical(file.clone()), sample::canonical(memory));
     assert_eq!(actual.tracks().len(), expected.tracks().len());
-    let elst = file.windows(4).position(|b| b == b"elst").unwrap();
-    let count = u32::from_be_bytes(file[elst + 8..elst + 12].try_into().unwrap());
-    assert!(count >= 3);
+    // These audio tracks start at zero. Interior gaps use composition offsets,
+    // so finalization must not introduce repeated audio edits.
+    assert!(!file.windows(4).any(|b| b == b"elst"));
+    let ctts = file.windows(4).position(|b| b == b"ctts").unwrap();
+    let count = u32::from_be_bytes(file[ctts + 8..ctts + 12].try_into().unwrap()) as usize;
+    assert!(count >= 2);
+    let last_offset = ctts + 16 + (count - 1) * 8;
+    assert!(i32::from_be_bytes(file[last_offset..last_offset + 4].try_into().unwrap()) > 0);
     write_fixture("native-gap-classic.mp4", &file);
 }

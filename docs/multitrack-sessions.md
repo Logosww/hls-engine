@@ -41,10 +41,13 @@ The sink's caller owns close/shutdown and must await that before public completi
 `write_to` emits continuous fMP4 without an ever-growing `mfra`.
 `into_bytes(capacity, format)` requires an explicit output-memory bound.
 `write_to_file` with Native `StreamingMp4` uses disk staging and indexed classic
-finalization. Native classic preserves interior decode gaps with exact edit lists;
-video must resume at a sync sample and presentation runs must not overlap. Sample
-durations remain unchanged. Set `with_decode_gaps(true)` when gaps are known.
-FFmpeg 9 does not correctly play interior empty edits; use fMP4 for that player.
+finalization. Native classic preserves AAC presentation gaps using a contiguous
+decode timeline and composition offsets, keeping each encoded sample and its
+duration unchanged. Accumulated audio composition offsets must fit signed 32-bit
+track ticks; larger offsets fail finalization. Other tracks preserve gaps with
+exact edit lists; video must resume at a sync sample and presentation runs must
+not overlap. Set `with_decode_gaps(true)` when gaps are known. FFmpeg 9 does not
+correctly play interior empty edits on those other tracks; use fMP4 for that case.
 Its index grows with samples (including wvtt); this is distinct from
 bounded fMP4 recording. `write_to_outputs` / `write_to_files` obtain separate leases
 when the configured change policy requests a split. A single output cannot hide a

@@ -124,6 +124,9 @@ jobs:
       - name: Verify retained media corpus with FFprobe and FFmpeg
         run: python3 -u scripts/verify_media.py
 
+      - name: Verify Engine classic and fragmented decoded payload parity
+        run: cargo test --locked --test engine_output_parity -- --ignored
+
       - name: Verify dual-input packets and both finalize backends
         run: python3 -u scripts/verify_multi_input.py --ffmpeg
 

@@ -35,9 +35,11 @@ def packets(metadata, index):
     return [p for p in metadata['packets'] if p['stream_index'] == index]
 
 
-def signature(packet, base, shift=0):
+def signature(packet, base, shift=0, audio=False):
     return (Fraction(int(packet['pts']))*base+shift,
-            Fraction(int(packet['dts']))*base+shift,
+            # Classic AAC uses compact DTS plus composition offsets for gaps.
+            # Presentation, duration and payload must still match exactly.
+            None if audio else Fraction(int(packet['dts']))*base+shift,
             Fraction(int(packet['duration']))*base, packet['data_hash'])
 
 
@@ -59,37 +61,45 @@ def verify(rows):
         track_rows = []
         for i, (stream, entries) in enumerate(zip(raw['streams'], edits)):
             base = Fraction(stream['time_base'])
+            audio = stream['codec_type'] == 'audio'
             source = packets(raw, i)
             mapped = []
             if entries is None:
-                mapped = [signature(p, base) for p in source]
+                mapped = [signature(p, base, audio=audio) for p in source]
             else:
                 cursor = Fraction(0)
                 for duration, media_time in entries:
                     if media_time != -1:
                         start = media_time * base
                         selected = [p for p in source if start <= int(p['pts'])*base < start+duration]
-                        mapped.extend(signature(p, base, cursor-start) for p in selected)
+                        mapped.extend(signature(p, base, cursor-start, audio=audio) for p in selected)
                     cursor += duration
-            expected = [signature(p, Fraction(frag['streams'][i]['time_base'])) for p in packets(frag, i)]
-            default_equal = default_equal and sorted(signature(p, Fraction(default['streams'][i]['time_base'])) for p in packets(default, i)) == sorted(expected)
+            expected = [signature(p, Fraction(frag['streams'][i]['time_base']), audio=audio) for p in packets(frag, i)]
+            default_packets = packets(default, i)
+            default_signatures = [signature(p, Fraction(default['streams'][i]['time_base']), audio=audio) for p in default_packets]
+            default_equal = default_equal and sorted(default_signatures) == sorted(expected)
             assert sorted(mapped) == sorted(expected), (name, i, 'edit reconstruction differs from tfdt/trun')
             assert len(mapped) == len(source), (name, i, 'dropped or duplicated samples')
-            # Decode every clear media track, with both container timelines
-            # flattened only for sample-integrity comparison. Player behavior
-            # remains separately reported, never hidden by ignore_editlist.
+            if audio:
+                assert default_signatures == expected, (name, i, 'default AAC presentation/payload mismatch')
+                for before, after in zip(default_packets, default_packets[1:]):
+                    assert int(after['dts']) == int(before['dts']) + int(before['duration']), (name, i, 'non-contiguous AAC decode run')
+            # AAC must decode correctly with the default edit-list handling.
+            # Video still uses interior edits, so check its payload integrity
+            # separately from the default player timeline reported above.
             if stream['codec_type'] in ('audio', 'video'):
-                a = decode(classic, i, stream, source, ignore_edits=True)
+                a = decode(classic, i, stream, source, ignore_edits=not audio)
                 b = decode(fragmented, i, frag['streams'][i], packets(frag, i))
                 assert a == b, (name, i, 'decoded sample mismatch')
             track_rows.append({'id': stream['id'], 'packets': len(source),
-                               'edits': len(entries or []), 'exactTimelineEqual': True})
+                               'edits': len(entries or []), 'exactPresentationTimelineEqual': True,
+                               'decodeTimeline': 'compact' if audio else 'preserved'})
         for suffix in ['classic', 'fragmented']:
             clear = by_name[name.replace('-classic', '-'+suffix)]
             encrypted = by_name[clear['name'].replace('-clear-', '-encrypted-')]
             assert encrypted['hash'] == clear['hash']
         evidence.append({'name': name.removesuffix('-clear-classic'), 'tracks': track_rows,
-                         'encryptedClearEqual': True, 'decodedSampleEqual': True, 'ffmpegDefaultTimelineEqual': default_equal})
+                         'encryptedClearEqual': True, 'decodedSampleEqual': True, 'ffmpegDefaultPresentationTimelineEqual': default_equal})
     assert len(evidence) == 40
     return evidence
 

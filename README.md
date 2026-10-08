@@ -110,13 +110,16 @@ use the root `Engine*` API; checkpoint schemas are never silently converted.
 cargo test --locked --features serde,experimental-gcm
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-python3 -m unittest discover -s scripts -p test_verify_engine_release.py
+python3 -m unittest discover -s scripts -p 'test_verify_*.py'
 ```
 
 [CI](https://github.com/Logosww/hls-engine/blob/main/.github/workflows/ci.yml) runs the feature matrix on Linux, macOS and Windows,
 real Node/Chrome WASM contracts, independent FFmpeg inspection, recovery and
 package checks. Repository scripts are limited to that workflow and its
 transitive dependencies; they are excluded from the published crate.
+The compressed crate has a 1 MiB CI budget. Full media/encryption corpora,
+integration tests, exporters and benchmarks stay in Git; the crate includes
+public examples and the small fixture subset needed by its unit tests.
 
 ## 中文说明
 

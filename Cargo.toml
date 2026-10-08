@@ -9,8 +9,32 @@ homepage = "https://github.com/Logosww/hls-engine"
 readme = "README.md"
 keywords = ["hls", "mp4", "transmux", "cmaf", "isobmff"]
 categories = ["multimedia::video", "multimedia"]
-# Publish code, examples, API guides and their fixtures. CI tooling stays in Git.
-include = ["/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes", "/src/**", "/tests/**", "!/tests/runtime/**", "/examples/*.rs", "/docs/*.md"]
+# Publish the library, public examples and only their/unit-test fixture dependencies.
+# Full integration corpora, exporters and benchmarks remain in the Git checkout.
+# scripts/verify_package.py checks this boundary and the 1 MiB compressed budget.
+include = [
+    "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes",
+    "/src/**", "/docs/*.md",
+    "/examples/*_demo.rs", "/examples/*_wasm.rs", "/examples/wasm_session.rs",
+    "/tests/fixtures/crypto/README.md", "/tests/fixtures/crypto/vector.cbc",
+    "/tests/fixtures/gcm/vector.gcm", "/tests/fixtures/h264_aac_fhd.ts",
+    "/tests/fixtures/media/fmp4_avc_nal2_multirun/init.fmp4",
+    "/tests/fixtures/media/fmp4_avc_nal2_multirun/seg0.m4s",
+    "/tests/fixtures/media/ts_avc_regular/seg0.ts",
+    "/tests/fixtures/media/ts_avc_video_only/seg0.ts",
+    "/tests/fixtures/media/ts_avc_video_only/seg1.ts",
+    "/tests/fixtures/media/ts_avc_video_only/seg2.ts",
+    "/tests/fixtures/media/fmp4_aac_audio_only/init.fmp4",
+    "/tests/fixtures/media/fmp4_aac_audio_only/seg0.m4s",
+    "/tests/fixtures/media/fmp4_aac_audio_only/seg1.m4s",
+    "/tests/fixtures/media/fmp4_aac_audio_only/seg2.m4s",
+    "/tests/fixtures/media/fmp4_aac_audio_only/seg3.m4s",
+    "/tests/fixtures/sample_crypto/fmp4_avc_cenc/init.mp4",
+    "/tests/fixtures/sample_crypto/fmp4_avc_clear/init.mp4",
+    "/tests/fixtures/sample_crypto/fmp4_avc_clear/seg1.m4s",
+    "/tests/fixtures/sample_crypto/fmp4_hevc_clear/init.mp4",
+    "/tests/fixtures/sample_crypto/fmp4_hevc_clear/seg1.m4s",
+]
 
 [features]
 default = ["default-source"]

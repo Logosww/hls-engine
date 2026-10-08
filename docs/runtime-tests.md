@@ -29,11 +29,21 @@ The recovery corpus interrupts every checkpoint, compares recovered files with
 complete execution and checks split-output publication. Test-only I/O hooks also
 inject file errors and real process exits; they are absent from production builds.
 
-Package verification runs `cargo publish --dry-run`, inspects the archive,
-validates documentation links, and builds and tests extracted native/WASM
-examples. Scripts remain in the Git checkout and operate on the extracted crate.
-Development reports, CI configuration and the nested runtime crate are excluded
-from the package. Schema-1 compatibility is checked against artifacts generated
+Package verification runs `cargo publish --dry-run`, enforces a 1 MiB compressed
+archive limit and a fixture allowlist, validates documentation links, and builds
+all extracted public native examples. It runs extracted unit tests with and
+without the default source and with serde/GCM, plus documentation tests, the
+Engine demo and four actual Node WASM examples. WASM host-input corpora are read
+from Git by the Node harness; the Rust library and adapters compile entirely
+from the extracted package. The raw `wasm_session` adapter embeds its own inputs.
+
+The published crate retains only public examples and their/unit-test fixture
+dependencies. Full integration tests, media/encryption corpora, verification
+exporters, benchmarks, scripts, CI configuration and the nested runtime crate
+remain in Git, where the complete CI matrix still runs. Clone the repository
+to run the integration suites or benchmark commands. Package size, SHA-256 and
+the complete file-size inventory are recorded in `target/runtime/package-evidence.json`
+and uploaded by CI. Schema-1 compatibility is checked against artifacts generated
 from the preserved baseline commit, rather than recreated by the current encoder.
 
 Logs, measurements and JSON evidence live under `target/` and are uploaded by CI.

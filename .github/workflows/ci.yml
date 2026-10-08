@@ -44,9 +44,9 @@ jobs:
         run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --example keyed_wasm -- -D warnings
       - name: Lint the multi-track WASM example
         run: cargo clippy --locked --target wasm32-unknown-unknown --no-default-features --features serde --example multitrack_wasm -- -D warnings
-      - name: Test release identity guard
-        run: python3 scripts/test_verify_engine_release.py
-      - name: Verify packaged docs and WASM example
+      - name: Test release identity and package guards
+        run: python3 -m unittest discover -s scripts -p 'test_verify_*.py'
+      - name: Verify package size, docs and extracted native/WASM examples
         run: python3 scripts/verify_package.py
       - name: Verify schema-1 recovery against the preserved baseline
         run: python3 scripts/verify_legacy_checkpoint.py

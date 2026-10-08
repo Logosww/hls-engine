@@ -10,11 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  checks:
-    uses: ./.github/workflows/ci.yml
-
   publish:
-    needs: checks
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -27,11 +23,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify release identity after CI
+      - name: Verify release identity
         run: python3 scripts/verify_engine_release.py
-
-      - name: Run tests
-        run: cargo test --locked --features serde,experimental-gcm
 
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth

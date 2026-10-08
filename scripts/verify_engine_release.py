@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify release identity after the publish workflow's mandatory CI dependency."""
+"""Verify package identity, release tag and clean checkout before publication."""
 import argparse
 import hashlib
 import os

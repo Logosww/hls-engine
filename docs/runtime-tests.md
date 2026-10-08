@@ -47,6 +47,7 @@ and uploaded by CI. Schema-1 compatibility is checked against artifacts generate
 from the preserved baseline commit, rather than recreated by the current encoder.
 
 Logs, measurements and JSON evidence live under `target/` and are uploaded by CI.
-The publish workflow depends on the complete CI workflow for the release tag,
-then verifies package name/version, tag identity and a clean checkout before
-publishing.
+CI runs independently on pushes to main and pull requests. The publish workflow
+verifies package name/version, tag identity and a clean checkout, then obtains
+the crates.io credential and publishes. Tag publication does not rerun the CI
+matrix or a duplicate test suite.

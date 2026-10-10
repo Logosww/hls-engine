@@ -7,8 +7,10 @@ mod control;
 mod engine;
 mod model;
 mod multitrack;
+mod sidecar;
 mod subtitles;
 pub use multitrack::*;
+pub use sidecar::*;
 pub use subtitles::*;
 mod output;
 mod recovery;
@@ -24,6 +26,9 @@ pub use output::ContinuousFileProvider;
 pub use output::{ContinuousOutputRequest, ContinuousWriterProvider};
 
 pub struct ContinuousSession {
+    subtitle_sink: Option<Arc<dyn SubtitleSink>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    recoverable_subtitles: Option<Arc<dyn RecoverableSubtitleSink>>,
     recovery: Option<EngineCheckpoint>,
     keep_embedded: bool,
     multi: Option<Arc<std::sync::Mutex<multitrack::MultiState>>>,
@@ -68,6 +73,7 @@ impl ContinuousSession {
                 reason: None,
                 paused: false,
                 blocked: false,
+                checkpointing: false,
                 queued: 0,
                 metadata: 0,
                 peaks: ContinuousPeaks::default(),
@@ -94,7 +100,10 @@ impl ContinuousSession {
             })
             .collect();
         Ok(Self {
+            subtitle_sink: None,
             recovery: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            recoverable_subtitles: None,
             keep_embedded,
             multi: None,
             shared,
@@ -196,6 +205,7 @@ impl ContinuousSession {
         state.queued = 0;
         state.metadata = 0;
         state.blocked = false;
+        state.checkpointing = false;
         drop(state);
         if let Some(state) = &self.multi {
             state.lock().unwrap().clear_subtitles();

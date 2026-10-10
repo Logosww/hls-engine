@@ -49,10 +49,19 @@ fn session(checkpoint: Option<EngineCheckpoint>) -> MultiTrackSession {
         );
     }
     let id = InputId::new("main").unwrap();
-    let inputs = MultiTrackInputs::new(
+    let mut inputs = MultiTrackInputs::new(
         ContinuousInput::new(id.clone(), Arc::new(source)),
         EmbeddedAudio::Exclude,
     );
+    let sidecar = std::env::var("HLS_FAULT_SIDECAR").ok().as_deref() == Some("1");
+    let cc = InputId::new("cc").unwrap();
+    if sidecar {
+        inputs = inputs.with_subtitle(SubtitleTrack::new(
+            cc.clone(),
+            id.clone(),
+            TrackMetadata::default(),
+        ));
+    }
     let keys = KeySession::new(
         "fault",
         "scope",
@@ -67,7 +76,31 @@ fn session(checkpoint: Option<EngineCheckpoint>) -> MultiTrackSession {
         None => MultiTrackSession::new(inputs, keys, options),
     }
     .unwrap();
+    let s = if sidecar {
+        let dir = std::path::PathBuf::from(std::env::var_os("HLS_FAULT_CHILD").unwrap());
+        s.with_recoverable_subtitle_sink(Arc::new(Files(SubtitleDestination::new(
+            cc.clone(),
+            dir.join("captions.vtt"),
+        ))))
+    } else {
+        s
+    };
     if !terminal {
+        if sidecar {
+            let track = s.handle().subtitle_track_id(&cc).unwrap();
+            let start = MediaTime::new(0, 1000).unwrap();
+            let end = MediaTime::new(2000, 1000).unwrap();
+            s.handle()
+                .accept_cues(
+                    track,
+                    &[
+                        SubtitleCue::new(0, 0, start, end, "first"),
+                        SubtitleCue::new(0, 1, start, end, "second"),
+                    ],
+                )
+                .unwrap();
+            s.handle().end_subtitles(track).unwrap();
+        }
         let snapshot = parse_playlist_snapshot(&TextResource {
             location: SourceLocation::Url(url::Url::parse("https://fault.test/index").unwrap()),
             content: "#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-MAP:URI=\"a.init\"\n#EXTINF:2,\navc\n#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"h.init\"\n#EXTINF:2,\nhevc\n#EXT-X-ENDLIST\n".into(),
@@ -112,7 +145,10 @@ fn filesystem_fault_child() {
         .unwrap()
         .block_on(session(checkpoint).write_recoverable_to_file(&dir.join("output.mp4"), recovery));
     if std::env::var_os("HLS_FAULT_POINT").is_some() {
-        assert_eq!(result.unwrap_err().kind(), ContinuousErrorKind::Output);
+        assert!(matches!(
+            result.unwrap_err().kind(),
+            ContinuousErrorKind::Output | ContinuousErrorKind::SubtitleOutput
+        ));
     } else {
         result.unwrap();
     }
@@ -150,12 +186,13 @@ fn canonical(mut bytes: Vec<u8>) -> Vec<u8> {
 fn filesystem_fault_boundaries() {
     let root = std::env::temp_dir().join(format!("engine-io-faults-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
-    let run = |dir: &Path, classic: bool, point: Option<&str>, action: &str| {
+    let run = |dir: &Path, classic: bool, sidecar: bool, point: Option<&str>, action: &str| {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args(["filesystem_fault_child", "--ignored", "--nocapture"])
             .env("HLS_FAULT_CHILD", dir)
             .env("HLS_FAULT_CLASSIC", if classic { "1" } else { "0" })
+            .env("HLS_FAULT_SIDECAR", if sidecar { "1" } else { "0" })
             .env_remove("HLS_FAULT_POINT")
             .env("HLS_FAULT_ACTION", action);
         if let Some(point) = point {
@@ -175,10 +212,10 @@ fn filesystem_fault_boundaries() {
         );
     };
     let mut windows = 0;
-    for classic in [false, true] {
-        let reference = root.join(format!("reference-{classic}"));
+    for (classic, sidecar) in [(false, false), (true, false), (false, true), (true, true)] {
+        let reference = root.join(format!("reference-{classic}-{sidecar}"));
         std::fs::create_dir(&reference).unwrap();
-        run(&reference, classic, None, "none");
+        run(&reference, classic, sidecar, None, "none");
         let hits: BTreeMap<String, usize> =
             serde_json::from_slice(&std::fs::read(reference.join("hits.json")).unwrap()).unwrap();
         for (stage, count) in hits {
@@ -194,14 +231,23 @@ fn filesystem_fault_boundaries() {
                     let point = format!("{stage}:{count}");
                     let dir = root.join(format!("case-{windows}"));
                     std::fs::create_dir(&dir).unwrap();
-                    run(&dir, classic, Some(&point), action);
-                    run(&dir, classic, None, "none");
+                    run(&dir, classic, sidecar, Some(&point), action);
+                    run(&dir, classic, sidecar, None, "none");
                     for name in ["output.mp4", "output.mp4.part-000001.mp4"] {
                         assert_eq!(
                             canonical(std::fs::read(dir.join(name)).unwrap()),
                             canonical(std::fs::read(reference.join(name)).unwrap()),
                             "{point} {action} {name}"
                         );
+                    }
+                    if sidecar {
+                        for name in ["captions.vtt", "captions.vtt.part-000001.vtt"] {
+                            assert_eq!(
+                                std::fs::read(dir.join(name)).unwrap(),
+                                std::fs::read(reference.join(name)).unwrap(),
+                                "{point} {action} {name}"
+                            );
+                        }
                     }
                     std::fs::remove_dir_all(&dir).unwrap();
                     windows += 1;
@@ -211,4 +257,49 @@ fn filesystem_fault_boundaries() {
     }
     eprintln!("verified {windows} filesystem error/process-exit recovery windows");
     std::fs::remove_dir_all(root).unwrap();
+}
+
+struct Files(SubtitleDestination);
+impl SubtitleSink for Files {
+    fn commit<'a>(&'a self, batch: &'a SubtitleCommit) -> SubtitleSinkFuture<'a> {
+        Box::pin(async move {
+            use std::io::Write;
+            for cue in batch.cues() {
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(self.0.partial_path(cue.output_index()))?;
+                hit("sidecar.write.before")?;
+                writeln!(
+                    file,
+                    "{}:{}:{}:{}",
+                    cue.receipt(),
+                    cue.cue().payload(),
+                    cue.start().ticks(),
+                    cue.end().ticks()
+                )?;
+                file.sync_all()?;
+                hit("sidecar.write.after")?;
+            }
+            Ok(())
+        })
+    }
+    fn finish(&self) -> SubtitleSinkFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+impl RecoverableSubtitleSink for Files {
+    fn destinations(&self) -> Vec<SubtitleDestination> {
+        vec![self.0.clone()]
+    }
+    fn format_identity(&self) -> &str {
+        "fault-test-v1"
+    }
+    fn publish(&self, output: u64) -> SubtitleSinkFuture<'_> {
+        Box::pin(async move {
+            if !self.0.final_path(output).exists() {
+                std::fs::hard_link(self.0.partial_path(output), self.0.final_path(output))?;
+            }
+            Ok(())
+        })
+    }
 }

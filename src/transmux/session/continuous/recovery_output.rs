@@ -13,6 +13,10 @@ macro_rules! fault {
 #[path = "recovery_faults.rs"]
 mod faults;
 
+#[path = "recovery_sidecars.rs"]
+mod sidecars;
+use sidecars::*;
+
 struct FileWriter {
     file: tokio::fs::File,
     hash: Sha256,
@@ -58,6 +62,7 @@ struct RecoverableFile {
     checkpoint: Option<EngineCheckpoint>,
     last: Option<EngineCheckpoint>,
     shared: Arc<Shared>,
+    sidecars: Option<SidecarFiles>,
 }
 fn child_path(root: &Path, index: u64) -> std::path::PathBuf {
     if index == 0 {
@@ -129,16 +134,14 @@ impl Target for RecoverableFile {
             if self.checkpoint.is_some() {
                 return Ok(());
             }
+            let _admission = CheckpointAdmission::new(session);
             if self.path.exists() || self.partial.exists() {
                 return Err(conflict());
             }
-            let configuration = session
-                .multi
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .configuration;
+            let (configuration, next_receipt) = {
+                let multi = session.multi.as_ref().unwrap().lock().unwrap();
+                (multi.configuration, multi.next_receipt)
+            };
             let cp = EngineCheckpoint {
                 configuration,
                 prefix: Sha256::new().finalize().into(),
@@ -154,6 +157,20 @@ impl Target for RecoverableFile {
                 sealed: false,
                 outputs: vec![],
                 synced: self.recovery.durability == CheckpointDurability::SyncAll,
+                sidecars: self
+                    .sidecars
+                    .as_ref()
+                    .map(|s| {
+                        s.snapshot(
+                            None,
+                            engine.output,
+                            true,
+                            false,
+                            &self.shared.signal,
+                            next_receipt,
+                        )
+                    })
+                    .transpose()?,
             };
             if cp.to_bytes().len() > session.options.limits.metadata {
                 return Err(fail(ContinuousErrorKind::BudgetExceeded));
@@ -191,20 +208,40 @@ impl Target for RecoverableFile {
                 let final_path = self.path.clone();
                 let cp = checkpoint.clone();
                 let signal = self.shared.signal.clone();
+                let sidecars = self.sidecars.clone();
                 let (file, hash) = tokio::task::spawn_blocking(move || {
+                    #[cfg(unix)]
+                    verify_aliases(&root, &cp, sidecars.as_ref())?;
+                    let sidecar_prefixes = sidecars
+                        .as_ref()
+                        .map(|s| s.validate(&cp, &signal, false))
+                        .transpose()?;
                     verify_outputs(&root, &cp.outputs, &signal)?;
                     if cp.bytes == 0 && final_path.exists() {
                         return Err(conflict());
                     }
-                    let mut file = std::fs::OpenOptions::new()
-                        .create_new(!resuming)
-                        .create(resuming && cp.bytes == 0)
-                        .truncate(false)
-                        .read(true)
-                        .write(true)
-                        .open(&path)
-                        .map_err(|e| output_error(e.into()))?;
-                    let hash = prefix(&mut file, cp.bytes, &signal)?;
+                    // Do not create an acquisition-intent file until every
+                    // destination and committed prefix has passed validation.
+                    let existing = regular_file(&path, true)?;
+                    if existing.is_some() && !resuming {
+                        return Err(output_error(
+                            std::io::Error::new(
+                                std::io::ErrorKind::AlreadyExists,
+                                "output partial already exists",
+                            )
+                            .into(),
+                        ));
+                    }
+                    if existing.is_none() && cp.bytes != 0 {
+                        return Err(corruption());
+                    }
+                    let mut file = existing;
+                    let hash = if let Some(file) = &mut file {
+                        prefix(file, cp.bytes, &signal)?
+                    } else {
+                        Sha256::new()
+                    };
+
                     if <[u8; 32]>::from(hash.clone().finalize()) != cp.prefix {
                         return Err(corruption());
                     }
@@ -216,9 +253,14 @@ impl Target for RecoverableFile {
                         }
                     };
                     if cp.bytes != 0 {
-                        let scan =
-                            crate::isobmff::scan_file(&mut file, cp.bytes, false, false, &check)
-                                .map_err(|_| corruption())?;
+                        let scan = crate::isobmff::scan_file(
+                            file.as_mut().ok_or_else(corruption)?,
+                            cp.bytes,
+                            false,
+                            false,
+                            &check,
+                        )
+                        .map_err(|_| corruption())?;
                         if scan.fragments as u64 + 1 != u64::from(cp.sequence) {
                             return Err(corruption());
                         }
@@ -268,11 +310,30 @@ impl Target for RecoverableFile {
                         {
                             return Err(conflict());
                         }
-                        if file.metadata().map_err(|e| output_error(e.into()))?.len() != cp.bytes {
+                        if file
+                            .as_ref()
+                            .ok_or_else(corruption)?
+                            .metadata()
+                            .map_err(|e| output_error(e.into()))?
+                            .len()
+                            != cp.bytes
+                        {
                             return Err(conflict());
                         }
                     }
                     check().map_err(output_error)?;
+                    if let Some(prefixes) = sidecar_prefixes {
+                        SidecarFiles::truncate(prefixes)?;
+                    }
+                    let mut file = match file {
+                        Some(file) => file,
+                        None => std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .map_err(|e| output_error(e.into()))?,
+                    };
                     file.set_len(cp.bytes).map_err(|e| output_error(e.into()))?;
                     file.seek(SeekFrom::Start(cp.bytes))
                         .map_err(|e| output_error(e.into()))?;
@@ -313,6 +374,8 @@ impl Target for RecoverableFile {
         sealing: bool,
     ) -> Pin<Box<dyn Future<Output = ContinuousResult<()>> + 'a>> {
         Box::pin(async move {
+            let _admission = CheckpointAdmission::new(session);
+            session.commit_subtitles().await?;
             let state = engine.save(session)?;
             fault!("flush.before");
             writer
@@ -338,14 +401,12 @@ impl Target for RecoverableFile {
                     return Err(conflict());
                 }
             }
+            let (configuration, next_receipt) = {
+                let multi = session.multi.as_ref().unwrap().lock().unwrap();
+                (multi.configuration, multi.next_receipt)
+            };
             let cp = EngineCheckpoint {
-                configuration: session
-                    .multi
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .unwrap()
-                    .configuration,
+                configuration,
                 prefix: if acquiring {
                     Sha256::new().finalize().into()
                 } else {
@@ -369,6 +430,23 @@ impl Target for RecoverableFile {
                 sealed: sealing,
                 outputs: self.outputs.clone(),
                 synced: self.recovery.durability == CheckpointDurability::SyncAll,
+                sidecars: self
+                    .sidecars
+                    .as_ref()
+                    .map(|s| {
+                        s.snapshot(
+                            self.last
+                                .as_ref()
+                                .or(self.checkpoint.as_ref())
+                                .and_then(|c| c.sidecars.as_ref()),
+                            engine.output,
+                            acquiring,
+                            self.recovery.durability == CheckpointDurability::SyncAll,
+                            &self.shared.signal,
+                            next_receipt,
+                        )
+                    })
+                    .transpose()?,
             };
             if cp.to_bytes().len() > session.options.limits.metadata {
                 return Err(fail(ContinuousErrorKind::BudgetExceeded));
@@ -464,6 +542,9 @@ impl Target for RecoverableFile {
                     .sum();
             }
 
+            if let Some(sidecars) = &self.sidecars {
+                sidecars.publish(&cp, &self.shared.signal).await?;
+            }
             {
                 let mut state = self.shared.inner.lock().unwrap();
                 if self.shared.signal.is_cancelled() {
@@ -529,6 +610,7 @@ impl ContinuousSession {
         identity: [u8; 32],
         recovery: &RecoveryOptions,
         checkpoint: &EngineCheckpoint,
+        sidecars: Option<SidecarFiles>,
     ) -> ContinuousResult<ContinuousReport> {
         if checkpoint.destination != identity
             || checkpoint.classic != (recovery.format != OutputFormat::FragmentedMp4)
@@ -550,7 +632,11 @@ impl ContinuousSession {
         // Verify the final artifact read-only, without any source/key/cue I/O.
         let outputs = checkpoint.outputs.clone();
         let index = checkpoint.output;
+        let cp = checkpoint.clone();
         tokio::task::spawn_blocking(move || {
+            if let Some(sidecars) = sidecars {
+                sidecars.validate(&cp, &signal, true)?;
+            }
             verify_outputs(&path, &outputs, &signal)?;
             let mut file = std::fs::File::open(child_path(&path, index))
                 .map_err(|e| output_error(e.into()))?;
@@ -594,6 +680,9 @@ impl ContinuousSession {
         path: &Path,
         recovery: RecoveryOptions,
     ) -> ContinuousResult<ContinuousReport> {
+        if self.subtitle_sink.is_some() && !self.durable_subtitles() {
+            return self.finish(Err(fail(ContinuousErrorKind::InvalidOptions)));
+        }
         self.resources.enable_recovery();
         let parent = path
             .parent()
@@ -605,11 +694,25 @@ impl ContinuousSession {
             .ok_or_else(|| fail(ContinuousErrorKind::InvalidOptions))?;
         let path = directory.join(name);
         let identity = crate::resume::digest(path.as_os_str().as_encoded_bytes());
+        let sidecars = match SidecarFiles::new(&self, &path) {
+            Ok(sidecars) => sidecars,
+            Err(error) => return self.finish(Err(error)),
+        };
+        if let Some(cp) = &self.recovery
+            && (cp.sidecars.is_some() != sidecars.is_some()
+                || cp
+                    .sidecars
+                    .as_ref()
+                    .zip(sidecars.as_ref())
+                    .is_some_and(|(c, s)| c.configuration != s.identity))
+        {
+            return self.finish(Err(conflict()));
+        }
         if let Some(checkpoint) = &self.recovery
             && checkpoint.completed
         {
             let result = self
-                .completed_file(path, identity, &recovery, checkpoint)
+                .completed_file(path, identity, &recovery, checkpoint, sidecars)
                 .await;
             return self.finish(result);
         }
@@ -630,6 +733,7 @@ impl ContinuousSession {
                 checkpoint: self.recovery.clone(),
                 last: None,
                 shared: self.shared.clone(),
+                sidecars,
             })
             .await;
         self.finish(result)

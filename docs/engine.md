@@ -60,7 +60,12 @@ modification. Schema 2 is frozen for 1.x. Changes to the binary layout or replay
 semantics require a new schema version and an explicit compatibility/migration
 path; an existing fixture must not be regenerated to hide incompatibility.
 `tests/fixtures/checkpoint/engine-schema2.bin` pins the original binary envelope
-and its lossless serde representation. Schema-v1 tasks continue through `legacy`.
+and its lossless serde representation. Media-only operations still emit schema 2.
+Fixed subtitle files opt into schema 3, which preserves the original envelope
+fields and adds a joint file ledger and receipt state; both versions are readable.
+See [joint subtitle recovery](subtitle-sidecars.md#joint-native-fixed-file-recovery)
+for adapter obligations and the explicit no-in-place-migration boundary.
+Schema-v1 tasks continue through `legacy`.
 
 Public configuration structures keep private fields and builders, with read-only
 accessors for options, budgets and recovery settings. New report/error/event

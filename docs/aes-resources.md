@@ -18,7 +18,7 @@ async fn read_first(source: Arc<dyn Source>, keys: KeySession,
 }
 ```
 
-A request is derived from a typed snapshot that passes `validate_finite_vod()`;
+A `media`/`map` request uses a typed snapshot that passes `validate_finite_vod()`;
 open/EVENT/empty/I-frame/sample-encrypted/GCM/gap/discontinuity inputs are rejected
 before source/key work. `ResourceRequest::map` uses the MAP's frozen declaration
 and encryption context. Constructors check the finite snapshot; later prepared
@@ -53,8 +53,9 @@ validated by the shared media core in the keyed prepared entry.
 CBC provides no authentication. Wrong keys normally fail padding or structure;
 a wrong IV may preserve padding, and some corruptions can pass both checks. Do not
 expose detailed decrypt errors as a remote decryption oracle or interpret success
-as proof of authenticity. The public API does not expose raw unaudited decryptor
-callbacks or a padding-only decryption endpoint.
+as proof of authenticity. The media profile always validates the clear container. The explicit WebVTT
+profile delegates UTF-8 and subtitle syntax validation to the SDK; it must not be
+treated as an authenticated plaintext endpoint.
 
 ## Complete-resource ranges
 
@@ -126,3 +127,10 @@ and redaction. A NIST CBC vector and independently padded OpenSSL vector are uni
 tests. [Fixture provenance](../tests/fixtures/crypto/README.md) records public keys,
 commands, hashes and clear-source origins. [Runtime regression](runtime-tests.md)
 compares native, actual Node/WASM and real Chrome using asynchronous key Promises.
+
+## Explicit WebVTT profile
+
+`ResourceRequest::webvtt_media` and `webvtt_map` accept immutable VOD/Live/EVENT
+snapshots and return unparsed clear subtitle bytes. Existing media constructors
+remain strict. See [subtitle resources and acknowledged sidecars](subtitle-sidecars.md)
+for shared Engine resource budgets, source/key evidence and recovery boundaries.

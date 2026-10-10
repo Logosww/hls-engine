@@ -82,8 +82,9 @@ transcoding are outside the supported profile.
 
 ## Recovery and ownership
 
-Native `write_recoverable_to_file` emits schema-2 `EngineCheckpoint` values through
-an independent fallible callback. Persist them atomically. Restoration verifies
+Native `write_recoverable_to_file` emits `EngineCheckpoint` values through an
+independent fallible callback: schema 2 for media-only output, schema 3 for
+[joint fixed-file subtitle recovery](docs/subtitle-sidecars.md#joint-native-fixed-file-recovery). Persist them atomically. Restoration verifies
 resource identities, key versions, committed file prefixes and completed split
 children before appending. A fresh output never overwrites a competing file.
 

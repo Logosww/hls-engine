@@ -9,6 +9,7 @@ Start with the [README](../README.md), then the [Engine integration guide](engin
 - [Typed playlists and lossless metadata](typed-playlists.md)
 - [Key provider lifecycle and budgets](key-sessions.md)
 - [AES-128 resources and byte ranges](aes-resources.md)
+- [Subtitle resources and acknowledged sidecars](subtitle-sidecars.md)
 - [Sample encryption](sample-encryption.md)
 - [Memory bounds](benchmarks.md)
 - [Native, Node and Chrome CI checks](runtime-tests.md)

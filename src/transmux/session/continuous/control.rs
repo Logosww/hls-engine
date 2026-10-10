@@ -46,6 +46,7 @@ pub(super) struct State {
     pub reason: Option<ContinuousEndReason>,
     pub paused: bool,
     pub blocked: bool,
+    pub checkpointing: bool,
     pub queued: usize,
     pub metadata: usize,
     pub peaks: ContinuousPeaks,
@@ -216,6 +217,7 @@ impl ContinuousHandle {
             declarations.apply(segment);
         }
         if state.blocked
+            || state.checkpointing
             || state.paused
             || state.queued + added.len() > limits.descriptors
             || state.metadata + bytes > limits.metadata
@@ -312,6 +314,7 @@ impl ContinuousHandle {
                     return Err(fail(ContinuousErrorKind::Closed));
                 }
                 if !state.blocked
+                    && !state.checkpointing
                     && !state.paused
                     && state.queued < self.shared.options.limits.descriptors
                     && state.metadata < self.shared.options.limits.metadata

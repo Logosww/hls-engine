@@ -55,6 +55,11 @@ split. FFmpeg finalization is rejected for this entry before writing any output.
 
 ## Subtitle contract
 
+For incremental sidecars and WebVTT resource decryption, see the
+[acknowledged subtitle sink contract](subtitle-sidecars.md). Native fixed-file
+adapters use `with_recoverable_subtitle_sink` for joint media/sidecar recovery.
+Ordinary Writable sinks remain ineligible for recovery.
+
 Add `SubtitleTrack::new(subtitle_input_id, timeline_input_id, metadata)` before
 starting. Obtain its stable ID with `handle.subtitle_track_id`. Submit
 `SubtitleCue::new(generation, epoch, start, end, payload)`, optionally using

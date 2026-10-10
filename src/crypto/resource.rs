@@ -144,10 +144,11 @@ impl std::error::Error for ResourceError {
 }
 pub type ResourceResult<T> = Result<T, ResourceError>;
 
-/// A resource selected from a finite, preflight-validated P1 snapshot.
+/// An immutable resource request with an explicit clear-content profile.
 #[derive(Debug, Clone)]
 pub struct ResourceRequest {
     packed: bool,
+    webvtt: bool,
     resource: KeyResource,
     segment: SegmentDescriptor,
 }
@@ -157,6 +158,36 @@ impl ResourceRequest {
     }
     pub fn map(snapshot: &PlaylistSnapshot, index: usize) -> ResourceResult<Self> {
         Self::from_snapshot(snapshot, index, true)
+    }
+    /// Prepare a WebVTT segment from a VOD, Live or EVENT snapshot.
+    /// The caller owns snapshot reconciliation and UTF-8/WebVTT syntax validation.
+    pub fn webvtt_media(snapshot: &PlaylistSnapshot, index: usize) -> ResourceResult<Self> {
+        Self::webvtt(snapshot, index, false)
+    }
+    /// Prepare the selected segment's frozen WebVTT MAP/header declaration.
+    pub fn webvtt_map(snapshot: &PlaylistSnapshot, index: usize) -> ResourceResult<Self> {
+        Self::webvtt(snapshot, index, true)
+    }
+    fn webvtt(snapshot: &PlaylistSnapshot, index: usize, map: bool) -> ResourceResult<Self> {
+        snapshot
+            .validate_continuous()
+            .map_err(|rejection| ResourceError {
+                rejection: Some(rejection),
+                ..ResourceError::new(ResourceErrorKind::UnsupportedPlaylist)
+            })?;
+        let mut request = Self::from_validated(snapshot, index, map)?;
+        if request.segment.gap()
+            || request
+                .resource
+                .keys()
+                .candidates()
+                .iter()
+                .any(|key| !matches!(key.method(), crate::playlist::EncryptionMethod::Aes128))
+        {
+            return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist).at(&request));
+        }
+        request.webvtt = true;
+        Ok(request)
     }
     fn from_snapshot(snapshot: &PlaylistSnapshot, index: usize, map: bool) -> ResourceResult<Self> {
         snapshot
@@ -192,11 +223,15 @@ impl ResourceRequest {
             resource,
             segment,
             packed: false,
+            webvtt: false,
         })
     }
     pub(crate) fn with_packed(mut self, enabled: bool) -> Self {
         self.packed = enabled;
         self
+    }
+    pub(crate) fn is_webvtt(&self) -> bool {
+        self.webvtt
     }
     pub fn resource(&self) -> &KeyResource {
         &self.resource
@@ -343,6 +378,10 @@ impl ResourceOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClearContainer {
+    /// Decrypted subtitle bytes; syntax and UTF-8 remain caller-validated.
+    WebVtt,
+    /// Decrypted WebVTT MAP/header bytes; syntax remains caller-validated.
+    WebVttHeader,
     PackedAac,
     TransportStream,
     Fmp4Init,
@@ -350,6 +389,7 @@ pub enum ClearContainer {
 }
 /// Resource bytes never appear in Debug or serialization. Owned bytes are wiped on drop.
 pub struct ClearResource {
+    provenance: Arc<()>,
     bytes: Zeroizing<Vec<u8>>,
     request: ResourceRequest,
     container: ClearContainer,
@@ -359,6 +399,9 @@ pub struct ClearResource {
     iv: Option<[u8; 16]>,
 }
 impl ClearResource {
+    pub(crate) fn provenance(&self) -> &Arc<()> {
+        &self.provenance
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -456,6 +499,7 @@ type ResourceObserver = Arc<dyn Fn(ResourceObservation<'_>) -> ResourceResult<()
 type ResourceObserver = Arc<dyn Fn(ResourceObservation<'_>) -> ResourceResult<()>>;
 /// Owns key lifecycle and resource admission for a single operation, shared by its inputs.
 pub struct ResourceSession {
+    provenance: Arc<()>,
     keys: KeySession,
     options: ResourceOptions,
     state: Arc<Mutex<ResourceStats>>,
@@ -468,6 +512,7 @@ impl ResourceSession {
         options.validate()?;
         keys.enable_gcm(options.experimental_gcm());
         Ok(Self {
+            provenance: Arc::new(()),
             keys,
             options,
             state: Arc::new(Mutex::new(ResourceStats {
@@ -500,6 +545,9 @@ impl ResourceSession {
             })?;
         }
         self.check()
+    }
+    pub(crate) fn provenance(&self) -> &Arc<()> {
+        &self.provenance
     }
     pub fn stats(&self) -> ResourceStats {
         *self.state.lock().unwrap()
@@ -663,7 +711,11 @@ impl ResourceSession {
                 KeyErrorKind::Expired,
             )));
         }
-        if let Some(key) = &key {
+        // Subtitle recovery binds the resource/version digest to replayed cues.
+        // Do not retain one media-key ledger entry per external subtitle read.
+        if let Some(key) = &key
+            && !request.webvtt
+        {
             self.record_recovery_key(&request.resource, key)
                 .map_err(ResourceError::from_key)?;
         }
@@ -701,6 +753,7 @@ impl ResourceSession {
         self.check()?;
         self.observe(request, ResourceStage::Ready, bytes.len() as u64)?;
         Ok(ClearResource {
+            provenance: self.provenance.clone(),
             bytes,
             request: request.clone(),
             container,
@@ -739,6 +792,13 @@ fn decrypt(bytes: &mut Vec<u8>, key: &[u8], iv: &[u8; 16]) -> ResourceResult<()>
     Ok(())
 }
 fn validate_container(bytes: &[u8], request: &ResourceRequest) -> crate::Result<ClearContainer> {
+    if request.webvtt {
+        return Ok(if request.resource.kind() == KeyResourceKind::Map {
+            ClearContainer::WebVttHeader
+        } else {
+            ClearContainer::WebVtt
+        });
+    }
     if request.packed && bytes.starts_with(b"ID3") {
         if request.segment.map().is_some() || request.resource.kind() == KeyResourceKind::Map {
             return Err(crate::Error::unsupported("Packed AAC cannot use MAP"));

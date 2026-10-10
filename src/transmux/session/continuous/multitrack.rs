@@ -175,6 +175,9 @@ pub(super) struct MultiState {
     pub tracks: Vec<OutputTrackInfo>,
     pub track_history_truncated: bool,
     pub subtitles: Vec<super::subtitles::SubtitleLane>,
+    pub sidecar: bool,
+    pub next_receipt: u64,
+    pub pending_subtitles: SubtitleCommit,
     pub subtitle_reports: VecDeque<SubtitleCueReport>,
     pub subtitle_history_truncated: bool,
     pub media_samples: usize,
@@ -186,6 +189,7 @@ pub struct MultiTrackSession {
 }
 #[derive(Clone)]
 pub struct MultiTrackHandle {
+    resources: Arc<ResourceSession>,
     core: ContinuousHandle,
     shared: Arc<std::sync::Mutex<MultiState>>,
 }
@@ -224,6 +228,37 @@ impl MultiTrackHandle {
     ) -> ContinuousResult<SnapshotAcceptance> {
         self.core.accept_snapshot(input, snapshot)
     }
+    /// Prepare a subtitle resource with this operation's shared key and resource
+    /// budgets. Source transport and playlist reconciliation remain caller-owned.
+    pub async fn read_subtitle_resource(
+        &self,
+        source: Arc<dyn Source>,
+        request: ResourceRequest,
+    ) -> ContinuousResult<ClearResource> {
+        if !request.is_webvtt()
+            || self
+                .subtitle_track_id(request.resource().slot().input_id())
+                .is_none()
+        {
+            return Err(fail(ContinuousErrorKind::InvalidSubtitle));
+        }
+        {
+            let state = self.core.shared.inner.lock().unwrap();
+            if self.core.shared.signal.is_cancelled() {
+                return Err(fail(ContinuousErrorKind::Cancelled));
+            }
+            if state.state.terminal() || state.reason.is_some() {
+                return Err(fail(ContinuousErrorKind::Closed));
+            }
+        }
+        tokio::select! { biased;
+            _ = self.core.shared.signal.cancelled() => Err(fail(ContinuousErrorKind::Cancelled)),
+            result = self.resources.read(source, request) => {
+                if self.core.shared.signal.is_cancelled() { return Err(fail(ContinuousErrorKind::Cancelled)); }
+                result.map_err(resource_error)
+            },
+        }
+    }
     pub fn subtitle_track_id(&self, id: &InputId) -> Option<OutputTrackId> {
         self.shared
             .lock()
@@ -245,7 +280,7 @@ impl MultiTrackHandle {
         if state.state.terminal() || state.reason.is_some() {
             return Err(fail(ContinuousErrorKind::Closed));
         }
-        if state.blocked {
+        if state.blocked || state.checkpointing {
             return Err(fail(ContinuousErrorKind::WouldBlock));
         }
         let result =
@@ -371,9 +406,15 @@ impl MultiTrackSession {
         options: ContinuousOptions,
         checkpoint: EngineCheckpoint,
     ) -> ContinuousResult<Self> {
+        if checkpoint.to_bytes().len() > options.limits.metadata {
+            return Err(fail(ContinuousErrorKind::BudgetExceeded));
+        }
         let mut session = Self::new(inputs, keys, options)?;
         if session.state.lock().unwrap().configuration != checkpoint.configuration {
             return Err(fail(ContinuousErrorKind::ResumeConflict));
+        }
+        if let Some(sidecars) = &checkpoint.sidecars {
+            session.state.lock().unwrap().next_receipt = sidecars.next_receipt;
         }
         session.core.recovery = Some(checkpoint);
         Ok(session)
@@ -442,6 +483,9 @@ impl MultiTrackSession {
         for subtitle in &inputs.subtitles {
             field(subtitle.id.as_str());
             field(subtitle.timeline_input.as_str());
+            if !subtitle.embedded {
+                field("sidecar-only");
+            }
             field(&subtitle.metadata.language);
             field(&subtitle.metadata.name);
             field(if subtitle.metadata.default {
@@ -511,6 +555,9 @@ impl MultiTrackSession {
                 .enumerate()
                 .map(|(i, c)| super::subtitles::SubtitleLane::new(c, i))
                 .collect(),
+            sidecar: false,
+            next_receipt: 0,
+            pending_subtitles: SubtitleCommit::default(),
             subtitle_reports: VecDeque::new(),
             subtitle_history_truncated: false,
             media_samples: 0,
@@ -540,8 +587,33 @@ impl MultiTrackSession {
         let media = self.core.recoverable_file(path.as_ref(), recovery).await?;
         Ok(self.state.lock().unwrap().report(media))
     }
+    /// Attach one acknowledged sidecar consumer for all selected subtitle tracks.
+    /// The sink is independent of lossy observer/report history. At most one
+    /// bounded batch is in flight. Arbitrary sinks are not recovery destinations.
+    pub fn with_subtitle_sink(mut self, sink: Arc<dyn SubtitleSink>) -> Self {
+        self.state.lock().unwrap().sidecar = true;
+        self.core.subtitle_sink = Some(sink);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.core.recoverable_subtitles = None;
+        }
+        self
+    }
+    /// Attach SDK-owned fixed subtitle files for joint native recovery.
+    /// Valid only with `write_recoverable_to_file`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_recoverable_subtitle_sink(
+        mut self,
+        sink: Arc<dyn RecoverableSubtitleSink>,
+    ) -> Self {
+        self.state.lock().unwrap().sidecar = true;
+        self.core.subtitle_sink = Some(sink.clone());
+        self.core.recoverable_subtitles = Some(sink);
+        self
+    }
     pub fn handle(&self) -> MultiTrackHandle {
         MultiTrackHandle {
+            resources: self.core.resources.clone(),
             core: self.core.handle(),
             shared: self.state.clone(),
         }

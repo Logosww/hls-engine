@@ -193,6 +193,18 @@ impl ContinuousSession {
         }
     }
     async fn run<T: Target>(&self, target: &mut T) -> ContinuousResult<ContinuousReport> {
+        if (target.recoverable() && self.subtitle_sink.is_some() && !self.durable_subtitles())
+            || (self.durable_subtitles() && !target.recoverable())
+            || self.multi.as_ref().is_some_and(|s| {
+                s.lock()
+                    .unwrap()
+                    .subtitles
+                    .iter()
+                    .any(|s| !s.config.embedded)
+            }) && self.subtitle_sink.is_none()
+        {
+            return Err(fail(ContinuousErrorKind::InvalidOptions));
+        }
         if self.recovery.is_some() && !target.recoverable() {
             return Err(fail(ContinuousErrorKind::InvalidOptions));
         }
@@ -206,12 +218,24 @@ impl ContinuousSession {
         let mut engine = match prepared {
             Ok(engine) => engine,
             Err(error) if error.kind() == ContinuousErrorKind::EmptyInput => {
-                let state = self.shared.inner.lock().unwrap();
-                if state.lanes.iter().any(|l| l.progress.accepted > 0) {
-                    return Err(error);
+                let reason = {
+                    let state = self.shared.inner.lock().unwrap();
+                    if state.lanes.iter().any(|l| l.progress.accepted > 0) {
+                        return Err(error);
+                    }
+                    state.reason.unwrap_or(ContinuousEndReason::Eof)
+                };
+                if self
+                    .multi
+                    .as_ref()
+                    .is_some_and(|s| s.lock().unwrap().subtitle_usage().0 > 0)
+                {
+                    return Err(fail(ContinuousErrorKind::MissingSubtitleMapping));
                 }
+                self.finish_subtitle_sink().await?;
+                let state = self.shared.inner.lock().unwrap();
                 return Ok(ContinuousReport {
-                    reason: state.reason.unwrap_or(ContinuousEndReason::Eof),
+                    reason,
                     inputs: state.lanes.iter().map(|l| l.progress.clone()).collect(),
                     bytes: 0,
                     duration: zero(),
@@ -394,6 +418,7 @@ impl ContinuousSession {
             }
             engine.retain_history(self);
             engine.budget(self)?;
+            self.commit_subtitles().await?;
             self.commit(input, &batch.descriptor, engine.bytes)?;
             self.wait(target.checkpoint(&mut writer, self, &engine, mux.next_sequence(), false))
                 .await?;
@@ -420,9 +445,11 @@ impl ContinuousSession {
                 self.write(&mut writer, &fragment).await?;
                 engine.bytes += fragment.len() as u64;
                 engine.part_bytes += fragment.len() as u64;
-                engine.duration = max(engine.duration, end)?;
             }
+            engine.duration = max(engine.duration, end)?;
         }
+        self.commit_subtitles().await?;
+        self.finish_subtitle_sink().await?;
         self.state(ContinuousState::Finalizing)?;
         self.wait(target.checkpoint(&mut writer, self, &engine, mux.next_sequence(), false))
             .await?;

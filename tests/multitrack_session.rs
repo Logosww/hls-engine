@@ -1,3 +1,5 @@
+#[path = "support/subtitle_contract.rs"]
+mod subtitles;
 use hls_engine::legacy::{playlist::*, *};
 use std::{future::Future, pin::Pin, sync::Arc};
 #[allow(dead_code)]
@@ -713,6 +715,8 @@ async fn subtitle_split_keeps_identity_metadata_and_remaining_cue() {
         options().with_change_policy(TimelineChangePolicy::Split),
     )
     .unwrap();
+    let sink = Arc::new(subtitles::Collector::default());
+    let s = s.with_subtitle_sink(sink.clone());
     let h = s.handle();
     h.accept_snapshot(&id("main"),&snapshot("main","#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-MAP:URI=\"a.init\"\n#EXTINF:2,\navc\n#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"h.init\"\n#EXTINF:2,\nhevc\n#EXT-X-ENDLIST\n")).unwrap();
     let cc = h.subtitle_track_id(&id("cc")).unwrap();
@@ -724,8 +728,28 @@ async fn subtitle_split_keeps_identity_metadata_and_remaining_cue() {
     let parts = Arc::new(Mutex::new(vec![]));
     let r = s.write_to_outputs(&mut Parts(parts.clone())).await.unwrap();
     assert_eq!(parts.lock().unwrap().len(), 2);
-    for p in parts.lock().unwrap().iter() {
+    for (index, p) in parts.lock().unwrap().iter().enumerate() {
         assert!(p.windows(8).any(|b| b == b"spanning"));
+        let cues = sink.cues.lock().unwrap();
+        let intervals = cues
+            .iter()
+            .filter(|c| c.output_index() == index as u64)
+            .map(|c| {
+                (
+                    c.cue().payload().to_owned(),
+                    c.start().ticks(),
+                    c.end().ticks(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            subtitles::interval_union(subtitles::embedded_intervals(p)),
+            subtitles::interval_union(intervals)
+        );
+        assert!(
+            cues.iter()
+                .all(|c| c.receipt() == 0 && c.cue().identifier() == "original")
+        );
     }
     let text: Vec<_> = r
         .tracks()

@@ -9,6 +9,7 @@ pub enum ContinuousErrorKind {
     ResumeCorruption,
     ReplayRequired,
     InvalidSubtitle,
+    SubtitleOutput,
     UnsupportedSubtitleProfile,
     MissingSubtitleMapping,
     InvalidOptions,

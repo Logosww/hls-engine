@@ -1271,6 +1271,7 @@ impl Engine {
             let subtitles: Vec<_> = state
                 .subtitles
                 .iter()
+                .filter(|s| s.config.embedded)
                 .map(|s| (s.track(), s.config.id.clone()))
                 .collect();
             for (track, id) in subtitles {
@@ -1340,7 +1341,13 @@ impl Engine {
         {
             let state = shared.lock().unwrap();
             let mut tracks = self.tracks.clone();
-            tracks.extend(state.subtitles.iter().map(|s| s.track()));
+            tracks.extend(
+                state
+                    .subtitles
+                    .iter()
+                    .filter(|s| s.config.embedded)
+                    .map(|s| s.track()),
+            );
             let configuration = config_digest(&tracks);
             for lane in &state.subtitles {
                 if &lane.config.timeline_input == batch.descriptor.slot().input_id()
@@ -1481,7 +1488,7 @@ impl Engine {
             let multi = multi.lock().unwrap();
             multi.tracks.put(&mut out);
             multi.track_history_truncated.put(&mut out);
-            multi.save_subtitles(&mut out);
+            multi.save_subtitles(&mut out, session.durable_subtitles());
         } else {
             return Err(fail(ContinuousErrorKind::InvalidOptions));
         }
@@ -1841,7 +1848,16 @@ impl Engine {
             let mut multi = multi.lock().unwrap();
             multi.tracks = Vec::get(&mut r).map_err(|_| bad())?;
             multi.track_history_truncated = bool::get(&mut r).map_err(|_| bad())?;
-            multi.restore_subtitles(&mut r, terminal)?;
+            multi.restore_subtitles(
+                &mut r,
+                terminal,
+                session.resources.provenance(),
+                session
+                    .recovery
+                    .as_ref()
+                    .and_then(|c| c.sidecars.as_ref())
+                    .map(|s| s.next_receipt),
+            )?;
         } else {
             return Err(bad());
         }

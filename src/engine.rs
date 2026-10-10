@@ -10,11 +10,13 @@ pub use crate::capabilities::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::legacy::ContinuousFileProvider as EngineFileProvider;
 pub use crate::legacy::{
-    ByteRange, CancelToken, CheckpointDurability, EmbeddedAudio, EngineCause, FileOutputOptions,
-    FinalizeBackend, GapPolicy, MediaTime, MemorySource, MissingSegmentPolicy, OutputFormat,
-    OutputTrackCodec, OutputTrackId, OutputTrackInfo, OutputTrackKind, PresentationRange, Source,
-    SourceLocation, SourceSessionOptions, SubtitleAcceptance, SubtitleCue, SubtitleCueReport,
-    SubtitleTrack, TailDurationPolicy, TextResource, TimelineChangePolicy, TrackMetadata,
+    ByteRange, CancelToken, CheckpointDurability, CommittedSubtitleCue, EmbeddedAudio, EngineCause,
+    FileOutputOptions, FinalizeBackend, GapPolicy, MediaTime, MemorySource, MissingSegmentPolicy,
+    OutputFormat, OutputTrackCodec, OutputTrackId, OutputTrackInfo, OutputTrackKind,
+    PresentationRange, Source, SourceLocation, SourceSessionOptions, SubtitleAcceptance,
+    SubtitleCommit, SubtitleCue, SubtitleCueReport, SubtitleDisposition, SubtitleFrontier,
+    SubtitleSink, SubtitleSinkFuture, SubtitleTrack, TailDurationPolicy, TextResource,
+    TimelineChangePolicy, TrackMetadata,
 };
 pub use crate::legacy::{
     ContinuousAnchor as EngineAnchor, ContinuousEndReason as EngineEndReason,
@@ -34,5 +36,7 @@ pub use crate::legacy::{
 pub use crate::legacy::{HttpRequestPolicy, ReqwestSource};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use crate::legacy::{CheckpointCallback, RecoveryOptions};
+pub use crate::legacy::{
+    CheckpointCallback, RecoverableSubtitleSink, RecoveryOptions, SubtitleDestination,
+};
 pub use crate::legacy::{ENGINE_CHECKPOINT_SCHEMA_VERSION, EngineCheckpoint};

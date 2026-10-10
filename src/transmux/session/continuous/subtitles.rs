@@ -8,6 +8,7 @@ pub struct SubtitleTrack {
     pub(super) id: InputId,
     pub(super) timeline_input: InputId,
     pub(super) metadata: TrackMetadata,
+    pub(super) embedded: bool,
 }
 impl SubtitleTrack {
     pub fn new(id: InputId, timeline_input: InputId, metadata: TrackMetadata) -> Self {
@@ -15,7 +16,14 @@ impl SubtitleTrack {
             id,
             timeline_input,
             metadata,
+            embedded: true,
         }
+    }
+    /// Disable embedded wvtt while retaining the same media-derived mapping.
+    /// A subtitle sink must be attached before starting the session.
+    pub fn with_embedded(mut self, embedded: bool) -> Self {
+        self.embedded = embedded;
+        self
     }
 }
 #[derive(Debug, Clone)]
@@ -27,6 +35,8 @@ pub struct SubtitleCue {
     identifier: String,
     payload: String,
     settings: String,
+    source: Option<[u8; 32]>,
+    prepared_by: Option<Arc<()>>,
 }
 impl SubtitleCue {
     pub fn new(
@@ -44,6 +54,8 @@ impl SubtitleCue {
             payload: payload.into(),
             identifier: String::new(),
             settings: String::new(),
+            source: None,
+            prepared_by: None,
         }
     }
     pub fn with_identifier(mut self, id: impl Into<String>) -> Self {
@@ -54,7 +66,68 @@ impl SubtitleCue {
         self.settings = settings.into();
         self
     }
-    fn bytes(&self) -> usize {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    pub fn start(&self) -> MediaTime {
+        self.start
+    }
+    pub fn end(&self) -> MediaTime {
+        self.end
+    }
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+    pub fn payload(&self) -> &str {
+        &self.payload
+    }
+    pub fn settings(&self) -> &str {
+        &self.settings
+    }
+    pub fn source_identity(&self) -> Option<&[u8; 32]> {
+        self.source.as_ref()
+    }
+    /// Bind the cue to freshly prepared resource/key evidence without retaining
+    /// bytes, URLs or raw keys. Stable provider versions are required for keys.
+    pub fn with_resource(mut self, resource: &ClearResource) -> ContinuousResult<Self> {
+        if !matches!(
+            resource.container(),
+            ClearContainer::WebVtt | ClearContainer::WebVttHeader
+        ) || resource.request().resource().slot().generation() != self.generation
+            || resource.request().resource().slot().epoch() != self.epoch
+        {
+            return Err(fail(ContinuousErrorKind::InvalidSubtitle));
+        }
+        if self.source.is_some()
+            && self
+                .prepared_by
+                .as_ref()
+                .is_none_or(|operation| !Arc::ptr_eq(operation, resource.provenance()))
+        {
+            return Err(fail(ContinuousErrorKind::InvalidSubtitle));
+        }
+        let mut identity = resource.request().segment().checkpoint_identity().to_vec();
+        if let Some(previous) = self.source {
+            identity.extend_from_slice(&previous);
+        }
+        if let Some(reference) = resource.key_reference() {
+            identity.extend_from_slice(&reference.checkpoint_identity());
+            match resource.key_version() {
+                Some(crate::crypto::key::KeyVersion::Provider(version)) => {
+                    version.put(&mut identity)
+                }
+                _ => return Err(fail(ContinuousErrorKind::ResumeConflict)),
+            }
+        }
+        identity.extend_from_slice(&crate::resume::digest(resource.bytes()));
+        self.source = Some(crate::resume::digest(&identity));
+        self.prepared_by = Some(resource.provenance().clone());
+        Ok(self)
+    }
+    pub(super) fn bytes(&self) -> usize {
         self.payload.len()
             + self.identifier.len()
             + self.settings.len()
@@ -133,6 +206,7 @@ pub enum SubtitleDisposition {
     Written,
     Clipped,
     RejectedLate,
+    RejectedRange,
 }
 #[derive(Debug, Clone)]
 pub struct SubtitleCueReport {
@@ -165,11 +239,17 @@ impl SubtitleCueReport {
 }
 #[derive(Debug, Clone, Copy)]
 pub struct SubtitleAcceptance {
+    first_receipt: Option<u64>,
     accepted: usize,
     late: usize,
     clipped: usize,
 }
 impl SubtitleAcceptance {
+    /// Receipts are consecutive in submitted order, including rejected late cues.
+    pub fn first_receipt(&self) -> Option<u64> {
+        self.first_receipt
+    }
+
     pub fn accepted(&self) -> usize {
         self.accepted
     }
@@ -181,6 +261,7 @@ impl SubtitleAcceptance {
     }
 }
 struct QueuedCue {
+    receipt: u64,
     cue: SubtitleCue,
     mapped: Option<(MediaTime, MediaTime)>,
 }
@@ -192,6 +273,7 @@ pub(super) struct SubtitleLane {
     mapping: Option<(u64, u64, MediaTime)>,
     ended: bool,
     output: u64,
+    origin: MediaTime,
 }
 impl SubtitleLane {
     pub fn new(config: SubtitleTrack, index: usize) -> Self {
@@ -203,6 +285,7 @@ impl SubtitleLane {
             mapping: None,
             ended: false,
             output: 0,
+            origin: zero(),
         }
     }
     pub fn end(&mut self) {
@@ -264,8 +347,13 @@ impl MultiState {
                 .mapping
                 .filter(|(g, e, _)| (*g, *e) == (cue.generation, cue.epoch))
             {
-                add(cue.start, shift)?;
-                add(cue.end, shift)?;
+                let start = add(cue.start, shift)?;
+                let end = add(cue.end, shift)?;
+                if self.sidecar {
+                    let origin = self.subtitles[index].origin;
+                    scale(sub(start, origin)?, SCALE)?;
+                    scale(sub(end, origin)?, SCALE)?;
+                }
             }
         }
         let (count, bytes) = self.subtitle_usage();
@@ -284,12 +372,42 @@ impl MultiState {
         {
             return Err(fail(ContinuousErrorKind::WouldBlock));
         }
+        let next_receipt = self
+            .next_receipt
+            .checked_add(cues.len() as u64)
+            .ok_or_else(|| fail(ContinuousErrorKind::TimeOverflow))?;
+        // A late disposition can be queued immediately. Reserve the worst-case
+        // whole batch before mutating admission, keeping retries atomic.
+        if self.sidecar {
+            let pending = &self.pending_subtitles.cues;
+            let pending_bytes = pending
+                .iter()
+                .map(CommittedSubtitleCue::bytes)
+                .fold(0usize, usize::saturating_add);
+            let extra = cues
+                .iter()
+                .map(|c| {
+                    c.bytes().saturating_add(
+                        std::mem::size_of::<CommittedSubtitleCue>()
+                            + self.subtitles[index].config.id.as_str().len(),
+                    )
+                })
+                .fold(0usize, usize::saturating_add);
+            if pending.len().saturating_add(cues.len()) > limits.samples
+                || pending_bytes.saturating_add(extra) > limits.sample_bytes
+            {
+                return Err(fail(ContinuousErrorKind::BudgetExceeded));
+            }
+        }
+        let first_receipt = self.next_receipt;
         let mut result = SubtitleAcceptance {
+            first_receipt: (!cues.is_empty()).then_some(first_receipt),
             accepted: 0,
             late: 0,
             clipped: 0,
         };
-        for cue in cues {
+        for (offset, cue) in cues.iter().enumerate() {
+            let receipt = first_receipt + offset as u64;
             let lane = &self.subtitles[index];
             let mut mapped = if let Some((g, e, shift)) = lane
                 .mapping
@@ -329,16 +447,45 @@ impl MultiState {
                 .as_ref()
                 .is_some_and(|r| r.disposition == SubtitleDisposition::RejectedLate);
             if let Some(report) = report {
+                if late && self.sidecar {
+                    self.stage_subtitle(
+                        CommittedSubtitleCue {
+                            receipt,
+                            input: self.subtitles[index].config.id.clone(),
+                            track,
+                            cue: cue.clone(),
+                            disposition: report.disposition,
+                            output: report.output,
+                            start: MediaTime {
+                                ticks: scale(
+                                    sub(report.start, self.subtitles[index].origin)?,
+                                    SCALE,
+                                )?,
+                                timescale: SCALE,
+                            },
+                            end: MediaTime {
+                                ticks: scale(
+                                    sub(report.end, self.subtitles[index].origin)?,
+                                    SCALE,
+                                )?,
+                                timescale: SCALE,
+                            },
+                        },
+                        limits,
+                    )?;
+                }
                 self.cue_report(report, limits);
             }
             if !late {
                 self.subtitles[index].queue.push(QueuedCue {
+                    receipt,
                     cue: cue.clone(),
                     mapped,
                 });
                 result.accepted += 1;
             }
         }
+        self.next_receipt = next_receipt;
         Ok(result)
     }
     /// Seal before handing bytes to a writer: admission must never race a pending write.
@@ -363,13 +510,23 @@ impl MultiState {
         let mut used_bytes = queued_bytes.saturating_add(self.media_bytes);
         let mut grouped = Vec::with_capacity(self.subtitles.len());
         let mut reports = vec![];
+        let mut committed = vec![];
+        let mut committed_bytes = self
+            .pending_subtitles
+            .cues
+            .iter()
+            .map(CommittedSubtitleCue::bytes)
+            .fold(0usize, usize::saturating_add);
         for lane in &mut self.subtitles {
             if &lane.config.timeline_input != input {
-                grouped.push(vec![]);
+                if lane.config.embedded {
+                    grouped.push(vec![]);
+                }
                 continue;
             }
             lane.mapping = Some((generation, epoch, shift));
             lane.output = output;
+            lane.origin = origin;
             let start = max(lane.sealed.unwrap_or(origin), origin)?;
             let until = if let Some(range) = range {
                 min(until, range.end())?
@@ -384,7 +541,9 @@ impl MultiState {
             let start_tick = scale(sub(start, origin)?, SCALE)?;
             let end_tick = scale(sub(until, origin)?, SCALE)?;
             if end_tick <= start_tick {
-                grouped.push(vec![]);
+                if lane.config.embedded {
+                    grouped.push(vec![]);
+                }
                 continue;
             }
             let mut boundaries = vec![start_tick, end_tick];
@@ -408,7 +567,7 @@ impl MultiState {
                 return Err(fail(ContinuousErrorKind::BudgetExceeded));
             }
             let mut samples = vec![];
-            for span in boundaries.windows(2) {
+            for span in boundaries.windows(2).filter(|_| lane.config.embedded) {
                 while cursor < events.len() && events[cursor].0 <= span[0] {
                     let (_, insert, index) = events[cursor];
                     if insert {
@@ -464,6 +623,47 @@ impl MultiState {
             }
             for q in &lane.queue {
                 if let Some((a, b)) = q.mapped {
+                    if self.sidecar && cmp(a, until)?.is_lt() {
+                        let late = cmp(b, start)?.is_le();
+                        let clipped = cmp(a, start)?.is_lt() || cmp(b, until)?.is_gt();
+                        let a = if late { a } else { max(a, start)? };
+                        let b = if late { b } else { min(b, until)? };
+                        let a = MediaTime {
+                            ticks: scale(sub(a, origin)?, SCALE)?,
+                            timescale: SCALE,
+                        };
+                        let b = MediaTime {
+                            ticks: scale(sub(b, origin)?, SCALE)?,
+                            timescale: SCALE,
+                        };
+                        if late || a.ticks < b.ticks {
+                            committed_bytes = committed_bytes
+                                .saturating_add(q.cue.bytes())
+                                .saturating_add(std::mem::size_of::<CommittedSubtitleCue>())
+                                .saturating_add(lane.config.id.as_str().len());
+                            if self.pending_subtitles.cues.len() + committed.len() >= limits.samples
+                                || committed_bytes > limits.sample_bytes
+                            {
+                                return Err(fail(ContinuousErrorKind::BudgetExceeded));
+                            }
+                            committed.push(CommittedSubtitleCue {
+                                receipt: q.receipt,
+                                input: lane.config.id.clone(),
+                                track: lane.track,
+                                cue: q.cue.clone(),
+                                output,
+                                start: a,
+                                end: b,
+                                disposition: if late {
+                                    SubtitleDisposition::RejectedLate
+                                } else if clipped {
+                                    SubtitleDisposition::Clipped
+                                } else {
+                                    SubtitleDisposition::Written
+                                },
+                            });
+                        }
+                    }
                     if cmp(b, start)?.is_le() {
                         reports.push(SubtitleCueReport {
                             track: lane.track,
@@ -494,6 +694,19 @@ impl MultiState {
                     .is_none_or(|(_, b)| cmp(b, until).is_ok_and(|v| v.is_gt()))
             });
             lane.sealed = Some(until);
+            if self.sidecar {
+                self.pending_subtitles.frontiers.push(SubtitleFrontier {
+                    input: lane.config.id.clone(),
+                    track: lane.track,
+                    generation,
+                    epoch,
+                    output,
+                    end: MediaTime {
+                        ticks: end_tick,
+                        timescale: SCALE,
+                    },
+                });
+            }
             if let Some(info) = self
                 .tracks
                 .iter_mut()
@@ -502,8 +715,11 @@ impl MultiState {
                 info.samples += samples.len() as u64;
                 info.duration = info.duration.max(end_tick as u64);
             }
-            grouped.push(samples);
+            if lane.config.embedded {
+                grouped.push(samples);
+            }
         }
+        self.pending_subtitles.cues.extend(committed);
         for report in reports {
             self.cue_report(report, limits);
         }
@@ -534,7 +750,7 @@ impl MultiState {
                 }
             }
         }
-        let mut grouped = vec![vec![]; self.subtitles.len()];
+        let mut grouped = vec![vec![]; self.subtitles.iter().filter(|s| s.config.embedded).count()];
         let mut end = origin;
         for (input, g, e, shift, until) in jobs {
             let until = range.map_or(Ok(until), |r| min(until, r.end()))?;
@@ -545,6 +761,37 @@ impl MultiState {
                 dest.extend(samples);
             }
         }
+        if let Some(range) = range {
+            let mut rejected = Vec::new();
+            for lane in &self.subtitles {
+                for q in &lane.queue {
+                    if let Some((a, b)) = q.mapped
+                        && cmp(a, range.end())?.is_ge()
+                        && self.sidecar
+                    {
+                        rejected.push(CommittedSubtitleCue {
+                            receipt: q.receipt,
+                            input: lane.config.id.clone(),
+                            track: lane.track,
+                            cue: q.cue.clone(),
+                            disposition: SubtitleDisposition::RejectedRange,
+                            output,
+                            start: MediaTime {
+                                ticks: scale(sub(a, origin)?, SCALE)?,
+                                timescale: SCALE,
+                            },
+                            end: MediaTime {
+                                ticks: scale(sub(b, origin)?, SCALE)?,
+                                timescale: SCALE,
+                            },
+                        });
+                    }
+                }
+            }
+            for cue in rejected {
+                self.stage_subtitle(cue, limits)?;
+            }
+        }
         Ok((grouped, end))
     }
     pub fn clear_subtitles(&mut self) {
@@ -552,6 +799,7 @@ impl MultiState {
             lane.queue.clear();
             lane.ended = true;
         }
+        self.pending_subtitles = SubtitleCommit::default();
         self.media_samples = 0;
         self.media_bytes = 0;
     }
@@ -589,7 +837,8 @@ mod wire {
     };
     impl Serialize for SubtitleCue {
         fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-            let mut out = s.serialize_struct("SubtitleCue", 7)?;
+            let mut out =
+                s.serialize_struct("SubtitleCue", if self.source.is_some() { 8 } else { 7 })?;
             out.serialize_field("generation", &self.generation.to_string())?;
             out.serialize_field("epoch", &self.epoch.to_string())?;
             out.serialize_field("start", &self.start)?;
@@ -597,6 +846,9 @@ mod wire {
             out.serialize_field("identifier", &self.identifier)?;
             out.serialize_field("payload", &self.payload)?;
             out.serialize_field("settings", &self.settings)?;
+            if let Some(source) = &self.source {
+                out.serialize_field("source", source)?;
+            }
             out.end()
         }
     }
@@ -612,6 +864,8 @@ mod wire {
                 identifier: String,
                 payload: String,
                 settings: String,
+                #[serde(default)]
+                source: Option<[u8; 32]>,
             }
             let w = Wire::deserialize(d)?;
             let wide = |s: String| -> std::result::Result<u64, D::Error> {
@@ -621,7 +875,7 @@ mod wire {
                 }
                 Ok(n)
             };
-            let cue = SubtitleCue::new(
+            let mut cue = SubtitleCue::new(
                 wide(w.generation)?,
                 wide(w.epoch)?,
                 w.start,
@@ -630,6 +884,7 @@ mod wire {
             )
             .with_identifier(w.identifier)
             .with_settings(w.settings);
+            cue.source = w.source;
             cue.validate().map_err(D::Error::custom)?;
             Ok(cue)
         }
@@ -647,11 +902,17 @@ fn cue_identity(cue: &SubtitleCue) -> [u8; 32] {
     cue.identifier.put(&mut bytes);
     cue.payload.put(&mut bytes);
     cue.settings.put(&mut bytes);
+    if let Some(source) = cue.source {
+        source.put(&mut bytes);
+    }
     crate::resume::digest(&bytes)
 }
 impl MultiState {
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn save_subtitles(&self, out: &mut Vec<u8>) {
+    pub(super) fn save_subtitles(&self, out: &mut Vec<u8>, durable: bool) {
+        if durable {
+            self.next_receipt.put(out);
+        }
         self.subtitles.len().put(out);
         for lane in &self.subtitles {
             lane.track.put(out);
@@ -664,14 +925,34 @@ impl MultiState {
                 .map(|q| (cue_identity(&q.cue), q.mapped))
                 .collect::<Vec<_>>()
                 .put(out);
+            if durable {
+                lane.queue
+                    .iter()
+                    .map(|q| q.receipt)
+                    .collect::<Vec<_>>()
+                    .put(out);
+            }
         }
     }
     pub(super) fn restore_subtitles(
         &mut self,
         r: &mut Reader<'_>,
         terminal: bool,
+        operation: &Arc<()>,
+        receipt_floor: Option<u64>,
     ) -> ContinuousResult<()> {
+        let durable = receipt_floor.is_some();
         let bad = || fail(ContinuousErrorKind::ResumeCorruption);
+        let next_receipt = if durable {
+            u64::get(r).map_err(|_| bad())?
+        } else {
+            0
+        };
+        if receipt_floor.is_some_and(|floor| floor != next_receipt) {
+            return Err(bad());
+        }
+        self.next_receipt = self.next_receipt.max(next_receipt);
+        let mut seen_receipts = std::collections::BTreeSet::new();
         let n = usize::get(r).map_err(|_| bad())?;
         if n != self.subtitles.len() {
             return Err(fail(ContinuousErrorKind::ResumeConflict));
@@ -685,18 +966,43 @@ impl MultiState {
             lane.ended |= bool::get(r).map_err(|_| bad())?;
             lane.output = u64::get(r).map_err(|_| bad())?;
             let required: Vec<CueReplayIdentity> = StateCodec::get(r).map_err(|_| bad())?;
+            let receipts: Vec<u64> = if durable {
+                StateCodec::get(r).map_err(|_| bad())?
+            } else {
+                vec![]
+            };
+            if durable
+                && (receipts.len() != required.len()
+                    || receipts
+                        .iter()
+                        .any(|v| *v >= next_receipt || !seen_receipts.insert(*v)))
+            {
+                return Err(bad());
+            }
             if terminal {
                 lane.queue.clear();
                 continue;
             }
             let mut queue = Vec::new();
-            for (digest, mapped) in required {
+            for (number, (digest, mapped)) in required.into_iter().enumerate() {
                 let index = lane
                     .queue
                     .iter()
                     .position(|q| cue_identity(&q.cue) == digest)
                     .ok_or_else(|| fail(ContinuousErrorKind::ReplayRequired))?;
                 let mut cue = lane.queue.remove(index);
+                if cue.cue.source.is_some()
+                    && cue
+                        .cue
+                        .prepared_by
+                        .as_ref()
+                        .is_none_or(|prepared| !Arc::ptr_eq(prepared, operation))
+                {
+                    return Err(fail(ContinuousErrorKind::ReplayRequired));
+                }
+                if durable {
+                    cue.receipt = receipts[number];
+                }
                 cue.mapped = mapped;
                 queue.push(cue);
             }
@@ -723,6 +1029,15 @@ impl MultiState {
                     } else {
                         cue.mapped = Some((start, end));
                     }
+                }
+                if cue.cue.source.is_some()
+                    && cue
+                        .cue
+                        .prepared_by
+                        .as_ref()
+                        .is_none_or(|prepared| !Arc::ptr_eq(prepared, operation))
+                {
+                    return Err(fail(ContinuousErrorKind::ReplayRequired));
                 }
                 queue.push(cue);
             }

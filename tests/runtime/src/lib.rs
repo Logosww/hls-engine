@@ -9,6 +9,7 @@ pub mod playlist;
 pub mod prepared;
 pub mod resources;
 pub mod samples;
+pub mod subtitles;
 pub mod timeline;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,6 +22,7 @@ pub fn native_report() -> serde_json::Value {
         "engine_gcm": json(engine_gcm::native_suite()),
         "keys": json(keys::native_suite()),
         "resources": json(resources::native_suite()),
+        "subtitles": json(subtitles::native_suite()),
         "prepared": json(prepared::native_suite()),
         "contracts": json(contracts::native_suite()),
         "timeline": json(timeline::native_suite()),

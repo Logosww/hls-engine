@@ -2,7 +2,7 @@
 use super::*;
 use crate::state_codec::{Reader, StateCodec};
 
-pub const ENGINE_CHECKPOINT_SCHEMA_VERSION: u32 = 2;
+pub const ENGINE_CHECKPOINT_SCHEMA_VERSION: u32 = 3;
 const MAX_CHECKPOINT_BYTES: usize = 64 * 1024 * 1024;
 
 /// A versioned snapshot of a durable file prefix. Contains no keys, URLs or samples.
@@ -23,11 +23,12 @@ pub struct EngineCheckpoint {
     pub(super) sealed: bool,
     pub(super) outputs: Vec<(u64, [u8; 32])>,
     pub(super) synced: bool,
+    pub(super) sidecars: Option<SidecarCheckpoint>,
 }
 impl std::fmt::Debug for EngineCheckpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineCheckpoint")
-            .field("schema", &2)
+            .field("schema", &self.schema_version())
             .field("bytes", &self.bytes)
             .field("output", &self.output)
             .finish_non_exhaustive()
@@ -35,7 +36,17 @@ impl std::fmt::Debug for EngineCheckpoint {
 }
 impl EngineCheckpoint {
     pub fn schema_version(&self) -> u32 {
-        ENGINE_CHECKPOINT_SCHEMA_VERSION
+        if self.sidecars.is_some() { 3 } else { 2 }
+    }
+    /// Whether this checkpoint coordinates native fixed-path subtitle files.
+    pub fn has_subtitle_files(&self) -> bool {
+        self.sidecars.is_some()
+    }
+    /// Committed `(length, SHA-256)` pairs, output-major then subtitle input ID
+    /// lexical order. Their fixed destinations are bound by the configuration
+    /// digest. Queued receipts and sealed frontiers live in the opaque state.
+    pub fn subtitle_file_prefixes(&self) -> &[(u64, [u8; 32])] {
+        self.sidecars.as_ref().map_or(&[], |s| s.files.as_slice())
     }
     pub fn bytes_written(&self) -> u64 {
         self.bytes
@@ -80,7 +91,12 @@ impl EngineCheckpoint {
         &self.configuration
     }
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = b"HLSECP02".to_vec();
+        let mut bytes = if self.sidecars.is_some() {
+            b"HLSECP03"
+        } else {
+            b"HLSECP02"
+        }
+        .to_vec();
         self.configuration.put(&mut bytes);
         self.prefix.put(&mut bytes);
         self.bytes.put(&mut bytes);
@@ -95,12 +111,18 @@ impl EngineCheckpoint {
         self.sealed.put(&mut bytes);
         self.outputs.put(&mut bytes);
         self.synced.put(&mut bytes);
+        if let Some(sidecars) = &self.sidecars {
+            sidecars.put(&mut bytes);
+        }
         bytes.extend_from_slice(&crate::resume::digest(&bytes));
         bytes
     }
     pub fn from_bytes(bytes: &[u8]) -> ContinuousResult<Self> {
         let bad = || fail(ContinuousErrorKind::ResumeCorruption);
-        if bytes.len() > MAX_CHECKPOINT_BYTES || bytes.len() < 132 || &bytes[..8] != b"HLSECP02" {
+        if bytes.len() > MAX_CHECKPOINT_BYTES
+            || bytes.len() < 132
+            || !matches!(&bytes[..8], b"HLSECP02" | b"HLSECP03")
+        {
             return Err(bad());
         }
         let end = bytes.len() - 32;
@@ -127,6 +149,11 @@ impl EngineCheckpoint {
                 sealed: StateCodec::get(&mut r)?,
                 outputs: StateCodec::get(&mut r)?,
                 synced: StateCodec::get(&mut r)?,
+                sidecars: if &bytes[..8] == b"HLSECP03" {
+                    Some(StateCodec::get(&mut r)?)
+                } else {
+                    None
+                },
             })
         })()
         .map_err(|_| bad())?;
@@ -156,7 +183,7 @@ impl serde::Serialize for EngineCheckpoint {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut out = s.serialize_struct("EngineCheckpoint", 2)?;
-        out.serialize_field("schema_version", &2u32)?;
+        out.serialize_field("schema_version", &self.schema_version())?;
         let hex: String = self.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
         out.serialize_field("archive", &hex)?;
         out.end()
@@ -173,7 +200,7 @@ impl<'de> serde::Deserialize<'de> for EngineCheckpoint {
             archive: String,
         }
         let wire = Wire::deserialize(d)?;
-        if wire.schema_version != 2
+        if !matches!(wire.schema_version, 2 | 3)
             || wire.archive.len() > 2 * MAX_CHECKPOINT_BYTES
             || !wire.archive.len().is_multiple_of(2)
         {
@@ -192,7 +219,11 @@ impl<'de> serde::Deserialize<'de> for EngineCheckpoint {
             .map(|p| Some(nibble(p[0])? * 16 + nibble(p[1])?))
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| D::Error::custom("invalid checkpoint archive"))?;
-        Self::from_bytes(&bytes).map_err(D::Error::custom)
+        let cp = Self::from_bytes(&bytes).map_err(D::Error::custom)?;
+        if cp.schema_version() != wire.schema_version {
+            return Err(D::Error::custom("checkpoint schema mismatch"));
+        }
+        Ok(cp)
     }
 }
 
@@ -227,5 +258,28 @@ impl RecoveryOptions {
     pub fn with_durability(mut self, durability: CheckpointDurability) -> Self {
         self.durability = durability;
         self
+    }
+}
+
+// Schema 3 extends the frozen schema-2 envelope; media-only sessions still emit 2.
+#[derive(Clone)]
+pub(super) struct SidecarCheckpoint {
+    pub configuration: [u8; 32],
+    // Output-major, then configured input order. No paths, text or keys.
+    pub files: Vec<(u64, [u8; 32])>,
+    pub next_receipt: u64,
+}
+impl StateCodec for SidecarCheckpoint {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.configuration.put(out);
+        self.files.put(out);
+        self.next_receipt.put(out);
+    }
+    fn get(r: &mut Reader<'_>) -> crate::state_codec::DecodeResult<Self> {
+        Ok(Self {
+            configuration: StateCodec::get(r)?,
+            files: StateCodec::get(r)?,
+            next_receipt: StateCodec::get(r)?,
+        })
     }
 }

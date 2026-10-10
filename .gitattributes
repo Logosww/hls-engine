@@ -11,6 +11,10 @@ tests/fixtures/crypto/*.cbc -text
 tests/fixtures/crypto/**/*.m3u8 text eol=lf
 tests/runtime/playlist.m3u8 text eol=lf
 
+# WebVTT plaintext must match the independently encrypted fixture bytes.
+tests/fixtures/webvtt/*.vtt text eol=lf
+tests/fixtures/webvtt/*.cbc -text
+
 # Independent sample-encrypted media.
 tests/fixtures/sample_crypto/**/*.mp4 -text
 tests/fixtures/sample_crypto/**/*.m4s -text

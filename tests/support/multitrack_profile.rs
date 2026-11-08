@@ -1,5 +1,5 @@
 use super::sample_corpus as sample;
-use hls_engine::legacy::{playlist::*, *};
+use hls_engine::{playlist::*, *};
 use std::{
     cell::Cell,
     pin::Pin,
@@ -69,17 +69,13 @@ async fn run_counts_inner(counts: &[u64], classic: bool) -> serde_json::Value {
                 "https://profile.test/media",
                 include_bytes!("../fixtures/sample_crypto/fmp4_aac_clear/seg1.m4s"),
             );
-        let holder = Arc::new(Mutex::new(None::<MultiTrackHandle>));
+        let holder = Arc::new(Mutex::new(None::<EngineHandle>));
         let callback = holder.clone();
-        let options = ContinuousOptions::default()
+        let options = EngineOptions::default()
             .with_waiter(Arc::new(Wait), std::time::Duration::from_secs(1))
-            .with_limits(
-                ContinuousLimits::default()
-                    .with_queue(8, 16384)
-                    .with_history(4),
-            )
+            .with_limits(EngineLimits::default().with_queue(8, 16384).with_history(4))
             .with_on_event(Arc::new(move |event| {
-                if let ContinuousEvent::Committed { input, .. } = event {
+                if let EngineEvent::Committed { input, .. } = event {
                     let n = input.committed();
                     let guard = callback.lock().unwrap();
                     let h = guard.as_ref().unwrap();
@@ -109,16 +105,16 @@ async fn run_counts_inner(counts: &[u64], classic: bool) -> serde_json::Value {
                 }
             }));
         let source = Arc::new(source);
-        let inputs = MultiTrackInputs::new(
-            ContinuousInput::new(id.clone(), source.clone()),
+        let inputs = EngineInputs::new(
+            EngineInput::new(id.clone(), source.clone()),
             EmbeddedAudio::Keep,
         )
         .with_audio(
-            ContinuousInput::new(InputId::new("a").unwrap(), source.clone()),
+            EngineInput::new(InputId::new("a").unwrap(), source.clone()),
             TrackMetadata::new("en", "English"),
         )
         .with_audio(
-            ContinuousInput::new(InputId::new("b").unwrap(), source),
+            EngineInput::new(InputId::new("b").unwrap(), source),
             TrackMetadata::new("ja", "Japanese"),
         )
         .with_subtitle(SubtitleTrack::new(
@@ -127,8 +123,7 @@ async fn run_counts_inner(counts: &[u64], classic: bool) -> serde_json::Value {
             TrackMetadata::default(),
         ));
         let session =
-            MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options)
-                .unwrap();
+            EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options).unwrap();
         let h = session.handle();
         *holder.lock().unwrap() = Some(h.clone());
         for name in ["primary", "a", "b"] {
@@ -195,7 +190,7 @@ async fn run_counts_inner(counts: &[u64], classic: bool) -> serde_json::Value {
 }
 
 struct Wait;
-impl ContinuousWait for Wait {
+impl EngineWait for Wait {
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(
         &self,

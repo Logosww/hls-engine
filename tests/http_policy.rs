@@ -1,5 +1,5 @@
 #![cfg(feature = "default-source")]
-use hls_engine::legacy::{ByteRange, HttpRequestPolicy, ReqwestSource, Source, SourceLocation};
+use hls_engine::{ByteRange, HttpRequestPolicy, ReqwestSource, Source, SourceLocation};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -81,7 +81,7 @@ async fn read(
     server: &Server,
     concurrency: usize,
     range: Option<&ByteRange>,
-) -> hls_engine::legacy::Result<Vec<u8>> {
+) -> hls_engine::SourceResult<Vec<u8>> {
     if concurrency > 1 {
         let SourceLocation::Url(mut url) = server.location.clone() else {
             unreachable!()
@@ -225,28 +225,9 @@ async fn malformed_range_and_permanent_status_never_retry() {
     }
 }
 
-#[derive(Debug)]
-struct Cancel(tokio::sync::watch::Sender<bool>);
-impl hls_engine::legacy::CancelToken for Cancel {
-    fn is_cancelled(&self) -> bool {
-        *self.0.borrow()
-    }
-    fn cancelled(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let mut signal = self.0.subscribe();
-            while !*signal.borrow_and_update() {
-                if signal.changed().await.is_err() {
-                    break;
-                }
-            }
-        })
-    }
-}
 #[tokio::test]
 async fn cancellation_interrupts_prefetch_retry_backoff() {
-    use hls_engine::legacy::{
-        Error, HlsInput, OutputFormat, TransmuxOptions, transmux_hls_to_writer_async,
-    };
+    use hls_engine::*;
     let server = start_server(
         vec![response("503 Unavailable", "Content-Length: 0\r\n", "")],
         Duration::ZERO,
@@ -262,8 +243,24 @@ async fn cancellation_interrupts_prefetch_retry_backoff() {
     policy.max_retries = 3;
     policy.backoff_base = Duration::from_secs(5);
     let source = Arc::new(ReqwestSource::with_concurrency(2).with_request_policy(policy));
-    let (signal, _) = tokio::sync::watch::channel(false);
-    let token = Arc::new(Cancel(signal.clone()));
+    let id = playlist::InputId::new("primary").unwrap();
+    let snapshot = playlist::parse_playlist_snapshot(
+        &TextResource {
+            location: SourceLocation::Url(root.clone()),
+            content: "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\na.ts\n#EXT-X-ENDLIST\n".into(),
+        },
+        playlist::PlaylistContext::new(id.clone(), 0),
+    )
+    .unwrap();
+    let session = EngineSession::new(
+        EngineInputs::new(EngineInput::new(id.clone(), source), EmbeddedAudio::Keep),
+        sample::keys(Arc::new(sample::Provider)),
+        EngineOptions::default(),
+    )
+    .unwrap();
+    session.handle().accept_snapshot(&id, &snapshot).unwrap();
+    session.handle().end_input(&id).unwrap();
+    let handle = session.handle();
     let count = server.requests.clone();
     let stopper = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -273,25 +270,14 @@ async fn cancellation_interrupts_prefetch_retry_backoff() {
         })
         .await
         .unwrap();
-        signal.send_replace(true);
+        handle.cancel();
     });
     let mut bytes = Vec::new();
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
-        transmux_hls_to_writer_async(
-            HlsInput::custom(source, SourceLocation::Url(root)),
-            &mut bytes,
-            TransmuxOptions {
-                output_format: OutputFormat::FragmentedMp4,
-                cancel: Some(token),
-                ..Default::default()
-            },
-        ),
-    )
-    .await
-    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), session.write_to(&mut bytes))
+        .await
+        .unwrap();
     stopper.await.unwrap();
-    assert!(matches!(result, Err(Error::Cancelled)));
+    assert_eq!(result.unwrap_err().kind(), EngineErrorKind::Cancelled);
     assert_eq!(server.requests.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
@@ -309,3 +295,7 @@ async fn prefetch_enforces_response_size_limit() {
             .contains("size limit")
     );
 }
+
+#[allow(dead_code)]
+#[path = "support/sample_crypto.rs"]
+mod sample;

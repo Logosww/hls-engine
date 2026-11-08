@@ -15,10 +15,8 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use hls_engine::legacy::{
-    HlsInput, OutputFormat, ReqwestSource, SourceLocation, TransmuxOptions,
-    transmux_hls_to_mp4_async,
-};
+use hls_engine::*;
+
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -218,21 +216,18 @@ async fn sequential_headers_reach_server_on_playlist_and_segments() {
     let output = dir.join("output.fmp4");
     let playlist_url = format!("{}/media.m3u8", server.base_url);
 
-    // Use HlsInput::Url so read_text goes through HTTP (exercises the
+    // Use a URL SourceLocation so read_text goes through HTTP (exercises the
     // headers-on-read_text path). Concurrency=1 (sequential).
     let source = ReqwestSource::with_headers(auth_headers());
-    let input = HlsInput::custom(
+    let input = selected(
         Arc::new(source),
         SourceLocation::Url(url::Url::parse(&playlist_url).unwrap()),
     );
 
-    let report = transmux_hls_to_mp4_async(
+    let report = run_selected(
         input,
         &output,
-        TransmuxOptions {
-            output_format: OutputFormat::FragmentedMp4,
-            ..Default::default()
-        },
+        FileOutputOptions::default().with_format(OutputFormat::FragmentedMp4),
     )
     .await
     .expect("transmux should succeed when auth headers are set");
@@ -261,18 +256,15 @@ async fn sequential_without_headers_returns_401() {
 
     // No headers → server should 401 on the playlist request.
     let source = ReqwestSource::new();
-    let input = HlsInput::custom(
+    let input = selected(
         Arc::new(source),
         SourceLocation::Url(url::Url::parse(&playlist_url).unwrap()),
     );
 
-    let err = transmux_hls_to_mp4_async(
+    let err = run_selected(
         input,
         &output,
-        TransmuxOptions {
-            output_format: OutputFormat::FragmentedMp4,
-            ..Default::default()
-        },
+        FileOutputOptions::default().with_format(OutputFormat::FragmentedMp4),
     )
     .await
     .expect_err("should fail without auth headers");
@@ -295,18 +287,15 @@ async fn concurrent_headers_reach_workers() {
 
     // Concurrency=3 + headers. Workers fetch segments with the auth header.
     let source = ReqwestSource::with_concurrency_and_headers(3, auth_headers());
-    let input = HlsInput::custom(
+    let input = selected(
         Arc::new(source),
         SourceLocation::Url(url::Url::parse(&playlist_url).unwrap()),
     );
 
-    let report = transmux_hls_to_mp4_async(
+    let report = run_selected(
         input,
         &output,
-        TransmuxOptions {
-            output_format: OutputFormat::FragmentedMp4,
-            ..Default::default()
-        },
+        FileOutputOptions::default().with_format(OutputFormat::FragmentedMp4),
     )
     .await
     .expect("transmux should succeed when auth headers are set");
@@ -337,18 +326,15 @@ async fn concurrent_without_headers_returns_401() {
     // before workers even spawn (try_start_prefetch only fires after
     // read_text succeeds and returns a media playlist).
     let source = ReqwestSource::with_concurrency(3);
-    let input = HlsInput::custom(
+    let input = selected(
         Arc::new(source),
         SourceLocation::Url(url::Url::parse(&playlist_url).unwrap()),
     );
 
-    let err = transmux_hls_to_mp4_async(
+    let err = run_selected(
         input,
         &output,
-        TransmuxOptions {
-            output_format: OutputFormat::FragmentedMp4,
-            ..Default::default()
-        },
+        FileOutputOptions::default().with_format(OutputFormat::FragmentedMp4),
     )
     .await
     .expect_err("should fail without auth headers");
@@ -382,4 +368,20 @@ async fn headers_accessor_returns_configured_headers() {
     // Default-constructed source has empty headers.
     let default_source = ReqwestSource::new();
     assert!(default_source.headers().is_empty());
+}
+
+fn selected(
+    source: Arc<dyn Source>,
+    location: SourceLocation,
+) -> (Arc<dyn Source>, SourceLocation) {
+    (source, location)
+}
+async fn run_selected(
+    input: (Arc<dyn Source>, SourceLocation),
+    output: &std::path::Path,
+    options: FileOutputOptions,
+) -> std::result::Result<TransmuxReport, Box<dyn std::error::Error>> {
+    let session = common::selected_session(input.0, input.1).await?;
+    let report = session.write_to_file(output, options).await?;
+    Ok(report.media().outputs()[0].media().clone())
 }

@@ -2,12 +2,12 @@
 
 `crypto::resource` prepares complete clear or AES-128 HLS resources using typed
 playlists and operation-owned key sessions. The additive
-[`prepare_hls_with_keys`](keyed-sessions.md) entry integrates this resource path
-with the shared prepared media pipeline. Legacy entry points remain unchanged.
+[`EngineSession`](engine.md) entry integrates this resource path
+with the shared Engine media pipeline.
 
 ```rust,no_run
 use std::sync::Arc;
-use hls_engine::legacy::{Source, playlist::PlaylistSnapshot,
+use hls_engine::{Source, playlist::PlaylistSnapshot,
     crypto::{key::KeySession, resource::*}};
 
 async fn read_first(source: Arc<dyn Source>, keys: KeySession,
@@ -21,7 +21,7 @@ async fn read_first(source: Arc<dyn Source>, keys: KeySession,
 A `media`/`map` request uses a typed snapshot that passes `validate_finite_vod()`;
 open/EVENT/empty/I-frame/sample-encrypted/GCM/gap/discontinuity inputs are rejected
 before source/key work. `ResourceRequest::map` uses the MAP's frozen declaration
-and encryption context. Constructors check the finite snapshot; later prepared
+and encryption context. Constructors check the finite snapshot; later Engine
 integration can perform this preflight when building its finite execution plan.
 
 ## Ordering, IV and validation
@@ -48,7 +48,7 @@ existing init codec/config parsing, or complete moof/mdat pairs and required
 fragment headers. Sample-protection/group metadata is rejected in this profile.
 These are container checks, not full media demux or codec/packet validation.
 Matching MAP, sample offsets, codec payloads, timestamps and mux compatibility are
-validated by the shared media core in the keyed prepared entry.
+validated by the shared media core in the Engine.
 
 CBC provides no authentication. Wrong keys normally fail padding or structure;
 a wrong IV may preserve padding, and some corruptions can pass both checks. Do not
@@ -100,7 +100,7 @@ promise to yield within an individual AES call on the browser event loop.
 omits bytes from Debug/serialization. Capacity is released when `read` completes;
 caller-retained clear resources, source/host allocations, demux copies, output
 buffers and classic MP4 indexes are outside these admission counters. This is not
-a total RSS cap. Public `read` does not cache resources. The keyed adapter retains
+a total RSS cap. Public `read` does not cache resources. The Engine retains
 one MAP per input and checks its complete descriptor and current key resolution
 before reuse. The result retains its immutable descriptor, selected key
 reference/version, resolution revision and IV. Caller caches must also include

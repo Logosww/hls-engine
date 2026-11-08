@@ -3,10 +3,8 @@
 
 use std::{fs, path::PathBuf, sync::Arc};
 
-use hls_engine::legacy::{
-    Codec, HlsInput, MemorySource, OutputFormat, SourceLocation, TrackType, TransmuxOptions,
-    transmux_hls_to_mp4_async,
-};
+use hls_engine::*;
+mod common;
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
@@ -50,16 +48,15 @@ async fn retained_media_matches_external_reference_and_support_boundaries() {
         .enumerate()
         {
             let output = directory.join(format!("{name}-{index}.mp4"));
-            let result = transmux_hls_to_mp4_async(
-                HlsInput::custom(source.clone(), SourceLocation::File(playlist.clone())),
-                &output,
-                TransmuxOptions {
-                    output_format: format,
-                    ..Default::default()
-                },
-            )
-            .await;
-            let report = result.unwrap_or_else(|error| panic!("{name}/{format:?}: {error}"));
+            let session =
+                common::selected_session(source.clone(), SourceLocation::File(playlist.clone()))
+                    .await
+                    .unwrap();
+            let report = session
+                .write_to_file(&output, FileOutputOptions::default().with_format(format))
+                .await
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let report = report.media().outputs()[0].media();
             let reference = case["reference"].as_object().unwrap();
             assert_eq!(report.segment_count, segments, "{name}");
             assert_eq!(report.tracks.len(), reference.len(), "{name}");

@@ -1,6 +1,6 @@
 //! Shared native / actual WASM vectors. No host timers, filesystem or threads required.
 use crate::sample_corpus as sample;
-use hls_engine::legacy::{crypto::key::*, playlist::*, *};
+use hls_engine::{crypto::key::*, playlist::*, *};
 use sha2::{Digest, Sha256};
 use std::{
     future::Future,
@@ -8,9 +8,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod recovery_matrix;
-use recovery_matrix::{Handle as MultiTrackHandle, Session as MultiTrackSession};
+use recovery_matrix::{Handle as EngineHandle, Session as EngineSession};
 pub struct Wait;
-impl ContinuousWait for Wait {
+impl EngineWait for Wait {
     #[cfg(not(target_arch = "wasm32"))]
     fn wait(&self, _: std::time::Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(std::future::pending())
@@ -77,7 +77,7 @@ pub fn packed_cases() -> Vec<sample::Case> {
         case!("sample_aes_rotation"),
     ]
 }
-fn record(name: String, bytes: Vec<u8>, report: MultiTrackReport) -> serde_json::Value {
+fn record(name: String, bytes: Vec<u8>, report: EngineReport) -> serde_json::Value {
     #[cfg(not(target_arch = "wasm32"))]
     if let Ok(dir) = std::env::var("HLS_MULTITRACK_OUTPUT") {
         std::fs::create_dir_all(&dir).unwrap();
@@ -99,13 +99,13 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
             ("fragmented", OutputFormat::FragmentedMp4),
             ("classic", OutputFormat::Mp4),
         ] {
-            let s = MultiTrackSession::new(
-                MultiTrackInputs::new(
-                    ContinuousInput::new(id("main"), source(&case)),
+            let s = EngineSession::new(
+                EngineInputs::new(
+                    EngineInput::new(id("main"), source(&case)),
                     EmbeddedAudio::Keep,
                 ),
                 provider.clone(),
-                ContinuousOptions::default().with_mode(ContinuousMode::Vod),
+                EngineOptions::default().with_mode(EngineMode::Vod),
             )
             .unwrap();
             s.handle()
@@ -131,16 +131,16 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
                 ("fragmented", OutputFormat::FragmentedMp4),
                 ("classic", OutputFormat::Mp4),
             ] {
-                let inputs = MultiTrackInputs::new(
-                    ContinuousInput::new(id("main"), source(video)),
+                let inputs = EngineInputs::new(
+                    EngineInput::new(id("main"), source(video)),
                     EmbeddedAudio::Exclude,
                 )
                 .with_audio(
-                    ContinuousInput::new(id("en"), source(audio)),
+                    EngineInput::new(id("en"), source(audio)),
                     TrackMetadata::new("en", "English").with_default(true),
                 )
                 .with_audio(
-                    ContinuousInput::new(id("ja"), source(audio)),
+                    EngineInput::new(id("ja"), source(audio)),
                     TrackMetadata::new("ja", "Japanese"),
                 )
                 .with_subtitle(SubtitleTrack::new(
@@ -153,21 +153,21 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
                     id("main"),
                     TrackMetadata::new("ja", "日本語"),
                 ));
-                let holder = Arc::new(Mutex::new(None::<MultiTrackHandle>));
+                let holder = Arc::new(Mutex::new(None::<EngineHandle>));
                 let callback = holder.clone();
-                let options = ContinuousOptions::default()
+                let options = EngineOptions::default()
                     .with_mode(if open {
-                        ContinuousMode::Open
+                        EngineMode::Open
                     } else {
-                        ContinuousMode::Vod
+                        EngineMode::Vod
                     })
                     .with_waiter(Arc::new(Wait), std::time::Duration::from_secs(1))
                     .with_on_event(Arc::new(move |event| {
-                        if open && matches!(event, ContinuousEvent::Committed { .. }) {
+                        if open && matches!(event, EngineEvent::Committed { .. }) {
                             callback.lock().unwrap().as_ref().unwrap().stop();
                         }
                     }));
-                let s = MultiTrackSession::new(inputs, provider.clone(), options).unwrap();
+                let s = EngineSession::new(inputs, provider.clone(), options).unwrap();
                 let h = s.handle();
                 *holder.lock().unwrap() = Some(h.clone());
                 for (name, case) in [("main", video), ("en", audio), ("ja", audio)] {
@@ -252,6 +252,23 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
     }
     results.extend(cross_product(provider.clone()).await);
     results.extend(split_rotations(provider).await);
+    let frozen: std::collections::BTreeMap<String, String> = serde_json::from_str(include_str!(
+        "../fixtures/checkpoint/engine-strict-v1-hashes.json"
+    ))
+    .unwrap();
+    let actual: std::collections::BTreeMap<_, _> = results
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap().to_owned(),
+                r["hash"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual, frozen,
+        "Engine Strict output must match the pre-1.1 baseline"
+    );
     serde_json::json!(results)
 }
 
@@ -260,18 +277,12 @@ async fn verify_failures(provider: Arc<dyn KeyProvider>) {
         "https://multi.test/bad",
         vec![0xff, 0xf1, 0x50, 0x80, 0x01, 0x3f, 0xfc, 1, 2],
     ));
-    let s = MultiTrackSession::new(
-        MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), source),
-            EmbeddedAudio::Keep,
-        )
-        .with_subtitle(SubtitleTrack::new(
-            id("cc"),
-            id("main"),
-            TrackMetadata::default(),
-        )),
+    let s = EngineSession::new(
+        EngineInputs::new(EngineInput::new(id("main"), source), EmbeddedAudio::Keep).with_subtitle(
+            SubtitleTrack::new(id("cc"), id("main"), TrackMetadata::default()),
+        ),
         provider,
-        ContinuousOptions::default(),
+        EngineOptions::default(),
     )
     .unwrap();
     let h = s.handle();
@@ -281,13 +292,13 @@ async fn verify_failures(provider: Arc<dyn KeyProvider>) {
         h.accept_cues(cc, &[SubtitleCue::new(0, 0, t(0), t(1), "<b>style</b>")])
             .unwrap_err()
             .kind(),
-        ContinuousErrorKind::UnsupportedSubtitleProfile
+        EngineErrorKind::UnsupportedSubtitleProfile
     );
     assert_eq!(
         h.accept_cues(cc, &[SubtitleCue::new(0, 0, t(2), t(1), "bad interval")])
             .unwrap_err()
             .kind(),
-        ContinuousErrorKind::InvalidSubtitle
+        EngineErrorKind::InvalidSubtitle
     );
     h.accept_snapshot(
         &id("main"),
@@ -300,12 +311,12 @@ async fn verify_failures(provider: Arc<dyn KeyProvider>) {
     let mut bytes = vec![];
     assert_eq!(
         s.write_to(&mut bytes).await.unwrap_err().kind(),
-        ContinuousErrorKind::Resource
+        EngineErrorKind::Resource
     );
     assert!(bytes.is_empty());
     assert_eq!(
         h.accept_cues(cc, &[]).unwrap_err().kind(),
-        ContinuousErrorKind::Closed
+        EngineErrorKind::Closed
     );
 }
 
@@ -362,8 +373,8 @@ async fn cross_product(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Value>
                                 if open { "open" } else { "vod" },
                                 if encrypted { "encrypted" } else { "clear" }
                             );
-                            let mut inputs = MultiTrackInputs::new(
-                                ContinuousInput::new(id("main"), source(video)),
+                            let mut inputs = EngineInputs::new(
+                                EngineInput::new(id("main"), source(video)),
                                 if video_kind == "packed" {
                                     EmbeddedAudio::Keep
                                 } else {
@@ -372,7 +383,7 @@ async fn cross_product(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Value>
                             );
                             for (input, language) in [("en", "en"), ("ja", "ja")] {
                                 inputs = inputs.with_audio(
-                                    ContinuousInput::new(id(input), source(audio)),
+                                    EngineInput::new(id(input), source(audio)),
                                     TrackMetadata::new(language, input).with_default(input == "en"),
                                 );
                             }
@@ -381,11 +392,11 @@ async fn cross_product(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Value>
                                 id("main"),
                                 TrackMetadata::new("en", "Captions"),
                             ));
-                            let mut opts = ContinuousOptions::default()
+                            let mut opts = EngineOptions::default()
                                 .with_mode(if open {
-                                    ContinuousMode::Open
+                                    EngineMode::Open
                                 } else {
-                                    ContinuousMode::Vod
+                                    EngineMode::Vod
                                 })
                                 .with_waiter(Arc::new(Wait), std::time::Duration::from_secs(1));
                             if scenario == "range" {
@@ -401,7 +412,7 @@ async fn cross_product(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Value>
                             // each input, including short Packed audio renditions.
                             if scenario == "epochs" {
                                 for input in ["main", "en", "ja"] {
-                                    opts = opts.with_anchor(ContinuousAnchor::new(
+                                    opts = opts.with_anchor(EngineAnchor::new(
                                         id(input),
                                         9_007_199_254_740_993,
                                         1,
@@ -411,7 +422,7 @@ async fn cross_product(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Value>
                                 }
                             }
                             let session =
-                                MultiTrackSession::new(inputs, provider.clone(), opts).unwrap();
+                                EngineSession::new(inputs, provider.clone(), opts).unwrap();
                             let h = session.handle();
                             for (input, case) in [("main", video), ("en", audio), ("ja", audio)] {
                                 let mut text = case.playlist.to_owned();
@@ -508,12 +519,12 @@ async fn split_rotations(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Valu
             panic!("caller owns close")
         }
     }
-    impl ContinuousWriterProvider for Parts {
+    impl EngineWriterProvider for Parts {
         type Writer = Writer;
         fn acquire<'a>(
             &'a mut self,
-            r: ContinuousOutputRequest,
-        ) -> Pin<Box<dyn Future<Output = ContinuousResult<Writer>> + 'a>> {
+            r: EngineOutputRequest,
+        ) -> Pin<Box<dyn Future<Output = EngineResult<Writer>> + 'a>> {
             Box::pin(async move {
                 assert_eq!(r.all_tracks().len(), 4);
                 let mut parts = self.0.lock().unwrap();
@@ -585,16 +596,16 @@ async fn split_rotations(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Valu
                     }
                 }
                 video_text.push_str("#EXT-X-ENDLIST\n");
-                let inputs = MultiTrackInputs::new(
-                    ContinuousInput::new(id("main"), Arc::new(src)),
+                let inputs = EngineInputs::new(
+                    EngineInput::new(id("main"), Arc::new(src)),
                     EmbeddedAudio::Exclude,
                 )
                 .with_audio(
-                    ContinuousInput::new(id("en"), source(audio)),
+                    EngineInput::new(id("en"), source(audio)),
                     TrackMetadata::new("en", "English"),
                 )
                 .with_audio(
-                    ContinuousInput::new(id("ja"), source(audio)),
+                    EngineInput::new(id("ja"), source(audio)),
                     TrackMetadata::new("ja", "Japanese"),
                 )
                 .with_subtitle(SubtitleTrack::new(
@@ -602,16 +613,16 @@ async fn split_rotations(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Valu
                     id("main"),
                     TrackMetadata::new("en", "Captions"),
                 ));
-                let mut opts = ContinuousOptions::default()
+                let mut opts = EngineOptions::default()
                     .with_change_policy(TimelineChangePolicy::Split)
                     .with_mode(if open {
-                        ContinuousMode::Open
+                        EngineMode::Open
                     } else {
-                        ContinuousMode::Vod
+                        EngineMode::Vod
                     })
                     .with_waiter(Arc::new(Wait), std::time::Duration::from_secs(1));
                 for input in ["main", "en", "ja"] {
-                    opts = opts.with_anchor(ContinuousAnchor::new(
+                    opts = opts.with_anchor(EngineAnchor::new(
                         id(input),
                         9_007_199_254_740_993,
                         1,
@@ -619,7 +630,7 @@ async fn split_rotations(provider: Arc<dyn KeyProvider>) -> Vec<serde_json::Valu
                         MediaTime::new(6000, 1000).unwrap(),
                     ));
                 }
-                let session = MultiTrackSession::new(inputs, provider.clone(), opts).unwrap();
+                let session = EngineSession::new(inputs, provider.clone(), opts).unwrap();
                 let h = session.handle();
                 let audio_text = audio.playlist.replace(
                     "#EXT-X-ENDLIST",

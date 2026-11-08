@@ -1,10 +1,9 @@
-//! Declarative support queries for the finite keyed prepared entry, not a media validator.
-#![doc = include_str!("../docs/keyed-contracts.md")]
-use crate::InputRole;
+//! Engine capability queries. Media validation occurs during execution.
+#![doc = include_str!("../docs/support.md")]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedContainer {
+pub enum InputContainer {
     TransportStream,
     FragmentedMp4,
     PackedAac,
@@ -12,7 +11,7 @@ pub enum KeyedContainer {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedEncryption {
+pub enum InputEncryption {
     Clear,
     Aes128,
     ClearAndAes128,
@@ -23,7 +22,7 @@ pub enum KeyedEncryption {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedCodec {
+pub enum InputCodec {
     Avc,
     Hevc,
     AacLc,
@@ -31,7 +30,7 @@ pub enum KeyedCodec {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedProtectionScheme {
+pub enum InputProtectionScheme {
     None,
     Cenc,
     Cbcs,
@@ -39,7 +38,7 @@ pub enum KeyedProtectionScheme {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedKeySource {
+pub enum InputKeySource {
     None,
     ExternalProvider,
     BuiltInHttp,
@@ -47,7 +46,7 @@ pub enum KeyedKeySource {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedSourceMode {
+pub enum SourceMode {
     FiniteVod,
     Event,
     Live,
@@ -55,17 +54,16 @@ pub enum KeyedSourceMode {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedOutput {
+pub enum OutputTarget {
     Mp4Bytes,
     FragmentedWriter,
     Mp4File,
     FragmentedFile,
     NativeStreamingFile,
-    FfmpegStreamingFile,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum KeyedRange {
+pub enum RangeCapability {
     WholeResources,
     ClearByteRanges,
     CompleteEncryptedResources,
@@ -106,472 +104,174 @@ pub enum CapabilityRequirement {
     StableKeyVersion,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyedInputCapability {
-    container: KeyedContainer,
-    encryption: KeyedEncryption,
-    codecs: Vec<KeyedCodec>,
-    scheme: KeyedProtectionScheme,
-    key_source: KeyedKeySource,
+pub struct InputCapability {
+    container: InputContainer,
+    encryption: InputEncryption,
+    codecs: Vec<InputCodec>,
+    scheme: InputProtectionScheme,
+    key_source: InputKeySource,
 }
-impl KeyedInputCapability {
+impl InputCapability {
     pub fn new(
-        container: KeyedContainer,
-        encryption: KeyedEncryption,
-        codecs: Vec<KeyedCodec>,
+        container: InputContainer,
+        encryption: InputEncryption,
+        codecs: Vec<InputCodec>,
     ) -> Self {
         Self {
             container,
             encryption,
             codecs,
-            scheme: KeyedProtectionScheme::None,
-            key_source: if encryption == KeyedEncryption::Clear {
-                KeyedKeySource::None
+            scheme: InputProtectionScheme::None,
+            key_source: if encryption == InputEncryption::Clear {
+                InputKeySource::None
             } else {
-                KeyedKeySource::ExternalProvider
+                InputKeySource::ExternalProvider
             },
         }
     }
-    pub fn with_scheme(mut self, value: KeyedProtectionScheme) -> Self {
+    pub fn with_scheme(mut self, value: InputProtectionScheme) -> Self {
         self.scheme = value;
         self
     }
-    pub fn with_key_source(mut self, value: KeyedKeySource) -> Self {
+    pub fn with_key_source(mut self, value: InputKeySource) -> Self {
         self.key_source = value;
         self
     }
-    pub fn container(&self) -> KeyedContainer {
+    pub fn container(&self) -> InputContainer {
         self.container
     }
-    pub fn encryption(&self) -> KeyedEncryption {
+    pub fn encryption(&self) -> InputEncryption {
         self.encryption
     }
-    pub fn codecs(&self) -> &[KeyedCodec] {
+    pub fn codecs(&self) -> &[InputCodec] {
         &self.codecs
     }
-    pub fn scheme(&self) -> KeyedProtectionScheme {
+    pub fn scheme(&self) -> InputProtectionScheme {
         self.scheme
     }
-    pub fn key_source(&self) -> KeyedKeySource {
+    pub fn key_source(&self) -> InputKeySource {
         self.key_source
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyedCapabilityQuery {
-    primary: KeyedInputCapability,
-    audio: Option<KeyedInputCapability>,
-    source_mode: KeyedSourceMode,
-    output: KeyedOutput,
-    range: KeyedRange,
-    resume: bool,
-    multitrack: bool,
-    subtitles: bool,
-    experimental: bool,
-    timeline_changes: bool,
-}
-impl KeyedCapabilityQuery {
-    pub fn new(primary: KeyedInputCapability, output: KeyedOutput) -> Self {
-        Self {
-            primary,
-            audio: None,
-            source_mode: KeyedSourceMode::FiniteVod,
-            output,
-            range: KeyedRange::WholeResources,
-            resume: false,
-            multitrack: false,
-            subtitles: false,
-            experimental: false,
-            timeline_changes: false,
-        }
-    }
-    pub fn with_audio(mut self, value: KeyedInputCapability) -> Self {
-        self.audio = Some(value);
-        self
-    }
-    pub fn with_source_mode(mut self, value: KeyedSourceMode) -> Self {
-        self.source_mode = value;
-        self
-    }
-    pub fn with_range(mut self, value: KeyedRange) -> Self {
-        self.range = value;
-        self
-    }
-    pub fn with_resume(mut self, value: bool) -> Self {
-        self.resume = value;
-        self
-    }
-    pub fn with_multitrack(mut self, value: bool) -> Self {
-        self.multitrack = value;
-        self
-    }
-    pub fn with_subtitles(mut self, value: bool) -> Self {
-        self.subtitles = value;
-        self
-    }
-    pub fn with_experimental(mut self, value: bool) -> Self {
-        self.experimental = value;
-        self
-    }
-    pub fn with_timeline_changes(mut self, value: bool) -> Self {
-        self.timeline_changes = value;
-        self
-    }
-    pub fn primary(&self) -> &KeyedInputCapability {
-        &self.primary
-    }
-    pub fn audio(&self) -> Option<&KeyedInputCapability> {
-        self.audio.as_ref()
-    }
-    pub fn source_mode(&self) -> KeyedSourceMode {
-        self.source_mode
-    }
-    pub fn output(&self) -> KeyedOutput {
-        self.output
-    }
-    pub fn range(&self) -> KeyedRange {
-        self.range
-    }
-    pub fn resume(&self) -> bool {
-        self.resume
-    }
-    pub fn multitrack(&self) -> bool {
-        self.multitrack
-    }
-    pub fn subtitles(&self) -> bool {
-        self.subtitles
-    }
-    pub fn experimental(&self) -> bool {
-        self.experimental
-    }
-    pub fn timeline_changes(&self) -> bool {
-        self.timeline_changes
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CapabilityRejection {
-    dimension: CapabilityDimension,
-    role: Option<InputRole>,
-}
-impl CapabilityRejection {
-    pub fn dimension(&self) -> CapabilityDimension {
-        self.dimension
-    }
-    pub fn role(&self) -> Option<InputRole> {
-        self.role
-    }
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyedCapabilityDecision {
-    rejections: Vec<CapabilityRejection>,
-    requirements: Vec<CapabilityRequirement>,
-}
-impl KeyedCapabilityDecision {
-    /// Means this declared combination has an implementation in this build. Does not certify input bytes or a provider.
-    pub fn supported(&self) -> bool {
-        self.rejections.is_empty()
-    }
-    pub fn rejections(&self) -> &[CapabilityRejection] {
-        &self.rejections
-    }
-    pub fn requirements(&self) -> &[CapabilityRequirement] {
-        &self.requirements
-    }
-}
-/// No I/O. Every unsupported dimension is returned, in stable dimension/input order.
-/// Native files and FFmpeg depend on this build's target/features; no experimental bypass exists.
-pub fn query_keyed_capability(query: &KeyedCapabilityQuery) -> KeyedCapabilityDecision {
+fn validate_input(
+    input: &InputCapability,
+    query: &CapabilityQuery,
+    native_recovery: bool,
+) -> (Vec<CapabilityDimension>, Vec<CapabilityRequirement>) {
     use CapabilityDimension as D;
     use CapabilityRequirement as R;
     let mut rejections = Vec::new();
     let mut requirements = vec![
-        R::FiniteSnapshotValidation,
+        R::IncrementalSnapshotValidation,
         R::ContainerAndCodecValidation,
         R::CompatibleTimelineAndConfiguration,
     ];
-    for (role, input) in std::iter::once((InputRole::Primary, &query.primary))
-        .chain(query.audio.as_ref().map(|a| (InputRole::Audio, a)))
     {
-        let mut reject = |dimension| {
-            rejections.push(CapabilityRejection {
-                dimension,
-                role: Some(role),
-            })
-        };
+        let mut reject = |dimension| rejections.push(dimension);
         if !matches!(
             input.container,
-            KeyedContainer::TransportStream | KeyedContainer::FragmentedMp4
+            InputContainer::TransportStream | InputContainer::FragmentedMp4
         ) {
             reject(D::Container);
         }
         if !matches!(
             input.encryption,
-            KeyedEncryption::Clear
-                | KeyedEncryption::Aes128
-                | KeyedEncryption::ClearAndAes128
-                | KeyedEncryption::SampleAes
-                | KeyedEncryption::SampleAesCtr
+            InputEncryption::Clear
+                | InputEncryption::Aes128
+                | InputEncryption::ClearAndAes128
+                | InputEncryption::SampleAes
+                | InputEncryption::SampleAesCtr
         ) {
             reject(D::Encryption);
         }
-        if input.codecs.is_empty() || input.codecs.contains(&KeyedCodec::Other) {
+        if input.codecs.is_empty() || input.codecs.contains(&InputCodec::Other) {
             reject(D::Codec);
         }
         let video = input
             .codecs
             .iter()
-            .filter(|c| matches!(c, KeyedCodec::Avc | KeyedCodec::Hevc))
+            .filter(|c| matches!(c, InputCodec::Avc | InputCodec::Hevc))
             .count();
         let audio = input
             .codecs
             .iter()
-            .filter(|c| **c == KeyedCodec::AacLc)
+            .filter(|c| **c == InputCodec::AacLc)
             .count();
-        if video > 1
-            || audio > 1
-            || (role == InputRole::Audio && audio != 1)
-            || (role == InputRole::Primary && query.audio.is_some() && video != 1)
-        {
+        if video > 1 || audio > 1 {
             reject(D::TrackSelection);
         }
         let expected_scheme = match (input.container, input.encryption) {
-            (KeyedContainer::FragmentedMp4, KeyedEncryption::SampleAes) => {
-                KeyedProtectionScheme::Cbcs
+            (InputContainer::FragmentedMp4, InputEncryption::SampleAes) => {
+                InputProtectionScheme::Cbcs
             }
-            (KeyedContainer::FragmentedMp4, KeyedEncryption::SampleAesCtr) => {
-                KeyedProtectionScheme::Cenc
+            (InputContainer::FragmentedMp4, InputEncryption::SampleAesCtr) => {
+                InputProtectionScheme::Cenc
             }
-            _ => KeyedProtectionScheme::None,
+            _ => InputProtectionScheme::None,
         };
         if input.scheme != expected_scheme {
             reject(D::ProtectionScheme);
         }
-        if input.container == KeyedContainer::TransportStream {
-            if input.encryption == KeyedEncryption::SampleAesCtr {
+        if input.container == InputContainer::TransportStream {
+            if input.encryption == InputEncryption::SampleAesCtr {
                 reject(D::Encryption);
             }
-            if input.encryption == KeyedEncryption::SampleAes
-                && input.codecs.contains(&KeyedCodec::Hevc)
+            if input.encryption == InputEncryption::SampleAes
+                && input.codecs.contains(&InputCodec::Hevc)
             {
                 reject(D::Codec);
             }
         }
         if !matches!(
             input.key_source,
-            KeyedKeySource::None | KeyedKeySource::ExternalProvider
-        ) || (input.encryption != KeyedEncryption::Clear
-            && input.key_source != KeyedKeySource::ExternalProvider)
+            InputKeySource::None | InputKeySource::ExternalProvider
+        ) || (input.encryption != InputEncryption::Clear
+            && input.key_source != InputKeySource::ExternalProvider)
         {
             reject(D::KeySource);
         }
-        if input.encryption != KeyedEncryption::Clear
+        if input.encryption != InputEncryption::Clear
             && !requirements.contains(&R::ProviderResolution)
         {
             requirements.push(R::ProviderResolution);
         }
     }
-    let mut reject = |dimension| {
-        rejections.push(CapabilityRejection {
-            dimension,
-            role: None,
-        })
-    };
-    if query.source_mode != KeyedSourceMode::FiniteVod {
+    let mut reject = |dimension| rejections.push(dimension);
+    if query.mode == SourceMode::RewrittenSnapshot {
         reject(D::SourceMode);
     }
     if matches!(
         query.output,
-        KeyedOutput::Mp4File
-            | KeyedOutput::FragmentedFile
-            | KeyedOutput::NativeStreamingFile
-            | KeyedOutput::FfmpegStreamingFile
+        OutputTarget::Mp4File | OutputTarget::FragmentedFile | OutputTarget::NativeStreamingFile
     ) && cfg!(target_arch = "wasm32")
-        || query.output == KeyedOutput::FfmpegStreamingFile && !cfg!(feature = "ffmpeg-finalize")
     {
         reject(D::Output);
     }
     if matches!(
         query.range,
-        KeyedRange::ArbitraryEncryptedRanges
-            | KeyedRange::PresentationRange
-            | KeyedRange::IFrameRanges
+        RangeCapability::ArbitraryEncryptedRanges | RangeCapability::IFrameRanges
     ) {
         reject(D::Range);
     }
-    if query.range == KeyedRange::CompleteEncryptedResources {
+    if query.range == RangeCapability::CompleteEncryptedResources {
         requirements.push(R::CompleteEncryptionBoundaries);
     }
-    if query.output == KeyedOutput::FragmentedWriter {
+    if query.output == OutputTarget::FragmentedWriter {
         requirements.push(R::CallerOwnedWriterCompletion);
     }
-    if query.resume {
+    if query.resume && !native_recovery {
         reject(D::Resume);
     }
-    if query.multitrack {
-        reject(D::TrackSelection);
+    if query.output == OutputTarget::Mp4Bytes && query.capacity.is_none_or(|n| n == 0) {
+        reject(D::Output);
     }
-    if query.subtitles {
-        reject(D::Subtitles);
-    }
-    if query.experimental {
-        reject(D::Experimental);
-    }
-    if query.timeline_changes {
-        reject(D::Timeline);
-    }
-    KeyedCapabilityDecision {
-        rejections,
-        requirements,
-    }
-}
-
-/// Timeline execution has its own capability profile; old keyed queries remain unchanged.
-#[derive(Debug, Clone)]
-pub struct TimelineCapabilityQuery {
-    media: KeyedCapabilityQuery,
-    presentation_range: bool,
-    gaps: crate::GapPolicy,
-    changes: crate::TimelineChangePolicy,
-    split_outputs: bool,
-    known_internal_gaps: bool,
-}
-impl TimelineCapabilityQuery {
-    pub fn new(media: KeyedCapabilityQuery) -> Self {
-        Self {
-            media,
-            presentation_range: false,
-            gaps: crate::GapPolicy::Preserve,
-            changes: crate::TimelineChangePolicy::Fail,
-            split_outputs: false,
-            known_internal_gaps: false,
-        }
-    }
-    pub fn with_presentation_range(mut self, value: bool) -> Self {
-        self.presentation_range = value;
-        self
-    }
-    pub fn with_gap_policy(mut self, value: crate::GapPolicy) -> Self {
-        self.gaps = value;
-        self
-    }
-    pub fn with_change_policy(mut self, value: crate::TimelineChangePolicy) -> Self {
-        self.changes = value;
-        self
-    }
-    pub fn with_split_outputs(mut self, value: bool) -> Self {
-        self.split_outputs = value;
-        self
-    }
-    pub fn with_known_internal_gaps(mut self, value: bool) -> Self {
-        self.known_internal_gaps = value;
-        self
-    }
-    pub fn media(&self) -> &KeyedCapabilityQuery {
-        &self.media
-    }
-    pub fn presentation_range(&self) -> bool {
-        self.presentation_range
-    }
-    pub fn gap_policy(&self) -> crate::GapPolicy {
-        self.gaps
-    }
-    pub fn change_policy(&self) -> crate::TimelineChangePolicy {
-        self.changes
-    }
-    pub fn split_outputs(&self) -> bool {
-        self.split_outputs
-    }
-    pub fn known_internal_gaps(&self) -> bool {
-        self.known_internal_gaps
-    }
-}
-/// A declaration, not proof of RAP, clock alignment or common-gap coverage.
-pub fn query_timeline_capability(query: &TimelineCapabilityQuery) -> KeyedCapabilityDecision {
-    let mut base = query.media.clone().with_timeline_changes(false);
-    if base.range == KeyedRange::PresentationRange {
-        base.range = KeyedRange::WholeResources;
-    }
-    let mut decision = query_keyed_capability(&base);
-    if query.changes == crate::TimelineChangePolicy::Split && !query.split_outputs {
-        decision.rejections.push(CapabilityRejection {
-            dimension: CapabilityDimension::Output,
-            role: None,
-        });
-    }
-    let classic = !matches!(
-        query.media.output,
-        KeyedOutput::FragmentedWriter | KeyedOutput::FragmentedFile
-    );
-    if classic
-        && query.known_internal_gaps
-        && query.gaps == crate::GapPolicy::Preserve
-        && query.changes != crate::TimelineChangePolicy::Split
-    {
-        decision.rejections.push(CapabilityRejection {
-            dimension: CapabilityDimension::Timeline,
-            role: None,
-        });
-    }
-    decision
-}
-
-/// Open-session declaration. Memory output requires an explicit capacity;
-/// dual-input execution also requires a host-provided timeout implementation.
-#[derive(Debug, Clone)]
-pub struct ContinuousCapabilityQuery {
-    timeline: TimelineCapabilityQuery,
-    memory_capacity: Option<usize>,
-    host_waiter: bool,
-}
-impl ContinuousCapabilityQuery {
-    pub fn new(timeline: TimelineCapabilityQuery) -> Self {
-        Self {
-            timeline,
-            memory_capacity: None,
-            host_waiter: false,
-        }
-    }
-    pub fn with_memory_capacity(mut self, capacity: usize) -> Self {
-        self.memory_capacity = Some(capacity);
-        self
-    }
-    pub fn with_host_waiter(mut self, available: bool) -> Self {
-        self.host_waiter = available;
-        self
-    }
-}
-/// Incremental admission, key resolution and media validation remain runtime requirements.
-pub fn query_continuous_capability(query: &ContinuousCapabilityQuery) -> KeyedCapabilityDecision {
-    let mut timeline = query.timeline.clone();
-    let rewritten = timeline.media.source_mode == KeyedSourceMode::RewrittenSnapshot;
-    timeline.media.source_mode = KeyedSourceMode::FiniteVod;
-    let mut result = query_timeline_capability(&timeline);
-    result
-        .requirements
-        .retain(|r| *r != CapabilityRequirement::FiniteSnapshotValidation);
-    result
-        .requirements
-        .push(CapabilityRequirement::IncrementalSnapshotValidation);
-    if rewritten {
-        result.rejections.push(CapabilityRejection {
-            dimension: CapabilityDimension::SourceMode,
-            role: None,
-        });
-    }
-    if (timeline.media.output == KeyedOutput::Mp4Bytes
-        && query.memory_capacity.is_none_or(|n| n == 0))
-        || (timeline.media.audio.is_some() && !query.host_waiter)
-    {
-        result.rejections.push(CapabilityRejection {
-            dimension: CapabilityDimension::Output,
-            role: None,
-        });
-    }
-    result
+    (rejections, requirements)
 }
 
 /// Container support is separate from a target player's rendering support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum MultiTrackPlayback {
+pub enum PlaybackTarget {
     Container,
     /// Extract a single wvtt track before the pinned Shaka parser/display adapter.
     /// Does not certify audio switching or direct mixed-mdat playback.
@@ -586,7 +286,7 @@ pub enum MultiTrackPlayback {
 /// Tested playback incompatibilities, distinct from invalid media or mux support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum MultiTrackPlaybackRejection {
+pub enum PlaybackRejection {
     /// The generic browser path cannot expose/select all embedded tracks.
     BrowserTrackSelection,
     /// The renderer cannot preserve the complete accepted WebVTT settings profile.
@@ -605,53 +305,53 @@ pub enum SubtitleProfile {
     StyledWebVtt,
 }
 #[derive(Debug, Clone)]
-pub struct MultiTrackCapabilityQuery {
-    inputs: Vec<(crate::playlist::InputId, KeyedInputCapability)>,
-    output: KeyedOutput,
+pub struct CapabilityQuery {
+    inputs: Vec<(crate::playlist::InputId, InputCapability)>,
+    output: OutputTarget,
     embedded: crate::EmbeddedAudio,
-    mode: KeyedSourceMode,
-    range: KeyedRange,
+    mode: SourceMode,
+    range: RangeCapability,
     subtitles: bool,
     subtitle_profile: SubtitleProfile,
     decode_gaps: bool,
-    playback: MultiTrackPlayback,
+    playback: PlaybackTarget,
     capacity: Option<usize>,
     waiter: bool,
     resume: bool,
     experimental_gcm: bool,
 }
-impl MultiTrackCapabilityQuery {
+impl CapabilityQuery {
     pub fn new(
         id: crate::playlist::InputId,
-        primary: KeyedInputCapability,
-        output: KeyedOutput,
+        primary: InputCapability,
+        output: OutputTarget,
         embedded: crate::EmbeddedAudio,
     ) -> Self {
         Self {
             inputs: vec![(id, primary)],
             output,
             embedded,
-            mode: KeyedSourceMode::FiniteVod,
-            range: KeyedRange::WholeResources,
+            mode: SourceMode::FiniteVod,
+            range: RangeCapability::WholeResources,
             subtitles: false,
             subtitle_profile: SubtitleProfile::WvttPlainText,
             decode_gaps: false,
-            playback: MultiTrackPlayback::Container,
+            playback: PlaybackTarget::Container,
             capacity: None,
             waiter: false,
             resume: false,
             experimental_gcm: false,
         }
     }
-    pub fn with_audio(mut self, id: crate::playlist::InputId, input: KeyedInputCapability) -> Self {
+    pub fn with_audio(mut self, id: crate::playlist::InputId, input: InputCapability) -> Self {
         self.inputs.push((id, input));
         self
     }
-    pub fn with_source_mode(mut self, mode: KeyedSourceMode) -> Self {
+    pub fn with_source_mode(mut self, mode: SourceMode) -> Self {
         self.mode = mode;
         self
     }
-    pub fn with_range(mut self, range: KeyedRange) -> Self {
+    pub fn with_range(mut self, range: RangeCapability) -> Self {
         self.range = range;
         self
     }
@@ -671,7 +371,7 @@ impl MultiTrackCapabilityQuery {
         self.subtitle_profile = profile;
         self
     }
-    pub fn with_playback(mut self, target: MultiTrackPlayback) -> Self {
+    pub fn with_playback(mut self, target: PlaybackTarget) -> Self {
         self.playback = target;
         self
     }
@@ -693,11 +393,11 @@ impl MultiTrackCapabilityQuery {
     }
 }
 #[derive(Debug, Clone)]
-pub struct MultiTrackCapabilityRejection {
+pub struct InputCapabilityRejection {
     input: Option<crate::playlist::InputId>,
     dimension: CapabilityDimension,
 }
-impl MultiTrackCapabilityRejection {
+impl InputCapabilityRejection {
     pub fn input_id(&self) -> Option<&crate::playlist::InputId> {
         self.input.as_ref()
     }
@@ -706,13 +406,13 @@ impl MultiTrackCapabilityRejection {
     }
 }
 #[derive(Debug, Clone)]
-pub struct MultiTrackCapabilityDecision {
-    rejections: Vec<MultiTrackCapabilityRejection>,
-    container_rejections: Vec<MultiTrackCapabilityRejection>,
+pub struct CapabilityDecision {
+    rejections: Vec<InputCapabilityRejection>,
+    container_rejections: Vec<InputCapabilityRejection>,
     requirements: Vec<CapabilityRequirement>,
-    playback_rejection: Option<MultiTrackPlaybackRejection>,
+    playback_rejection: Option<PlaybackRejection>,
 }
-impl MultiTrackCapabilityDecision {
+impl CapabilityDecision {
     pub fn supported(&self) -> bool {
         self.rejections.is_empty()
     }
@@ -721,29 +421,27 @@ impl MultiTrackCapabilityDecision {
     pub fn container_supported(&self) -> bool {
         self.container_rejections.is_empty()
     }
-    pub fn container_rejections(&self) -> &[MultiTrackCapabilityRejection] {
+    pub fn container_rejections(&self) -> &[InputCapabilityRejection] {
         &self.container_rejections
     }
     /// Whether both engine output and the selected playback target support the request.
     pub fn playback_supported(&self) -> bool {
         self.container_supported() && self.playback_rejection.is_none()
     }
-    pub fn rejections(&self) -> &[MultiTrackCapabilityRejection] {
+    pub fn rejections(&self) -> &[InputCapabilityRejection] {
         &self.rejections
     }
     pub fn requirements(&self) -> &[CapabilityRequirement] {
         &self.requirements
     }
-    pub fn playback_rejection(&self) -> Option<MultiTrackPlaybackRejection> {
+    pub fn playback_rejection(&self) -> Option<PlaybackRejection> {
         self.playback_rejection
     }
 }
 /// No I/O; media bytes, keys, mappings and budgets still require runtime validation.
-pub fn query_multitrack_capability(
-    query: &MultiTrackCapabilityQuery,
-) -> MultiTrackCapabilityDecision {
+pub fn query_capability(query: &CapabilityQuery) -> CapabilityDecision {
     use CapabilityDimension as D;
-    let mut result = MultiTrackCapabilityDecision {
+    let mut result = CapabilityDecision {
         rejections: vec![],
         container_rejections: vec![],
         requirements: vec![],
@@ -753,7 +451,9 @@ pub fn query_multitrack_capability(
         && cfg!(not(target_arch = "wasm32"))
         && matches!(
             query.output,
-            KeyedOutput::FragmentedFile | KeyedOutput::Mp4File | KeyedOutput::NativeStreamingFile
+            OutputTarget::FragmentedFile
+                | OutputTarget::Mp4File
+                | OutputTarget::NativeStreamingFile
         );
     if native_recovery {
         result.requirements.extend([
@@ -763,7 +463,7 @@ pub fn query_multitrack_capability(
         if query
             .inputs
             .iter()
-            .any(|(_, input)| input.encryption != KeyedEncryption::Clear)
+            .any(|(_, input)| input.encryption != InputEncryption::Clear)
         {
             result
                 .requirements
@@ -772,11 +472,11 @@ pub fn query_multitrack_capability(
     }
     for (index, (id, input)) in query.inputs.iter().enumerate() {
         let mut selected = input.clone();
-        if selected.encryption == KeyedEncryption::Aes256Gcm
+        if selected.encryption == InputEncryption::Aes256Gcm
             && query.experimental_gcm
             && cfg!(feature = "experimental-gcm")
         {
-            selected.encryption = KeyedEncryption::Aes128;
+            selected.encryption = InputEncryption::Aes128;
             if !result
                 .requirements
                 .contains(&CapabilityRequirement::GcmDraft22Authentication)
@@ -786,74 +486,56 @@ pub fn query_multitrack_capability(
                     .push(CapabilityRequirement::GcmDraft22Authentication);
             }
         }
-        if selected.container == KeyedContainer::PackedAac {
-            selected.container = KeyedContainer::TransportStream;
-            if selected.codecs != [KeyedCodec::AacLc] {
-                result.rejections.push(MultiTrackCapabilityRejection {
+        if selected.container == InputContainer::PackedAac {
+            selected.container = InputContainer::TransportStream;
+            if selected.codecs != [InputCodec::AacLc] {
+                result.rejections.push(InputCapabilityRejection {
                     input: Some(id.clone()),
                     dimension: D::Codec,
                 });
             }
         }
-        let q = KeyedCapabilityQuery::new(selected, query.output)
-            .with_source_mode(query.mode)
-            .with_range(query.range)
-            .with_resume(query.resume && !native_recovery);
-        let q = ContinuousCapabilityQuery::new(TimelineCapabilityQuery::new(q))
-            .with_host_waiter(query.waiter);
-        let q = if let Some(capacity) = query.capacity {
-            q.with_memory_capacity(capacity)
-        } else {
-            q
-        };
-        let decision = query_continuous_capability(&q);
+        let (rejections, requirements) = validate_input(&selected, query, native_recovery);
         result
             .rejections
             .extend(
-                decision
-                    .rejections
+                rejections
                     .into_iter()
-                    .map(|r| MultiTrackCapabilityRejection {
+                    .map(|dimension| InputCapabilityRejection {
                         input: Some(id.clone()),
-                        dimension: r.dimension,
+                        dimension,
                     }),
             );
-        for requirement in decision.requirements {
+        for requirement in requirements {
             if !result.requirements.contains(&requirement) {
                 result.requirements.push(requirement);
             }
         }
-        if (index > 0 && !input.codecs.contains(&KeyedCodec::AacLc))
+        if (index > 0 && !input.codecs.contains(&InputCodec::AacLc))
             || (index == 0
                 && query.embedded == crate::EmbeddedAudio::Exclude
                 && !input
                     .codecs
                     .iter()
-                    .any(|c| matches!(c, KeyedCodec::Avc | KeyedCodec::Hevc)))
+                    .any(|c| matches!(c, InputCodec::Avc | InputCodec::Hevc)))
             || query.inputs[..index].iter().any(|(other, _)| other == id)
         {
-            result.rejections.push(MultiTrackCapabilityRejection {
+            result.rejections.push(InputCapabilityRejection {
                 input: Some(id.clone()),
                 dimension: D::TrackSelection,
             });
         }
     }
     if query.inputs.len() > 32 || (query.inputs.len() > 1 && !query.waiter) {
-        result.rejections.push(MultiTrackCapabilityRejection {
+        result.rejections.push(InputCapabilityRejection {
             input: None,
             dimension: D::TrackSelection,
         });
     }
-    if query.output == KeyedOutput::FfmpegStreamingFile {
-        result.rejections.push(MultiTrackCapabilityRejection {
-            input: None,
-            dimension: D::Output,
-        });
-    }
-    use MultiTrackPlayback as P;
-    use MultiTrackPlaybackRejection as PR;
+    use PlaybackRejection as PR;
+    use PlaybackTarget as P;
     if query.subtitles && query.subtitle_profile != SubtitleProfile::WvttPlainText {
-        result.rejections.push(MultiTrackCapabilityRejection {
+        result.rejections.push(InputCapabilityRejection {
             input: None,
             dimension: D::Subtitles,
         });
@@ -861,7 +543,7 @@ pub fn query_multitrack_capability(
     result.container_rejections = result.rejections.clone();
     let classic = matches!(
         query.output,
-        KeyedOutput::Mp4Bytes | KeyedOutput::Mp4File | KeyedOutput::NativeStreamingFile
+        OutputTarget::Mp4Bytes | OutputTarget::Mp4File | OutputTarget::NativeStreamingFile
     );
     // Negative player tests are a supported preflight outcome, not permission to
     // silently drop cues, trim samples, transcode, or compress the timeline.
@@ -877,7 +559,7 @@ pub fn query_multitrack_capability(
         _ => None,
     };
     if result.playback_rejection.is_some() {
-        result.rejections.push(MultiTrackCapabilityRejection {
+        result.rejections.push(InputCapabilityRejection {
             input: None,
             dimension: if query.subtitles {
                 D::Subtitles

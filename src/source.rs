@@ -20,7 +20,7 @@ pub struct ByteRange {
 /// A resolvable input location: either a local filesystem path or a URL.
 ///
 /// Exposed publicly because it is part of the [`Source`] trait contract and
-/// the [`HlsInput::Custom`] variant. The transmuxer resolves relative URIs
+/// the Engine input. The transmuxer resolves relative URIs
 /// found in playlists against the location of the playlist they came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceLocation {
@@ -75,10 +75,10 @@ impl SourceSessionOptions {
 ///
 /// The crate ships a built-in reqwest-backed implementation (`ReqwestSource`,
 /// available with the `default-source` cargo feature) used by default for
-/// [`HlsInput::Path`] and [`HlsInput::Url`]. Callers that
+/// Engine inputs. Callers that
 /// want to plug in a different HTTP client, caching layer, proxy, retry policy,
 /// or a fully offline source should implement this trait and pass it via
-/// [`HlsInput::custom`].
+/// `EngineInput::new`.
 ///
 /// The trait uses boxed futures (no `async-trait` dependency) so it is
 /// object-safe and can be used as `Arc<dyn Source>`.
@@ -143,20 +143,6 @@ pub trait Source: Send + Sync + std::fmt::Debug {
 /// use cases: `Authorization: Bearer <token>`, `Cookie: ...`, `Origin: ...`,
 /// custom CDN signing headers.
 ///
-/// ```no_run
-/// use std::sync::Arc;
-/// use hls_engine::legacy::{HlsInput, ReqwestSource, SourceLocation};
-/// use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-///
-/// let mut headers = HeaderMap::new();
-/// headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
-/// let source = Arc::new(ReqwestSource::with_concurrency_and_headers(4, headers));
-/// let location = SourceLocation::Url(
-///     url::Url::parse("https://example.com/media.m3u8").unwrap()
-/// );
-/// // source now sends Authorization on both playlist and segment requests
-/// let _input = HlsInput::custom(source, location);
-/// ```
 ///
 /// Note: if you also pass a custom `reqwest::Client` (via
 /// [`ReqwestSource::with_client`] /
@@ -585,158 +571,7 @@ impl Source for ReqwestSource {
 /// `Path` and `Url` use the built-in `ReqwestSource` (when the
 /// `default-source` feature is enabled). Callers that want to provide their
 /// own HTTP client / cache / proxy / offline source should use
-/// [`HlsInput::custom`] (or the [`HlsInput::Custom`] variant directly).
-#[derive(Debug, Clone)]
-pub enum HlsInput {
-    /// A local filesystem path to a `.m3u8` playlist.
-    Path(PathBuf),
-    /// An HTTP/HTTPS URL pointing at a playlist.
-    Url(String),
-    /// Custom [`Source`] with an explicit starting [`SourceLocation`]. The
-    /// source is responsible for resolving both the root location and any
-    /// relative URIs the transmuxer derives from it.
-    Custom(Arc<dyn Source>, SourceLocation),
-}
-
-impl HlsInput {
-    /// Builds a [`HlsInput::Custom`] from a source implementation and a
-    /// starting location.
-    pub fn custom(source: Arc<dyn Source>, location: SourceLocation) -> Self {
-        Self::Custom(source, location)
-    }
-
-    /// Splits the input into a starting location and a [`Source`] instance.
-    pub(crate) fn into_parts(self) -> Result<(SourceLocation, Arc<dyn Source>)> {
-        match self {
-            Self::Path(path) => {
-                #[cfg(feature = "default-source")]
-                {
-                    Ok((SourceLocation::File(path), Arc::new(ReqwestSource::new())))
-                }
-                #[cfg(not(feature = "default-source"))]
-                {
-                    let _ = path;
-                    Err(Error::unsupported(
-                        "HlsInput::Path requires the `default-source` cargo feature; \
-                         enable it or use HlsInput::custom with your own Source impl",
-                    ))
-                }
-            }
-            Self::Url(url) => {
-                #[cfg(feature = "default-source")]
-                {
-                    let location = SourceLocation::Url(
-                        Url::parse(&url).map_err(|error| Error::invalid(error.to_string()))?,
-                    );
-                    Ok((location, Arc::new(ReqwestSource::new())))
-                }
-                #[cfg(not(feature = "default-source"))]
-                {
-                    let _ = url;
-                    Err(Error::unsupported(
-                        "HlsInput::Url requires the `default-source` cargo feature; \
-                         enable it or use HlsInput::custom with your own Source impl",
-                    ))
-                }
-            }
-            Self::Custom(source, location) => Ok((location, source)),
-        }
-    }
-}
-
-/// Internal adapter that wraps an [`Arc<dyn Source>`] so the rest of the
-/// transmux pipeline can keep using a small, owned `&SourceReader` handle.
-#[derive(Debug, Clone)]
-pub(crate) struct SourceReader {
-    source: Arc<dyn Source>,
-    cancel: Option<Arc<dyn crate::CancelToken>>,
-    _session: Arc<SessionGuard>,
-}
-
-#[derive(Debug)]
-struct SessionGuard {
-    source: Arc<dyn Source>,
-    monitor: Option<tokio::task::AbortHandle>,
-}
-impl Drop for SessionGuard {
-    fn drop(&mut self) {
-        self.source.stop_session();
-        if let Some(monitor) = &self.monitor {
-            monitor.abort();
-        }
-    }
-}
-
-impl SourceReader {
-    pub(crate) fn new(
-        source: Arc<dyn Source>,
-        cancel: Option<Arc<dyn crate::CancelToken>>,
-    ) -> Self {
-        let source = source.create_session().unwrap_or(source);
-        let monitor = cancel.as_ref().map(|token| {
-            let token = token.clone();
-            let session = source.clone();
-            tokio::spawn(async move {
-                token.cancelled().await;
-                session.stop_session();
-            })
-            .abort_handle()
-        });
-        let guard = Arc::new(SessionGuard {
-            source: source.clone(),
-            monitor,
-        });
-        Self {
-            source,
-            cancel,
-            _session: guard,
-        }
-    }
-
-    pub(crate) async fn read_text(&self, location: &SourceLocation) -> Result<TextResource> {
-        crate::cancel::wait(self.cancel.as_ref(), async {
-            self.source.read_text(location).await
-        })
-        .await
-        .map_err(|error| error.context(format!("playlist resource {}", safe_location(location))))
-    }
-
-    pub(crate) async fn read_bytes(
-        &self,
-        location: &SourceLocation,
-        range: Option<&ByteRange>,
-    ) -> Result<Vec<u8>> {
-        crate::cancel::wait(self.cancel.as_ref(), async {
-            self.source.read_bytes(location, range).await
-        })
-        .await
-    }
-}
-
-#[cfg(feature = "default-source")]
-fn apply_range(bytes: Vec<u8>, range: Option<&ByteRange>) -> Result<Vec<u8>> {
-    let Some(range) = range else {
-        return Ok(bytes);
-    };
-    let start = usize::try_from(range.offset)
-        .map_err(|_| Error::invalid("byterange offset exceeds usize"))?;
-    let length = usize::try_from(range.length)
-        .map_err(|_| Error::invalid("byterange length exceeds usize"))?;
-    let end = start
-        .checked_add(length)
-        .ok_or_else(|| Error::invalid("byterange overflows usize"))?;
-    if end > bytes.len() {
-        return Err(Error::invalid(
-            "byterange extends past the end of the segment",
-        ));
-    }
-    Ok(bytes[start..end].to_vec())
-}
-
-// ---------------------------------------------------------------------------
-// MemorySource: in-memory Source for WASM / browser contexts.
-// ---------------------------------------------------------------------------
-
+/// `EngineInput::new` (or the Engine input directly).
 /// In-memory [`Source`] implementation for environments where the caller has
 /// pre-fetched all playlist text and segment bytes (e.g. a browser that
 /// downloaded everything via `fetch()` before invoking the WASM transmuxer).
@@ -752,36 +587,6 @@ fn apply_range(bytes: Vec<u8>, range: Option<&ByteRange>) -> Result<Vec<u8>> {
 ///
 /// # Example (WASM / no-default-features)
 ///
-/// ```no_run
-/// use std::collections::HashMap;
-/// use std::sync::Arc;
-/// use hls_engine::legacy::{HlsInput, MemorySource, OutputFormat, SourceLocation,
-///     TransmuxOptions, transmux_hls_to_writer_async};
-///
-/// # async fn run() -> hls_engine::legacy::Result<()> {
-/// let mut texts = HashMap::new();
-/// texts.insert(
-///     "https://example.com/media.m3u8".to_string(),
-///     "#EXTM3U\n#EXT-X-TARGETDURATION:8\n#EXTINF:7.0,\nseg0.ts\n#EXT-X-ENDLIST\n".to_string(),
-/// );
-/// let mut bytes = HashMap::new();
-/// bytes.insert(
-///     "https://example.com/seg0.ts".to_string(),
-///     std::fs::read("seg0.ts").unwrap(),
-/// );
-/// let source = MemorySource::with_data(texts, bytes);
-/// let location = SourceLocation::Url(
-///     url::Url::parse("https://example.com/media.m3u8").unwrap(),
-/// );
-/// let input = HlsInput::custom(Arc::new(source), location);
-/// let mut buf: Vec<u8> = Vec::new();
-/// transmux_hls_to_writer_async(input, &mut buf, TransmuxOptions {
-///     output_format: OutputFormat::FragmentedMp4,
-///     ..Default::default()
-/// }).await?;
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Debug, Default, Clone)]
 pub struct MemorySource {
     texts: Arc<HashMap<String, String>>,
@@ -982,31 +787,30 @@ impl ReqwestSource {
         if self.concurrency <= 1 || self.state.get().is_some() {
             return;
         }
-        let SourceLocation::Url(playlist_url) = &resource.location else {
+        let SourceLocation::Url(_) = &resource.location else {
             return; // Don't prefetch local files.
         };
 
         // Parse the playlist content to extract segment URIs. Only media
         // playlists trigger prefetch — master playlists are skipped because
         // the variant hasn't been selected yet.
-        let Ok(crate::hls::HlsPlaylist::Media(media)) =
-            crate::hls::parse_hls_playlist_content(None, &resource.content)
-        else {
+        let Ok(media) = crate::playlist::parse_playlist_snapshot(
+            resource,
+            crate::playlist::PlaylistContext::new(
+                crate::playlist::InputId::new("prefetch").expect("static input id"),
+                0,
+            ),
+        ) else {
             return;
         };
-        if media.segments.is_empty() {
-            return;
-        }
-
-        // Resolve each segment URI against the playlist's final URL. This
-        // produces the exact `Url` values the transmuxer will later request
-        // via `read_bytes`, so the slot keys will match.
         let targets: std::collections::VecDeque<SlotKey> = media
-            .segments
+            .segments()
             .iter()
             .filter_map(|seg| {
-                let seg_url = playlist_url.join(&seg.uri).ok()?;
-                Some((http_cache_url(&seg_url), seg.byte_range))
+                let SourceLocation::Url(url) = seg.location().location() else {
+                    return None;
+                };
+                Some((http_cache_url(url), seg.range().map(|r| r.byte_range())))
             })
             .collect();
         if targets.is_empty() {
@@ -1426,6 +1230,26 @@ async fn read_limited_file(
     Ok(bytes)
 }
 
+#[cfg(any(feature = "default-source", test))]
+fn apply_range(bytes: Vec<u8>, range: Option<&ByteRange>) -> Result<Vec<u8>> {
+    let Some(range) = range else {
+        return Ok(bytes);
+    };
+    let start = usize::try_from(range.offset)
+        .map_err(|_| Error::invalid("byterange offset exceeds usize"))?;
+    let length = usize::try_from(range.length)
+        .map_err(|_| Error::invalid("byterange length exceeds usize"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| Error::invalid("byterange overflows usize"))?;
+    if end > bytes.len() {
+        return Err(Error::invalid(
+            "byterange extends past the end of the segment",
+        ));
+    }
+    Ok(bytes[start..end].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1451,7 +1275,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "default-source")]
     fn applies_local_byterange() {
         let bytes = apply_range(
             b"0123456789".to_vec(),
@@ -1561,74 +1384,5 @@ mod tests {
         .expect("session background work outlived task");
         assert!(original.state.get().is_none());
         assert!(original.tasks.lock().unwrap().is_empty());
-    }
-    #[derive(Debug, Clone)]
-    struct SessionSource {
-        stopped: Arc<std::sync::atomic::AtomicUsize>,
-        signal: Arc<tokio::sync::Notify>,
-        once: Arc<std::sync::atomic::AtomicBool>,
-    }
-    impl Source for SessionSource {
-        fn create_session(&self) -> Option<Arc<dyn Source>> {
-            Some(Arc::new(Self {
-                once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                ..self.clone()
-            }))
-        }
-        fn stop_session(&self) {
-            if !self.once.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                self.stopped
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                self.signal.notify_one();
-            }
-        }
-        fn read_text<'a>(
-            &'a self,
-            _: &'a SourceLocation,
-        ) -> Pin<Box<dyn Future<Output = Result<TextResource>> + Send + 'a>> {
-            Box::pin(std::future::pending())
-        }
-        fn read_bytes<'a>(
-            &'a self,
-            _: &'a SourceLocation,
-            _: Option<&'a ByteRange>,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
-            Box::pin(std::future::pending())
-        }
-    }
-    #[derive(Debug)]
-    struct WatchCancel(tokio::sync::watch::Sender<bool>);
-    impl crate::CancelToken for WatchCancel {
-        fn is_cancelled(&self) -> bool {
-            *self.0.borrow()
-        }
-        fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-            let mut receiver = self.0.subscribe();
-            Box::pin(async move {
-                let _ = receiver.wait_for(|value| *value).await;
-            })
-        }
-    }
-    #[tokio::test]
-    async fn cancel_stops_session_before_reader_is_dropped() {
-        let stopped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let signal = Arc::new(tokio::sync::Notify::new());
-        let original = Arc::new(SessionSource {
-            stopped: stopped.clone(),
-            signal: signal.clone(),
-            once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        });
-        let token = Arc::new(WatchCancel(tokio::sync::watch::channel(false).0));
-        let first = SourceReader::new(original.clone(), Some(token.clone()));
-        let second = SourceReader::new(original.clone(), None);
-        token.0.send_replace(true);
-        tokio::time::timeout(std::time::Duration::from_secs(1), signal.notified())
-            .await
-            .unwrap();
-        assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(!original.once.load(std::sync::atomic::Ordering::SeqCst));
-        drop(first);
-        drop(second);
-        assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

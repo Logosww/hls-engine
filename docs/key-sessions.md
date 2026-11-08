@@ -2,11 +2,11 @@
 
 `crypto::key` provides operation-scoped AES key resolution over typed playlist
 metadata. It performs no HTTP, decryption or media execution.
-Legacy `Source`, prepared sessions, errors and checkpoint serialization are unchanged.
+`Source`, typed resource errors and Engine checkpoints share this key-provider lifecycle.
 
 ```rust,no_run
 use std::sync::Arc;
-use hls_engine::legacy::{crypto::key::*, playlist::SegmentDescriptor};
+use hls_engine::{crypto::key::*, playlist::SegmentDescriptor};
 
 async fn resolve(
     provider: Arc<dyn KeyProvider>,

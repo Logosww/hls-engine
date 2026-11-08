@@ -1,5 +1,5 @@
 use super::sample_corpus as sample;
-use hls_engine::legacy::{playlist::*, *};
+use hls_engine::{playlist::*, *};
 use std::{
     cell::Cell,
     pin::Pin,
@@ -78,18 +78,21 @@ pub async fn run_counts(counts: &[u64]) -> serde_json::Value {
                 "https://profile.test/media",
                 include_bytes!("../fixtures/sample_crypto/fmp4_aac_clear/seg1.m4s"),
             );
-        let holder = Arc::new(Mutex::new(None::<ContinuousHandle>));
+        let holder = Arc::new(Mutex::new(None::<EngineHandle>));
         let callback = holder.clone();
-        let options=ContinuousOptions::default().with_limits(ContinuousLimits::default().with_queue(2,4096).with_history(4)).with_on_event(Arc::new(move|event|{
-            if let ContinuousEvent::Committed {input,..}=event {
+        let options=EngineOptions::default().with_limits(EngineLimits::default().with_queue(2,4096).with_history(4)).with_on_event(Arc::new(move|event|{
+            if let EngineEvent::Committed {input,..}=event {
                 let n=input.committed();let guard=callback.lock().unwrap();let h=guard.as_ref().unwrap();
                 if n==count {h.stop();return;}
                 let text=format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:{}\n#EXT-X-DISCONTINUITY-SEQUENCE:{}\n#EXT-X-MAP:URI=\"init\"\n#EXTINF:2,\nmedia\n#EXT-X-DISCONTINUITY\n#EXTINF:2,\nmedia\n",n-1,n-1);
                 h.accept_snapshot(&InputId::new("primary").unwrap(),&parse(text,n+1)).unwrap();
             }
         }));
-        let session = ContinuousSession::new(
-            ContinuousInputs::new(ContinuousInput::new(id.clone(), Arc::new(source))),
+        let session = EngineSession::new(
+            EngineInputs::new(
+                EngineInput::new(id.clone(), Arc::new(source)),
+                EmbeddedAudio::Keep,
+            ),
             sample::keys(Arc::new(sample::Provider)),
             options,
         )
@@ -112,13 +115,13 @@ pub async fn run_counts(counts: &[u64]) -> serde_json::Value {
             yielded: false,
         };
         let report = session.write_to(&mut sink).await.unwrap();
-        assert_eq!(report.inputs()[0].committed(), count);
-        assert!(report.mappings().len() <= 4);
+        assert_eq!(report.media().inputs()[0].committed(), count);
+        assert!(report.media().mappings().len() <= 4);
         let (_, peak, allocated) = crate::allocation::snapshot();
         drop(h);
         drop(holder);
         let retained = crate::allocation::snapshot().0;
-        rows.push(serde_json::json!({"segments":count,"peakIncrementBytes":peak.saturating_sub(baseline),"retainedIncrementBytes":retained.saturating_sub(baseline),"allocatedBytes":allocated.wrapping_sub(total),"firstWriteMs":first.get(),"elapsedMs":now()-started,"peaks":report.peaks(),"retainedMappings":report.mappings().len(),"bytes":report.bytes_written().to_string()}));
+        rows.push(serde_json::json!({"segments":count,"peakIncrementBytes":peak.saturating_sub(baseline),"retainedIncrementBytes":retained.saturating_sub(baseline),"allocatedBytes":allocated.wrapping_sub(total),"firstWriteMs":first.get(),"elapsedMs":now()-started,"peaks":report.media().peaks(),"retainedMappings":report.media().mappings().len(),"bytes":report.media().bytes_written().to_string()}));
     }
     serde_json::json!(rows)
 }

@@ -123,6 +123,7 @@ pub(crate) struct Mp4Muxer {
 }
 
 impl Mp4Muxer {
+    #[cfg(test)]
     pub(crate) fn new(tracks: Vec<Mp4Track>) -> Self {
         Self {
             tracks,
@@ -339,26 +340,6 @@ fn mdat_header(payload: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub(crate) fn normalize_sample_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
-    let Some(first) = samples.first() else {
-        return Ok(());
-    };
-    let mut expected = first.dts;
-    for sample in samples {
-        if sample.dts.abs_diff(expected) > 1 {
-            return Err(Error::unsupported(
-                "non-contiguous decode timeline requires unsupported edits or runs",
-            ));
-        }
-        sample.pts += i128::from(expected) - i128::from(sample.dts);
-        sample.dts = expected;
-        expected = expected
-            .checked_add(u64::from(sample.duration))
-            .ok_or_else(|| Error::muxing("sample timeline overflow"))?;
-    }
-    Ok(())
-}
-
 // A classic sample table stores a contiguous decode timeline. Positive source
 // gaps are encoded later using audio composition offsets or edit lists;
 // overlapping decode intervals cannot be represented.
@@ -391,29 +372,6 @@ fn compact_audio_decode_timeline(samples: &mut [Mp4Sample]) -> Result<()> {
         cursor = cursor
             .checked_add(u64::from(sample.duration))
             .ok_or_else(|| Error::muxing("audio decode timeline overflow"))?;
-    }
-    Ok(())
-}
-
-pub(crate) fn assign_delta_durations(samples: &mut [Mp4Sample]) -> Result<()> {
-    samples.sort_by_key(|sample| sample.dts);
-    let mut previous_delta = 3000_u32;
-    for index in 0..samples.len() {
-        let duration = if let Some(next) = samples.get(index + 1) {
-            if next.dts <= samples[index].dts {
-                return Err(Error::muxing(
-                    "video sample DTS must be strictly increasing",
-                ));
-            }
-            u32::try_from(next.dts - samples[index].dts)
-                .map_err(|_| Error::muxing("video sample duration exceeds u32"))?
-        } else {
-            previous_delta
-        };
-        if samples[index].duration == 0 {
-            samples[index].duration = duration;
-        }
-        previous_delta = duration;
     }
     Ok(())
 }
@@ -1524,6 +1482,7 @@ impl FragmentedMp4Muxer {
         self.next_sequence
     }
 
+    #[cfg(test)]
     pub(crate) fn write_header(&self) -> Result<Vec<u8>> {
         self.write_header_with_offsets(&vec![0; self.tracks.len()])
     }
@@ -1864,6 +1823,7 @@ fn trex_box(track: &FragmentedTrack) -> Result<Vec<u8>> {
 
 /// One entry in a Track Fragment Random Access table. Points at the first
 /// sync sample of a fragment so players can seek without scanning moof boxes.
+#[allow(dead_code)] // Scanner validates random-access indexes; writers need no mfra.
 #[derive(Debug, Clone)]
 pub(crate) struct TfraEntry {
     /// Presentation time of the first sample in this fragment, in the track's
@@ -1875,56 +1835,6 @@ pub(crate) struct TfraEntry {
     pub traf_number: u32,
     pub trun_number: u32,
     pub sample_number: u32,
-}
-
-/// Movie Fragment Random Access Box. Written at the very end of the file so
-/// players can locate sync samples by seeking from EOF. Contains one `tfra`
-/// per track plus a trailing `mfro` whose size field equals the full `mfra`
-/// length (the size is computed up-front so no post-write patching is needed).
-pub(crate) fn mfra_box(
-    tracks: &[FragmentedTrack],
-    entries_per_track: &[Vec<TfraEntry>],
-) -> Result<Vec<u8>> {
-    let mut tfras = Vec::with_capacity(tracks.len());
-    let mut total_size: usize = 8; // mfra box header
-    for (index, track) in tracks.iter().enumerate() {
-        let tfra = tfra_box(track.track_id, &entries_per_track[index])?;
-        total_size += tfra.len();
-        tfras.push(tfra);
-    }
-    total_size += 16; // mfro: 8 header + 4 version/flags + 4 size
-
-    boxed_result(b"mfra", |out| {
-        for tfra in &tfras {
-            out.extend_from_slice(tfra);
-        }
-        out.extend_from_slice(&mfro_box(fit_u32(total_size as u64, "mfra size")?));
-        Ok(())
-    })
-}
-
-fn tfra_box(track_id: u32, entries: &[TfraEntry]) -> Result<Vec<u8>> {
-    full_box_result(b"tfra", 1, 0, |out| {
-        be_u32(out, track_id);
-        // 26 reserved bits + 2-bit traf length + 2-bit trun length + 2-bit sample length.
-        // 0x3F → all three fields are 32-bit.
-        be_u32(out, 0x0000_003f);
-        be_u32(out, fit_u32(entries.len() as u64, "tfra entry count")?);
-        for entry in entries {
-            be_u64(out, entry.time);
-            be_u64(out, entry.moof_offset);
-            be_u32(out, entry.traf_number);
-            be_u32(out, entry.trun_number);
-            be_u32(out, entry.sample_number);
-        }
-        Ok(())
-    })
-}
-
-fn mfro_box(size: u32) -> Vec<u8> {
-    full_box(b"mfro", 0, 0, |out| {
-        be_u32(out, size);
-    })
 }
 
 fn mfhd_box(sequence_number: u32) -> Result<Vec<u8>> {

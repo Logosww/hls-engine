@@ -1,4 +1,6 @@
 //! SDK-like fixed-file adapter and process-isolated joint recovery contract.
+#[path = "support/aac_fixture.rs"]
+mod aac_fixture;
 #[path = "support/subtitle_contract.rs"]
 mod suite;
 use hls_engine::*;
@@ -156,6 +158,44 @@ impl RecoverableSubtitleSink for Files {
         })
     }
 }
+fn repair_inputs(embedded: bool) -> EngineInputs {
+    let mut source = MemorySource::new();
+    for segment in 0..3u64 {
+        let times: Vec<_> = (0..94u64)
+            .map(|i| segment * 200000 + i * 1920 - if i >= 15 { 3960 } else { 0 })
+            .collect();
+        source = source.segment(
+            format!("https://subtitle.test/seg{segment}"),
+            aac_fixture::segment(&times),
+        );
+    }
+    EngineInputs::new(
+        EngineInput::new(suite::id("media"), Arc::new(source)),
+        EmbeddedAudio::Keep,
+    )
+    .with_subtitle(
+        SubtitleTrack::new(
+            suite::id("cc"),
+            suite::id("media"),
+            TrackMetadata::new("en", "Captions"),
+        )
+        .with_embedded(embedded),
+    )
+}
+fn repair_feed(session: &EngineSession) {
+    let h = session.handle();
+    h.accept_snapshot(&suite::id("media"), &suite::snapshot("media", "#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:2,\nseg0\n#EXTINF:2,\nseg1\n#EXTINF:2,\nseg2\n#EXT-X-ENDLIST\n")).unwrap();
+    let track = h.subtitle_track_id(&suite::id("cc")).unwrap();
+    h.accept_cues(
+        track,
+        &[
+            SubtitleCue::new(7, 0, suite::time(123), suite::time(8000), "spanning"),
+            SubtitleCue::new(7, 0, suite::time(500), suite::time(900), "overlap"),
+        ],
+    )
+    .unwrap();
+    h.end_subtitles(track).unwrap();
+}
 fn session(
     dir: &Path,
     checkpoint: Option<EngineCheckpoint>,
@@ -163,7 +203,13 @@ fn session(
     replay: bool,
 ) -> EngineSession {
     let terminal = checkpoint.as_ref().is_some_and(|c| c.is_finalizing());
-    let inputs = suite::inputs(embedded).with_subtitle(
+    let repair = std::env::var_os("HLS_SIDECAR_REPAIR").is_some();
+    let inputs = if repair {
+        repair_inputs(embedded)
+    } else {
+        suite::inputs(embedded)
+    }
+    .with_subtitle(
         SubtitleTrack::new(
             suite::id("cc2"),
             suite::id("media"),
@@ -172,7 +218,13 @@ fn session(
         .with_embedded(embedded),
     );
     let keys = suite::keys(Arc::new(suite::Provider::default()));
-    let options = EngineOptions::default();
+    let options = if repair {
+        EngineOptions::default().with_aac_timestamp_policy(AacTimestampPolicy::RepairOverlaps {
+            max_shift: std::time::Duration::from_millis(50),
+        })
+    } else {
+        EngineOptions::default()
+    };
     let s = match checkpoint {
         Some(cp) => EngineSession::restore(inputs, keys, options, cp),
         None => EngineSession::new(inputs, keys, options),
@@ -180,7 +232,11 @@ fn session(
     .unwrap()
     .with_recoverable_subtitle_sink(Arc::new(Files::new(dir)));
     if !terminal && replay {
-        suite::feed(&s);
+        if repair {
+            repair_feed(&s);
+        } else {
+            suite::feed(&s);
+        }
         let h = s.handle();
         let track = h.subtitle_track_id(&suite::id("cc2")).unwrap();
         h.accept_cues(
@@ -202,7 +258,14 @@ fn persist(path: &Path, cp: &EngineCheckpoint) {
         EngineCheckpoint::from_bytes(&bytes).unwrap().to_bytes(),
         bytes
     );
-    assert_eq!(cp.schema_version(), 3);
+    assert_eq!(
+        cp.schema_version(),
+        if std::env::var_os("HLS_SIDECAR_REPAIR").is_some() {
+            4
+        } else {
+            3
+        }
+    );
     let temporary = path.with_extension("new");
     let mut file = std::fs::File::create(&temporary).unwrap();
     file.write_all(&bytes[..bytes.len() / 2]).unwrap();
@@ -240,7 +303,7 @@ fn subtitle_recovery_child() {
         .map(|b| EngineCheckpoint::from_bytes(&b).unwrap());
     let embedded = std::env::var("HLS_SIDECAR_EMBEDDED").unwrap() == "1";
     let classic = std::env::var("HLS_SIDECAR_CLASSIC").unwrap() == "1";
-    tokio::runtime::Builder::new_current_thread()
+    let report = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
@@ -249,6 +312,17 @@ fn subtitle_recovery_child() {
                 .write_recoverable_to_file(dir.join("media.mp4"), options(&dir, classic)),
         )
         .unwrap();
+    if std::env::var_os("HLS_SIDECAR_REPAIR").is_some() {
+        assert_eq!(
+            report.media().aac_repairs().unwrap()[0].corrected_frames,
+            237
+        );
+    }
+    std::fs::write(
+        dir.join("stats.txt"),
+        format!("{:?}", report.media().aac_repairs()),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("hits.json"),
         serde_json::to_vec(&*HITS.get_or_init(Mutex::default).lock().unwrap()).unwrap(),
@@ -280,7 +354,7 @@ fn canonical(mut bytes: Vec<u8>) -> Vec<u8> {
 fn joint_sidecar_sigkill_windows() {
     let root = std::env::temp_dir().join(format!("hls-sidecar-kill-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
-    let run = |dir: &Path, embedded: bool, classic: bool, point: Option<&str>| {
+    let run = |dir: &Path, embedded: bool, classic: bool, repair: bool, point: Option<&str>| {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .args(["subtitle_recovery_child", "--ignored", "--nocapture"])
@@ -288,6 +362,10 @@ fn joint_sidecar_sigkill_windows() {
             .env("HLS_SIDECAR_EMBEDDED", if embedded { "1" } else { "0" })
             .env("HLS_SIDECAR_CLASSIC", if classic { "1" } else { "0" })
             .env_remove("HLS_SIDECAR_KILL");
+        command.env_remove("HLS_SIDECAR_REPAIR");
+        if repair {
+            command.env("HLS_SIDECAR_REPAIR", "1");
+        }
         if let Some(point) = point {
             command.env("HLS_SIDECAR_KILL", point);
         }
@@ -315,10 +393,19 @@ fn joint_sidecar_sigkill_windows() {
         }
     };
     let mut windows = 0;
-    for (embedded, classic) in [(true, false), (false, false), (true, true), (false, true)] {
-        let reference = root.join(format!("reference-{embedded}-{classic}"));
+    for (embedded, classic, repair) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+        (false, true, false),
+        (true, false, true),
+        (false, false, true),
+        (true, true, true),
+        (false, true, true),
+    ] {
+        let reference = root.join(format!("reference-{embedded}-{classic}-{repair}"));
         std::fs::create_dir(&reference).unwrap();
-        run(&reference, embedded, classic, None);
+        run(&reference, embedded, classic, repair, None);
         let hits: BTreeMap<String, usize> =
             serde_json::from_slice(&std::fs::read(reference.join("hits.json")).unwrap()).unwrap();
         for (stage, count) in hits {
@@ -326,9 +413,9 @@ fn joint_sidecar_sigkill_windows() {
                 let point = format!("{stage}:{number}");
                 let dir = root.join(format!("case-{windows}"));
                 std::fs::create_dir(&dir).unwrap();
-                run(&dir, embedded, classic, Some(&point));
-                run(&dir, embedded, classic, None);
-                for file in ["cc.vtt", "cc2.vtt", "media.mp4"] {
+                run(&dir, embedded, classic, repair, Some(&point));
+                run(&dir, embedded, classic, repair, None);
+                for file in ["cc.vtt", "cc2.vtt", "media.mp4", "stats.txt"] {
                     let actual = std::fs::read(dir.join(file)).unwrap();
                     let expected = std::fs::read(reference.join(file)).unwrap();
                     if file.ends_with("mp4") {
@@ -349,7 +436,7 @@ fn joint_sidecar_sigkill_windows() {
                 ] {
                     std::fs::remove_file(dir.join(file)).unwrap();
                 }
-                run(&dir, embedded, classic, None);
+                run(&dir, embedded, classic, repair, None);
                 std::fs::remove_dir_all(dir).unwrap();
                 windows += 1;
             }
@@ -793,4 +880,55 @@ async fn late_disposition_is_acknowledged_before_joint_checkpoint() {
     .await
     .unwrap();
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[path = "support/frozen_checkpoint.rs"]
+mod frozen_checkpoint;
+#[tokio::test]
+async fn frozen_v1_schema3_execution_and_sidecars_restore() {
+    let root = std::env::temp_dir().join(format!("frozen-sidecar-{}", std::process::id()));
+    let resumed = root.join("resumed");
+    let reference = root.join("reference");
+    std::fs::create_dir_all(&resumed).unwrap();
+    std::fs::create_dir_all(&reference).unwrap();
+    let saved = Arc::new(Mutex::new(None));
+    let capture = saved.clone();
+    session(&resumed, None, false, true)
+        .write_recoverable_to_file(
+            resumed.join("media.mp4"),
+            RecoveryOptions::new(Arc::new(move |cp| {
+                *capture.lock().unwrap() = Some(cp);
+                Err(EngineError::output(Error::invalid("initial checkpoint")))
+            })),
+        )
+        .await
+        .unwrap_err();
+    let cp = frozen_checkpoint::at_destination(
+        include_bytes!("fixtures/checkpoint/engine-schema3-start.bin"),
+        saved.lock().unwrap().as_ref().unwrap(),
+    );
+    session(&resumed, Some(cp), false, true)
+        .write_recoverable_to_file(
+            resumed.join("media.mp4"),
+            RecoveryOptions::new(Arc::new(|_| Ok(()))),
+        )
+        .await
+        .unwrap();
+    session(&reference, None, false, true)
+        .write_recoverable_to_file(
+            reference.join("media.mp4"),
+            RecoveryOptions::new(Arc::new(|_| Ok(()))),
+        )
+        .await
+        .unwrap();
+    for name in ["media.mp4", "cc.vtt", "cc2.vtt"] {
+        let a = std::fs::read(resumed.join(name)).unwrap();
+        let b = std::fs::read(reference.join(name)).unwrap();
+        if name.ends_with("mp4") {
+            assert_eq!(canonical(a), canonical(b));
+        } else {
+            assert_eq!(a, b);
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

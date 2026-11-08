@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 //! Small clear-fixture bridge. The bounded resource map belongs to this example;
 //! production hosts use a demand-driven Source/Promise bridge (see SDK tests).
-use hls_engine::legacy::{crypto::key::*, playlist::*, *};
+use hls_engine::{crypto::key::*, playlist::*, *};
 use std::{
     cell::RefCell,
     future::Future,
@@ -27,8 +27,8 @@ fn js(error: impl std::fmt::Display) -> JsValue {
 }
 #[wasm_bindgen]
 pub struct Recorder {
-    session: RefCell<Option<ContinuousSession>>,
-    handle: ContinuousHandle,
+    session: RefCell<Option<EngineSession>>,
+    handle: EngineHandle,
 }
 #[wasm_bindgen]
 impl Recorder {
@@ -59,13 +59,13 @@ impl Recorder {
             KeySessionOptions::default(),
         )
         .map_err(js)?;
-        let session = ContinuousSession::new(
-            ContinuousInputs::new(ContinuousInput::new(
-                InputId::new("primary").unwrap(),
-                Arc::new(source),
-            )),
+        let session = EngineSession::new(
+            EngineInputs::new(
+                EngineInput::new(InputId::new("primary").unwrap(), Arc::new(source)),
+                EmbeddedAudio::Keep,
+            ),
             keys,
-            ContinuousOptions::default(),
+            EngineOptions::default(),
         )
         .map_err(js)?;
         let handle = session.handle();

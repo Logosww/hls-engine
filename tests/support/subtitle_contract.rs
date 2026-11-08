@@ -1,6 +1,6 @@
 //! Shared production-path assertions, executed unchanged on native and WASM.
 #![allow(dead_code)]
-use hls_engine::legacy::{
+use hls_engine::{
     crypto::{key::*, resource::*},
     playlist::*,
     *,
@@ -196,7 +196,7 @@ impl SubtitleSink for Collector {
         })
     }
 }
-pub fn inputs(embedded: bool) -> MultiTrackInputs {
+pub fn inputs(embedded: bool) -> EngineInputs {
     let source = Arc::new(
         MemorySource::new()
             .segment(
@@ -216,24 +216,20 @@ pub fn inputs(embedded: bool) -> MultiTrackInputs {
                 include_bytes!("../fixtures/media/fmp4_aac_audio_only/seg2.m4s"),
             ),
     );
-    MultiTrackInputs::new(
-        ContinuousInput::new(id("media"), source),
-        EmbeddedAudio::Keep,
-    )
-    .with_subtitle(
+    EngineInputs::new(EngineInput::new(id("media"), source), EmbeddedAudio::Keep).with_subtitle(
         SubtitleTrack::new(id("cc"), id("media"), TrackMetadata::new("en", "Captions"))
             .with_embedded(embedded),
     )
 }
-pub fn session(embedded: bool, options: ContinuousOptions) -> MultiTrackSession {
-    MultiTrackSession::new(
+pub fn session(embedded: bool, options: EngineOptions) -> EngineSession {
+    EngineSession::new(
         inputs(embedded),
         keys(Arc::new(Provider::default())),
         options,
     )
     .unwrap()
 }
-pub fn feed(session: &MultiTrackSession) -> Vec<u64> {
+pub fn feed(session: &EngineSession) -> Vec<u64> {
     let h = session.handle();
     h.accept_snapshot(&id("media"), &snapshot("media", "#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXT-X-MAP:URI=\"init\"\n#EXTINF:2,\nseg0\n#EXTINF:2,\nseg1\n#EXTINF:2,\nseg2\n#EXT-X-ENDLIST\n")).unwrap();
     let track = h.subtitle_track_id(&id("cc")).unwrap();
@@ -260,7 +256,7 @@ pub async fn sidecars() -> serde_json::Value {
         let sink = Arc::new(Collector::default());
         let session = session(
             embedded,
-            ContinuousOptions::default().with_limits(ContinuousLimits::default().with_history(1)),
+            EngineOptions::default().with_limits(EngineLimits::default().with_history(1)),
         )
         .with_subtitle_sink(sink.clone());
         let receipts = feed(&session);
@@ -408,7 +404,7 @@ pub async fn controls() -> serde_json::Value {
     let mut cx = Context::from_waker(Waker::noop());
     for cancel in [false, true] {
         let sink = Arc::new(GateSink::new(0));
-        let s = session(true, ContinuousOptions::default()).with_subtitle_sink(sink.clone());
+        let s = session(true, EngineOptions::default()).with_subtitle_sink(sink.clone());
         let h = s.handle();
         feed(&s);
         let writes = Arc::new(AtomicUsize::new(0));
@@ -443,7 +439,7 @@ pub async fn controls() -> serde_json::Value {
             h.cancel();
             assert_eq!(
                 running.await.unwrap_err().kind(),
-                ContinuousErrorKind::Cancelled
+                EngineErrorKind::Cancelled
             );
             sink.mode.store(1, Ordering::SeqCst);
             assert_eq!(sink.closes.load(Ordering::SeqCst), 0);
@@ -455,18 +451,18 @@ pub async fn controls() -> serde_json::Value {
     }
     for mode in [2, 3] {
         let sink = Arc::new(GateSink::new(mode));
-        let s = session(false, ContinuousOptions::default()).with_subtitle_sink(sink.clone());
+        let s = session(false, EngineOptions::default()).with_subtitle_sink(sink.clone());
         feed(&s);
         let error = s
             .into_bytes(2 * 1024 * 1024, OutputFormat::FragmentedMp4)
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), ContinuousErrorKind::SubtitleOutput);
+        assert_eq!(error.kind(), EngineErrorKind::SubtitleOutput);
         assert!(!format!("{error:?}").contains("private"));
         assert_eq!(sink.closes.load(Ordering::SeqCst), usize::from(mode == 3));
     }
     let sink = Arc::new(Collector::default());
-    let s = session(true, ContinuousOptions::default()).with_subtitle_sink(sink.clone());
+    let s = session(true, EngineOptions::default()).with_subtitle_sink(sink.clone());
     feed(&s);
     let mut writer = Writer {
         writes: Arc::new(AtomicUsize::new(0)),
@@ -474,7 +470,7 @@ pub async fn controls() -> serde_json::Value {
     };
     assert_eq!(
         s.write_to(&mut writer).await.unwrap_err().kind(),
-        ContinuousErrorKind::Output
+        EngineErrorKind::Output
     );
     assert!(sink.cues.lock().unwrap().is_empty());
     serde_json::json!({"mediaBeforeCues":true,"acknowledged":true,"cancel":true,"stopDrains":true,"writeAndCloseFailure":true})
@@ -527,7 +523,7 @@ pub async fn ranges() -> serde_json::Value {
     let sink = Arc::new(Collector::default());
     let s = session(
         false,
-        ContinuousOptions::default()
+        EngineOptions::default()
             .with_range(PresentationRange::new(time(1000), time(3000)).unwrap()),
     )
     .with_subtitle_sink(sink.clone());
@@ -662,10 +658,10 @@ pub async fn long_open() -> serde_json::Value {
     });
     let s = session(
         false,
-        ContinuousOptions::default()
-            .with_mode(ContinuousMode::Open)
+        EngineOptions::default()
+            .with_mode(EngineMode::Open)
             .with_limits(
-                ContinuousLimits::default()
+                EngineLimits::default()
                     .with_history(4)
                     .with_queue(4, 1024 * 1024)
                     .with_samples(1024, 1024 * 1024),
@@ -713,7 +709,7 @@ pub async fn gaps() -> serde_json::Value {
         let sink = Arc::new(Collector::default());
         let s = session(
             true,
-            ContinuousOptions::default()
+            EngineOptions::default()
                 .with_gap_policy(policy)
                 .with_missing_segments(MissingSegmentPolicy::Skip),
         )

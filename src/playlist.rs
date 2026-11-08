@@ -1,6 +1,6 @@
 //! Immutable playlist metadata. Parsing is not an execution capability.
 //!
-//! The old prepared and legacy APIs continue using their original parser.
+//! Shared parser for Engine snapshots and native source prefetch.
 //! See the guide below for identity, transport serialization and limits.
 #![doc = include_str!("../docs/typed-playlists.md")]
 use crate::{SourceLocation, TextResource};
@@ -628,28 +628,10 @@ impl PlaylistSnapshot {
     pub fn retained_tags(&self) -> &[RetainedTag] {
         &self.0.retained_tags
     }
-    /// Manifest-only preflight for the planned v0.6 finite profile. Does NOT enable execution,
-    /// validate provider/codec/container support, or fetch resources.
+    /// Manifest preflight for standalone clear/AES resource reads. Engine sessions
+    /// use `validate_engine`, which also accepts open input and sample encryption.
     pub fn validate_finite_vod(&self) -> Result<(), PlaylistRejection> {
         self.validate_finite_profile(false, false)
-    }
-    /// Validate the finite timeline profile. GAP and discontinuity are retained
-    /// for the timeline executor; this is not a codec or timeline validation.
-    pub fn validate_timeline_vod(&self) -> Result<(), PlaylistRejection> {
-        self.validate_finite_profile(true, false)
-    }
-    /// Finite sample-encryption manifest profile; container validation is deferred to demux.
-    pub fn validate_finite_sample_vod(&self) -> Result<(), PlaylistRejection> {
-        self.validate_finite_profile(false, true)
-    }
-    /// Timeline sample-encryption profile, retaining GAP and discontinuity.
-    pub fn validate_timeline_sample_vod(&self) -> Result<(), PlaylistRejection> {
-        self.validate_finite_profile(true, true)
-    }
-    /// Open-input manifest validation. Execution and incremental identity checks
-    /// are performed by `ContinuousSession`; this does not change finite profiles.
-    pub fn validate_continuous(&self) -> Result<(), PlaylistRejection> {
-        self.validate_media_profile(true, true, false)
     }
     fn validate_finite_profile(
         &self,
@@ -667,7 +649,9 @@ impl PlaylistSnapshot {
         }
         self.validate_media_profile(timeline, samples, false)
     }
-    pub(crate) fn validate_engine(&self, gcm: bool) -> Result<(), PlaylistRejection> {
+    /// Engine manifest preflight; codec, timeline and host-mode checks occur in
+    /// the session. GCM requires both this opt-in and its Cargo feature.
+    pub fn validate_engine(&self, gcm: bool) -> Result<(), PlaylistRejection> {
         self.validate_media_profile(true, true, gcm && cfg!(feature = "experimental-gcm"))
     }
     fn validate_media_profile(

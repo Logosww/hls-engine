@@ -1,4 +1,5 @@
-use super::contracts::suite::fixtures::corpus;
+#[path = "../../support/crypto_corpus.rs"]
+mod corpus;
 #[cfg(not(target_arch = "wasm32"))]
 pub fn native_suite() -> String {
     futures::executor::block_on(corpus::run(std::sync::Arc::new(corpus::Provider))).to_string()
@@ -14,7 +15,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 mod bridge {
     use super::corpus;
-    use hls_engine::legacy::{
+    use hls_engine::{
         MemorySource, SourceLocation, TextResource,
         crypto::{key::*, resource::*},
         parse_playlist_snapshot,

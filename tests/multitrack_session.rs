@@ -1,12 +1,12 @@
 #[path = "support/subtitle_contract.rs"]
 mod subtitles;
-use hls_engine::legacy::{playlist::*, *};
+use hls_engine::{playlist::*, *};
 use std::{future::Future, pin::Pin, sync::Arc};
 #[allow(dead_code)]
 #[path = "support/sample_crypto.rs"]
 mod sample;
 struct Wait;
-impl ContinuousWait for Wait {
+impl EngineWait for Wait {
     fn wait(&self, duration: std::time::Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(tokio::time::sleep(duration))
     }
@@ -36,8 +36,8 @@ fn source(case: &sample::Case) -> Arc<dyn Source> {
     }
     Arc::new(source)
 }
-fn options() -> ContinuousOptions {
-    ContinuousOptions::default().with_waiter(Arc::new(Wait), std::time::Duration::from_secs(1))
+fn options() -> EngineOptions {
+    EngineOptions::default().with_waiter(Arc::new(Wait), std::time::Duration::from_secs(1))
 }
 fn write_fixture(name: &str, bytes: &[u8]) {
     if let Ok(dir) = std::env::var("HLS_MULTITRACK_OUTPUT") {
@@ -54,16 +54,16 @@ async fn encrypted_video_two_audio_and_overlapping_subtitles_classic_and_fragmen
         ("multi-fragmented.mp4", OutputFormat::FragmentedMp4),
         ("multi-classic.mp4", OutputFormat::Mp4),
     ] {
-        let inputs = MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), source(video)),
+        let inputs = EngineInputs::new(
+            EngineInput::new(id("main"), source(video)),
             EmbeddedAudio::Exclude,
         )
         .with_audio(
-            ContinuousInput::new(id("en"), source(audio)),
+            EngineInput::new(id("en"), source(audio)),
             TrackMetadata::new("en", "English").with_default(true),
         )
         .with_audio(
-            ContinuousInput::new(id("ja"), source(audio)),
+            EngineInput::new(id("ja"), source(audio)),
             TrackMetadata::new("ja", "Japanese"),
         )
         .with_subtitle(SubtitleTrack::new(
@@ -71,7 +71,7 @@ async fn encrypted_video_two_audio_and_overlapping_subtitles_classic_and_fragmen
             id("main"),
             TrackMetadata::new("en", "Captions"),
         ));
-        let s = MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
+        let s = EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
             .unwrap();
         let h = s.handle();
         for (input, case) in [("main", video), ("en", audio), ("ja", audio)] {
@@ -129,13 +129,13 @@ async fn packed_44100_wrap_is_exact_and_not_extension_based() {
     let src = MemorySource::new()
         .segment("https://multi.test/a.bin", packed(first, 100))
         .segment("https://multi.test/b.bin", packed(next, 100));
-    let s = MultiTrackSession::new(
-        MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), Arc::new(src)),
+    let s = EngineSession::new(
+        EngineInputs::new(
+            EngineInput::new(id("main"), Arc::new(src)),
             EmbeddedAudio::Keep,
         ),
         sample::keys(Arc::new(sample::Provider)),
-        ContinuousOptions::default(),
+        EngineOptions::default(),
     )
     .unwrap();
     s.handle().accept_snapshot(&id("main"),&snapshot("main","#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:2.322,\na.bin\n#EXTINF:2.322,\nb.bin\n#EXT-X-ENDLIST")).unwrap();
@@ -153,8 +153,8 @@ async fn packed_missing_anchor_and_subtitle_styles_fail_closed() {
         "https://multi.test/a.bin",
         vec![0xff, 0xf1, 0x50, 0x80, 0x01, 0x3f, 0xfc, 1, 2],
     );
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), Arc::new(src)),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), Arc::new(src)),
         EmbeddedAudio::Keep,
     )
     .with_subtitle(SubtitleTrack::new(
@@ -162,10 +162,10 @@ async fn packed_missing_anchor_and_subtitle_styles_fail_closed() {
         id("main"),
         TrackMetadata::default(),
     ));
-    let s = MultiTrackSession::new(
+    let s = EngineSession::new(
         inputs,
         sample::keys(Arc::new(sample::Provider)),
-        ContinuousOptions::default(),
+        EngineOptions::default(),
     )
     .unwrap();
     let h = s.handle();
@@ -189,7 +189,7 @@ async fn packed_missing_anchor_and_subtitle_styles_fail_closed() {
             )
             .unwrap_err()
             .kind(),
-            ContinuousErrorKind::UnsupportedSubtitleProfile,
+            EngineErrorKind::UnsupportedSubtitleProfile,
             "{invalid}"
         );
     }
@@ -218,7 +218,7 @@ async fn packed_missing_anchor_and_subtitle_styles_fail_closed() {
     let mut bytes = vec![];
     assert_eq!(
         s.write_to(&mut bytes).await.unwrap_err().kind(),
-        ContinuousErrorKind::Resource
+        EngineErrorKind::Resource
     );
     assert!(bytes.is_empty());
 }
@@ -228,12 +228,12 @@ async fn late_cues_are_reported_and_partial_cue_tail_drains_after_audio_eof() {
     use std::sync::Mutex;
     let cases = sample::cases();
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
-    let holder = Arc::new(Mutex::new(None::<MultiTrackHandle>));
+    let holder = Arc::new(Mutex::new(None::<EngineHandle>));
     let callback = holder.clone();
     let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = fired.clone();
-    let opts = ContinuousOptions::default().with_on_event(Arc::new(move |event| {
-        if matches!(event, ContinuousEvent::Committed { .. })
+    let opts = EngineOptions::default().with_on_event(Arc::new(move |event| {
+        if matches!(event, EngineEvent::Committed { .. })
             && !flag.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             let h = callback.lock().unwrap();
@@ -253,8 +253,8 @@ async fn late_cues_are_reported_and_partial_cue_tail_drains_after_audio_eof() {
             assert_eq!(receipt.accepted(), 1);
         }
     }));
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), source(audio)),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), source(audio)),
         EmbeddedAudio::Keep,
     )
     .with_subtitle(SubtitleTrack::new(
@@ -262,7 +262,7 @@ async fn late_cues_are_reported_and_partial_cue_tail_drains_after_audio_eof() {
         id("main"),
         TrackMetadata::default(),
     ));
-    let s = MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), opts).unwrap();
+    let s = EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), opts).unwrap();
     let h = s.handle();
     *holder.lock().unwrap() = Some(h.clone());
     h.accept_snapshot(&id("main"), &snapshot("main", audio.playlist))
@@ -291,7 +291,7 @@ async fn late_cues_are_reported_and_partial_cue_tail_drains_after_audio_eof() {
     let cc = h.subtitle_track_id(&id("cc")).unwrap();
     assert_eq!(
         h.accept_cues(cc, &[]).unwrap_err().kind(),
-        ContinuousErrorKind::Closed
+        EngineErrorKind::Closed
     );
     write_fixture("late-tail-classic.mp4", &bytes);
 }
@@ -300,8 +300,8 @@ async fn late_cues_are_reported_and_partial_cue_tail_drains_after_audio_eof() {
 async fn subtitle_admission_is_atomic_and_unknown_epoch_fails_before_finalize() {
     let cases = sample::cases();
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), source(audio)),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), source(audio)),
         EmbeddedAudio::Keep,
     )
     .with_subtitle(SubtitleTrack::new(
@@ -309,10 +309,10 @@ async fn subtitle_admission_is_atomic_and_unknown_epoch_fails_before_finalize() 
         id("main"),
         TrackMetadata::default(),
     ));
-    let s = MultiTrackSession::new(
+    let s = EngineSession::new(
         inputs,
         sample::keys(Arc::new(sample::Provider)),
-        ContinuousOptions::default(),
+        EngineOptions::default(),
     )
     .unwrap();
     let h = s.handle();
@@ -327,7 +327,7 @@ async fn subtitle_admission_is_atomic_and_unknown_epoch_fails_before_finalize() 
         )
         .unwrap_err()
         .kind(),
-        ContinuousErrorKind::InvalidSubtitle
+        EngineErrorKind::InvalidSubtitle
     );
     h.accept_cues(
         cc,
@@ -341,7 +341,7 @@ async fn subtitle_admission_is_atomic_and_unknown_epoch_fails_before_finalize() 
             .await
             .unwrap_err()
             .kind(),
-        ContinuousErrorKind::MissingSubtitleMapping
+        EngineErrorKind::MissingSubtitleMapping
     );
 }
 
@@ -349,13 +349,13 @@ async fn subtitle_admission_is_atomic_and_unknown_epoch_fails_before_finalize() 
 async fn native_classic_preserves_all_tracks_and_metadata() {
     let cases = sample::cases();
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), source(audio)),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), source(audio)),
         EmbeddedAudio::Keep,
     )
     .with_primary_audio(TrackMetadata::new("en", "Primary").with_default(true))
     .with_audio(
-        ContinuousInput::new(id("second"), source(audio)),
+        EngineInput::new(id("second"), source(audio)),
         TrackMetadata::new("ja", "Second"),
     )
     .with_subtitle(SubtitleTrack::new(
@@ -363,8 +363,8 @@ async fn native_classic_preserves_all_tracks_and_metadata() {
         id("main"),
         TrackMetadata::new("zh", "字幕"),
     ));
-    let s = MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
-        .unwrap();
+    let s =
+        EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options()).unwrap();
     let h = s.handle();
     for name in ["main", "second"] {
         h.accept_snapshot(&id(name), &snapshot(name, audio.playlist))
@@ -400,55 +400,34 @@ async fn native_classic_preserves_all_tracks_and_metadata() {
 }
 
 #[test]
-fn capability_queries_keep_legacy_restrictions_and_reject_unverified_players() {
-    use hls_engine::legacy::capabilities::*;
-    let packed = KeyedInputCapability::new(
-        KeyedContainer::PackedAac,
-        KeyedEncryption::SampleAes,
-        vec![KeyedCodec::AacLc],
+fn capability_queries_reject_unverified_players() {
+    use hls_engine::capabilities::*;
+    let packed = InputCapability::new(
+        InputContainer::PackedAac,
+        InputEncryption::SampleAes,
+        vec![InputCodec::AacLc],
     );
-    assert!(
-        !query_keyed_capability(&KeyedCapabilityQuery::new(
-            packed.clone(),
-            KeyedOutput::FragmentedWriter
-        ))
-        .supported()
-    );
-    let query = MultiTrackCapabilityQuery::new(
+    let query = CapabilityQuery::new(
         id("main"),
         packed,
-        KeyedOutput::FragmentedWriter,
+        OutputTarget::FragmentedWriter,
         EmbeddedAudio::Keep,
     )
     .with_subtitles(true);
-    assert!(query_multitrack_capability(&query).supported());
+    assert!(query_capability(&query).supported());
     assert!(
-        !query_multitrack_capability(
-            &query
-                .clone()
-                .with_playback(MultiTrackPlayback::DirectBrowser)
-        )
-        .supported()
+        !query_capability(&query.clone().with_playback(PlaybackTarget::DirectBrowser)).supported()
     );
     for (target, reason) in [
         (
-            MultiTrackPlayback::DirectBrowser,
-            MultiTrackPlaybackRejection::BrowserTrackSelection,
+            PlaybackTarget::DirectBrowser,
+            PlaybackRejection::BrowserTrackSelection,
         ),
-        (
-            MultiTrackPlayback::Vlc,
-            MultiTrackPlaybackRejection::SubtitleSettings,
-        ),
-        (
-            MultiTrackPlayback::Iina,
-            MultiTrackPlaybackRejection::WvttDecoder,
-        ),
-        (
-            MultiTrackPlayback::Ffmpeg,
-            MultiTrackPlaybackRejection::WvttDecoder,
-        ),
+        (PlaybackTarget::Vlc, PlaybackRejection::SubtitleSettings),
+        (PlaybackTarget::Iina, PlaybackRejection::WvttDecoder),
+        (PlaybackTarget::Ffmpeg, PlaybackRejection::WvttDecoder),
     ] {
-        let decision = query_multitrack_capability(&query.clone().with_playback(target));
+        let decision = query_capability(&query.clone().with_playback(target));
         assert!(!decision.supported());
         assert!(decision.container_supported());
         assert!(decision.container_rejections().is_empty());
@@ -456,34 +435,29 @@ fn capability_queries_keep_legacy_restrictions_and_reject_unverified_players() {
         assert_eq!(decision.playback_rejection(), Some(reason));
     }
     assert!(
-        query_multitrack_capability(
-            &query
-                .clone()
-                .with_playback(MultiTrackPlayback::AvFoundation)
-        )
-        .supported()
+        query_capability(&query.clone().with_playback(PlaybackTarget::AvFoundation)).supported()
     );
-    let classic = MultiTrackCapabilityQuery::new(
+    let classic = CapabilityQuery::new(
         id("main"),
-        KeyedInputCapability::new(
-            KeyedContainer::PackedAac,
-            KeyedEncryption::Clear,
-            vec![KeyedCodec::AacLc],
+        InputCapability::new(
+            InputContainer::PackedAac,
+            InputEncryption::Clear,
+            vec![InputCodec::AacLc],
         ),
-        KeyedOutput::Mp4Bytes,
+        OutputTarget::Mp4Bytes,
         EmbeddedAudio::Keep,
     )
     .with_memory_capacity(1024 * 1024);
-    for target in [MultiTrackPlayback::Ffmpeg, MultiTrackPlayback::Iina] {
-        let decision = query_multitrack_capability(&classic.clone().with_playback(target));
+    for target in [PlaybackTarget::Ffmpeg, PlaybackTarget::Iina] {
+        let decision = query_capability(&classic.clone().with_playback(target));
         assert!(!decision.supported());
         assert_eq!(
             decision.playback_rejection(),
-            Some(MultiTrackPlaybackRejection::ClassicEditTimeline)
+            Some(PlaybackRejection::ClassicEditTimeline)
         );
     }
-    assert!(query_multitrack_capability(&classic.with_decode_gaps(true)).supported());
-    assert!(!query_multitrack_capability(&query.with_resume(true)).supported());
+    assert!(query_capability(&classic.with_decode_gaps(true)).supported());
+    assert!(!query_capability(&query.with_resume(true)).supported());
 }
 
 #[cfg(feature = "serde")]
@@ -507,15 +481,14 @@ async fn fixed_tracks_keep_independent_tails_sequences_and_offsets() {
     };
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
     for embedded in [EmbeddedAudio::Keep, EmbeddedAudio::Exclude] {
-        let mut inputs =
-            MultiTrackInputs::new(ContinuousInput::new(id("main"), source(av)), embedded);
+        let mut inputs = EngineInputs::new(EngineInput::new(id("main"), source(av)), embedded);
         for name in ["early", "late"] {
             inputs = inputs.with_audio(
-                ContinuousInput::new(id(name), source(audio)),
+                EngineInput::new(id(name), source(audio)),
                 TrackMetadata::new("en", name),
             );
         }
-        let s = MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
+        let s = EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
             .unwrap();
         let h = s.handle();
         h.accept_snapshot(&id("main"), &snapshot("main", av.playlist))
@@ -592,12 +565,12 @@ async fn slow_sink_blocks_every_input_and_cue_admission_cancel_beats_stop() {
     }
     let cases = sample::cases();
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), source(audio)),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), source(audio)),
         EmbeddedAudio::Keep,
     )
     .with_audio(
-        ContinuousInput::new(id("other"), source(audio)),
+        EngineInput::new(id("other"), source(audio)),
         TrackMetadata::default(),
     )
     .with_subtitle(SubtitleTrack::new(
@@ -605,8 +578,8 @@ async fn slow_sink_blocks_every_input_and_cue_admission_cancel_beats_stop() {
         id("main"),
         TrackMetadata::default(),
     ));
-    let s = MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
-        .unwrap();
+    let s =
+        EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options()).unwrap();
     let h = s.handle();
     let text = audio.playlist.replace("#EXT-X-ENDLIST", "");
     for name in ["main", "other"] {
@@ -621,7 +594,7 @@ async fn slow_sink_blocks_every_input_and_cue_admission_cancel_beats_stop() {
             h.accept_snapshot(&id(name), &snapshot(name, &text))
                 .unwrap_err()
                 .kind(),
-            ContinuousErrorKind::WouldBlock
+            EngineErrorKind::WouldBlock
         );
     }
     assert_eq!(
@@ -631,15 +604,12 @@ async fn slow_sink_blocks_every_input_and_cue_admission_cancel_beats_stop() {
         )
         .unwrap_err()
         .kind(),
-        ContinuousErrorKind::WouldBlock
+        EngineErrorKind::WouldBlock
     );
     h.stop();
     h.cancel();
-    assert_eq!(
-        run.await.unwrap_err().kind(),
-        ContinuousErrorKind::Cancelled
-    );
-    assert!(h.control().progress().iter().all(|p| p.committed() == 0));
+    assert_eq!(run.await.unwrap_err().kind(), EngineErrorKind::Cancelled);
+    assert!(h.progress().iter().all(|p| p.committed() == 0));
 }
 
 #[tokio::test]
@@ -669,12 +639,12 @@ async fn subtitle_split_keeps_identity_metadata_and_remaining_cue() {
             panic!("caller owns shutdown")
         }
     }
-    impl ContinuousWriterProvider for Parts {
+    impl EngineWriterProvider for Parts {
         type Writer = Writer;
         fn acquire<'a>(
             &'a mut self,
-            r: ContinuousOutputRequest,
-        ) -> Pin<Box<dyn Future<Output = ContinuousResult<Writer>> + 'a>> {
+            r: EngineOutputRequest,
+        ) -> Pin<Box<dyn Future<Output = EngineResult<Writer>> + 'a>> {
             Box::pin(async move {
                 assert_eq!(r.all_tracks().len(), 2);
                 let mut p = self.0.lock().unwrap();
@@ -701,9 +671,9 @@ async fn subtitle_split_keeps_identity_metadata_and_remaining_cue() {
             "https://multi.test/h.init",
             include_bytes!("fixtures/sample_crypto/fmp4_hevc_clear/init.mp4"),
         );
-    let s = MultiTrackSession::new(
-        MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), Arc::new(src)),
+    let s = EngineSession::new(
+        EngineInputs::new(
+            EngineInput::new(id("main"), Arc::new(src)),
             EmbeddedAudio::Exclude,
         )
         .with_subtitle(SubtitleTrack::new(
@@ -769,8 +739,8 @@ async fn subtitle_split_keeps_identity_metadata_and_remaining_cue() {
 #[tokio::test]
 async fn packed_range_and_subtitle_intervals_are_clipped_together() {
     let src = MemorySource::new().segment("https://multi.test/a.bin", packed(0, 200));
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), Arc::new(src)),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), Arc::new(src)),
         EmbeddedAudio::Keep,
     )
     .with_subtitle(SubtitleTrack::new(
@@ -778,10 +748,10 @@ async fn packed_range_and_subtitle_intervals_are_clipped_together() {
         id("main"),
         TrackMetadata::default(),
     ));
-    let s = MultiTrackSession::new(
+    let s = EngineSession::new(
         inputs,
         sample::keys(Arc::new(sample::Provider)),
-        ContinuousOptions::default()
+        EngineOptions::default()
             .with_range(PresentationRange::new(time(1000), time(3000)).unwrap()),
     )
     .unwrap();
@@ -833,13 +803,13 @@ async fn packed_configuration_changes_fail_between_and_within_segments() {
                 "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\na\n#EXTINF:1,\nb\n#EXT-X-ENDLIST",
             )
         };
-        let s = MultiTrackSession::new(
-            MultiTrackInputs::new(
-                ContinuousInput::new(id("main"), Arc::new(src)),
+        let s = EngineSession::new(
+            EngineInputs::new(
+                EngineInput::new(id("main"), Arc::new(src)),
                 EmbeddedAudio::Keep,
             ),
             sample::keys(Arc::new(sample::Provider)),
-            ContinuousOptions::default(),
+            EngineOptions::default(),
         )
         .unwrap();
         s.handle()
@@ -855,8 +825,8 @@ async fn packed_configuration_changes_fail_between_and_within_segments() {
 
 #[test]
 fn cue_budget_is_shared_across_subtitle_tracks() {
-    let inputs = MultiTrackInputs::new(
-        ContinuousInput::new(id("main"), Arc::new(MemorySource::new())),
+    let inputs = EngineInputs::new(
+        EngineInput::new(id("main"), Arc::new(MemorySource::new())),
         EmbeddedAudio::Keep,
     )
     .with_subtitle(SubtitleTrack::new(
@@ -869,11 +839,11 @@ fn cue_budget_is_shared_across_subtitle_tracks() {
         id("main"),
         TrackMetadata::default(),
     ));
-    let limits = ContinuousLimits::default().with_samples(1, 4096);
-    let s = MultiTrackSession::new(
+    let limits = EngineLimits::default().with_samples(1, 4096);
+    let s = EngineSession::new(
         inputs,
         sample::keys(Arc::new(sample::Provider)),
-        ContinuousOptions::default().with_limits(limits),
+        EngineOptions::default().with_limits(limits),
     )
     .unwrap();
     let h = s.handle();
@@ -887,15 +857,15 @@ fn cue_budget_is_shared_across_subtitle_tracks() {
         h.accept_cues(h.subtitle_track_id(&id("two")).unwrap(), &[cue])
             .unwrap_err()
             .kind(),
-        ContinuousErrorKind::WouldBlock
+        EngineErrorKind::WouldBlock
     );
 }
 
 #[tokio::test]
 async fn pending_cue_admission_wakes_on_independent_end_and_cancel() {
     for cancel in [false, true] {
-        let inputs = MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), Arc::new(MemorySource::new())),
+        let inputs = EngineInputs::new(
+            EngineInput::new(id("main"), Arc::new(MemorySource::new())),
             EmbeddedAudio::Keep,
         )
         .with_subtitle(SubtitleTrack::new(
@@ -903,11 +873,10 @@ async fn pending_cue_admission_wakes_on_independent_end_and_cancel() {
             id("main"),
             TrackMetadata::default(),
         ));
-        let s = MultiTrackSession::new(
+        let s = EngineSession::new(
             inputs,
             sample::keys(Arc::new(sample::Provider)),
-            ContinuousOptions::default()
-                .with_limits(ContinuousLimits::default().with_samples(1, 4096)),
+            EngineOptions::default().with_limits(EngineLimits::default().with_samples(1, 4096)),
         )
         .unwrap();
         let h = s.handle();
@@ -924,9 +893,9 @@ async fn pending_cue_admission_wakes_on_independent_end_and_cancel() {
         assert_eq!(
             waiting.await.unwrap_err().kind(),
             if cancel {
-                ContinuousErrorKind::Cancelled
+                EngineErrorKind::Cancelled
             } else {
-                ContinuousErrorKind::Closed
+                EngineErrorKind::Closed
             }
         );
     }
@@ -934,20 +903,19 @@ async fn pending_cue_admission_wakes_on_independent_end_and_cancel() {
 
 #[test]
 fn classic_known_decode_gaps_use_native_edits() {
-    use hls_engine::legacy::capabilities::*;
-    let input = KeyedInputCapability::new(
-        KeyedContainer::FragmentedMp4,
-        KeyedEncryption::Clear,
-        vec![KeyedCodec::AacLc],
+    use hls_engine::capabilities::*;
+    let input = InputCapability::new(
+        InputContainer::FragmentedMp4,
+        InputEncryption::Clear,
+        vec![InputCodec::AacLc],
     );
     for (output, supported) in [
-        (KeyedOutput::NativeStreamingFile, true),
-        (KeyedOutput::FragmentedWriter, true),
+        (OutputTarget::NativeStreamingFile, true),
+        (OutputTarget::FragmentedWriter, true),
     ] {
-        let q =
-            MultiTrackCapabilityQuery::new(id("main"), input.clone(), output, EmbeddedAudio::Keep)
-                .with_decode_gaps(true);
-        assert_eq!(query_multitrack_capability(&q).supported(), supported);
+        let q = CapabilityQuery::new(id("main"), input.clone(), output, EmbeddedAudio::Keep)
+            .with_decode_gaps(true);
+        assert_eq!(query_capability(&q).supported(), supported);
     }
 }
 
@@ -965,17 +933,14 @@ async fn retained_maps_share_one_operation_budget() {
                 include_bytes!("fixtures/sample_crypto/fmp4_aac_clear/seg1.m4s"),
             ),
     );
-    let s = MultiTrackSession::new(
-        MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), src.clone()),
+    let s = EngineSession::new(
+        EngineInputs::new(
+            EngineInput::new(id("main"), src.clone()),
             EmbeddedAudio::Keep,
         )
-        .with_audio(
-            ContinuousInput::new(id("other"), src),
-            TrackMetadata::default(),
-        ),
+        .with_audio(EngineInput::new(id("other"), src), TrackMetadata::default()),
         sample::keys(Arc::new(sample::Provider)),
-        options().with_limits(ContinuousLimits::default().with_samples(10000, 180_000)),
+        options().with_limits(EngineLimits::default().with_samples(10000, 180_000)),
     )
     .unwrap();
     for name in ["main", "other"] {
@@ -984,7 +949,7 @@ async fn retained_maps_share_one_operation_budget() {
     let mut bytes = vec![];
     assert_eq!(
         s.write_to(&mut bytes).await.unwrap_err().kind(),
-        ContinuousErrorKind::BudgetExceeded
+        EngineErrorKind::BudgetExceeded
     );
     assert!(bytes.is_empty());
 }
@@ -994,13 +959,13 @@ async fn native_classic_audio_gaps_match_memory_finalization() {
     let cases = sample::cases();
     let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
     let make = || {
-        let mut inputs = MultiTrackInputs::new(
-            ContinuousInput::new(id("main"), source(audio)),
+        let mut inputs = EngineInputs::new(
+            EngineInput::new(id("main"), source(audio)),
             EmbeddedAudio::Keep,
         );
         for name in ["en", "ja"] {
             inputs = inputs.with_audio(
-                ContinuousInput::new(id(name), source(audio)),
+                EngineInput::new(id(name), source(audio)),
                 TrackMetadata::new(name, name),
             );
         }
@@ -1011,10 +976,10 @@ async fn native_classic_audio_gaps_match_memory_finalization() {
         ));
         let mut opts = options();
         for name in ["main", "en", "ja"] {
-            opts = opts.with_anchor(ContinuousAnchor::new(id(name), 1, 1, time(0), time(8000)));
+            opts = opts.with_anchor(EngineAnchor::new(id(name), 1, 1, time(0), time(8000)));
         }
         let session =
-            MultiTrackSession::new(inputs, sample::keys(Arc::new(sample::Provider)), opts).unwrap();
+            EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), opts).unwrap();
         let h = session.handle();
         let body: String = audio
             .playlist

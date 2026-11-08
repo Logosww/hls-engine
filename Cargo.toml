@@ -1,6 +1,6 @@
 [package]
 name = "hls-engine"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2024"
 description = "HLS media engine for Rust: shared native/WASM decryption, timelines, multi-track sessions and MP4 output."
 license = "MIT"
@@ -15,7 +15,7 @@ categories = ["multimedia::video", "multimedia"]
 include = [
     "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/.gitattributes",
     "/src/**", "/docs/*.md",
-    "/examples/*_demo.rs", "/examples/*_wasm.rs", "/examples/wasm_session.rs",
+    "/examples/*_demo.rs", "/examples/*_wasm.rs",
     "/tests/fixtures/crypto/README.md", "/tests/fixtures/crypto/vector.cbc",
     "/tests/fixtures/gcm/vector.gcm", "/tests/fixtures/h264_aac_fhd.ts",
     "/tests/fixtures/media/fmp4_avc_nal2_multirun/init.fmp4",
@@ -40,15 +40,9 @@ include = [
 default = ["default-source"]
 # Built-in reqwest-backed `Source` implementation. Enabled by default. Disable
 # with `default-features = false` to drop the reqwest dependency entirely and
-# plug in your own `Source` implementation via `HlsInput::custom`.
+# plug in your own `Source` implementation via `EngineInput::new`.
 default-source = ["dep:reqwest"]
-# Use ffmpeg (via ffmpeg-next) for `StreamingMp4` finalization instead of the
-# crate's self-contained ISOBMFF demux + MP4 mux defrag path. Off by default.
-# Requires the FFmpeg 9 shared libraries (libavformat/libavcodec/libavutil) and
-# pkg-config at build time. Selected at runtime via
-# `TransmuxOptions::finalize_backend = FinalizeBackend::Ffmpeg`.
-ffmpeg-finalize = ["dep:ffmpeg-next"]
-# Enable lossless typed playlist archives and `TransmuxResumeState` serde.
+# Enable lossless typed playlist archives and `EngineCheckpoint` serde.
 # Callers can
 # persist the resume checkpoint directly via e.g. `serde_json`. Off by default;
 # callers may also serialize the versioned checkpoint fields without this feature.
@@ -64,7 +58,6 @@ futures-util = { version = "0.3.32", default-features = false, features = ["std"
 ctr = { version = "=0.9.2", features = ["zeroize"] }
 zeroize = "1.9"
 sha2 = "0.10"
-ffmpeg-next = { version = "9.0", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 # Base tokio for all targets: only features that work on wasm32.
@@ -80,18 +73,12 @@ tokio = { version = "1", default-features = false, features = ["fs", "io-util", 
 tokio = { version = "1", features = ["time"] }
 serde_json = "1"
 
-[[example]]
-name = "wasm_session"
-crate-type = ["cdylib"]
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen = "=0.2.100"
 wasm-bindgen-futures = "=0.4.50"
 js-sys = "=0.3.77"
 
-[[example]]
-name = "keyed_wasm"
-crate-type = ["cdylib"]
 
 [[example]]
 name = "continuous_verify"

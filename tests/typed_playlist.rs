@@ -1,4 +1,4 @@
-use hls_engine::legacy::{SourceLocation, TextResource, parse_playlist_snapshot, playlist::*};
+use hls_engine::{SourceLocation, TextResource, parse_playlist_snapshot, playlist::*};
 
 fn resource(content: &str) -> TextResource {
     TextResource {
@@ -478,30 +478,6 @@ fn serde_archive_is_lossless_and_rejects_numeric_or_forged_projections() {
     assert!(serde_json::from_value::<PlaylistSnapshot>(changed).is_err());
 }
 
-#[tokio::test]
-async fn prepared_api_keeps_rejecting_key_including_none_before_media_reads() {
-    use hls_engine::legacy::{HlsInput, HlsInputs, MemorySource, PrepareOptions, prepare_hls};
-    use std::sync::Arc;
-    for key in ["METHOD=NONE", "METHOD=AES-128,URI=\"k\""] {
-        let text = vod(&format!("#EXT-X-KEY:{key}\n#EXTINF:1,\na"));
-        assert!(parse(&text).validate_finite_vod().is_ok());
-        let source = MemorySource::new().text("https://old.test/list", text);
-        let input = HlsInput::custom(
-            Arc::new(source),
-            SourceLocation::Url(url::Url::parse("https://old.test/list").unwrap()),
-        );
-        let error = prepare_hls(HlsInputs::new(input), PrepareOptions::default())
-            .await
-            .err()
-            .unwrap();
-        assert!(matches!(
-            error.error(),
-            hls_engine::legacy::Error::Unsupported(_)
-        ));
-        assert_eq!(error.phase(), hls_engine::legacy::SessionPhase::Playlist);
-    }
-}
-
 #[test]
 fn absolute_native_file_paths_are_not_provider_schemes() {
     let media = std::env::temp_dir().join("hls-typed-media.ts");
@@ -516,27 +492,30 @@ fn absolute_native_file_paths_are_not_provider_schemes() {
     );
 }
 
+mod common;
 #[tokio::test]
-async fn prepared_vod_without_endlist_remains_supported() {
-    use hls_engine::legacy::{HlsInput, HlsInputs, MemorySource, PrepareOptions, prepare_hls};
-    use std::sync::Arc;
+async fn engine_host_can_end_vod_without_endlist() {
+    use hls_engine::*;
     let text = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\na.ts\n";
     assert_eq!(
         parse(text).validate_finite_vod(),
         Err(PlaylistRejection::OpenInput)
     );
-    let source = MemorySource::new()
-        .text("https://old.test/list", text)
-        .segment(
-            "https://old.test/a.ts",
-            include_bytes!("fixtures/media/ts_avc_regular/seg0.ts").to_vec(),
-        );
-    let input = HlsInput::custom(
-        Arc::new(source),
-        SourceLocation::Url(url::Url::parse("https://old.test/list").unwrap()),
+    let source = MemorySource::new().text("https://test/list", text).segment(
+        "https://test/a.ts",
+        include_bytes!("fixtures/media/ts_avc_regular/seg0.ts"),
     );
-    let session = prepare_hls(HlsInputs::new(input), PrepareOptions::default())
-        .await
-        .unwrap();
-    assert!(!session.into_mp4_bytes().await.unwrap().0.is_empty());
+    let s = common::selected_session(
+        std::sync::Arc::new(source),
+        SourceLocation::Url(url::Url::parse("https://test/list").unwrap()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !s.into_bytes(8 * 1024 * 1024, OutputFormat::Mp4)
+            .await
+            .unwrap()
+            .0
+            .is_empty()
+    );
 }

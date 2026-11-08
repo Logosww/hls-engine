@@ -1,7 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 //! Small clear-fixture bridge. The bounded resource map belongs to this example;
 //! production hosts use a demand-driven Source/Promise bridge (see SDK tests).
-use hls_engine::legacy::{crypto::key::*, playlist::*, *};
+use hls_engine::{crypto::key::*, playlist::*, *};
 use std::{
     cell::RefCell,
     future::Future,
@@ -27,8 +27,8 @@ fn js(error: impl std::fmt::Display) -> JsValue {
 }
 #[wasm_bindgen]
 pub struct MultiRecorder {
-    session: RefCell<Option<MultiTrackSession>>,
-    handle: MultiTrackHandle,
+    session: RefCell<Option<EngineSession>>,
+    handle: EngineHandle,
 }
 #[wasm_bindgen]
 impl MultiRecorder {
@@ -64,8 +64,8 @@ impl MultiRecorder {
         )
         .map_err(js)?;
         let source = Arc::new(source);
-        let mut inputs = MultiTrackInputs::new(
-            ContinuousInput::new(InputId::new("primary").unwrap(), source.clone()),
+        let mut inputs = EngineInputs::new(
+            EngineInput::new(InputId::new("primary").unwrap(), source.clone()),
             if retain_embedded_audio {
                 EmbeddedAudio::Keep
             } else {
@@ -75,7 +75,7 @@ impl MultiRecorder {
         let ids: Vec<String> = serde_json::from_str(&audio_ids).map_err(js)?;
         for id in ids {
             inputs = inputs.with_audio(
-                ContinuousInput::new(InputId::new(&id).map_err(js)?, source.clone()),
+                EngineInput::new(InputId::new(&id).map_err(js)?, source.clone()),
                 TrackMetadata::new("und", id),
             );
         }
@@ -84,10 +84,10 @@ impl MultiRecorder {
             InputId::new("primary").unwrap(),
             TrackMetadata::new("en", "Captions"),
         ));
-        let session = MultiTrackSession::new(
+        let session = EngineSession::new(
             inputs,
             keys,
-            ContinuousOptions::default()
+            EngineOptions::default()
                 .with_waiter(Arc::new(Wait), std::time::Duration::from_secs(30)),
         )
         .map_err(js)?;
@@ -119,7 +119,6 @@ impl MultiRecorder {
         )
         .map_err(js)?;
         self.handle
-            .control()
             .accept_when_ready(&id, &snapshot)
             .await
             .map_err(js)?;
@@ -212,7 +211,7 @@ impl tokio::io::AsyncWrite for Writer {
 }
 
 struct Wait;
-impl ContinuousWait for Wait {
+impl EngineWait for Wait {
     fn wait(&self, duration: std::time::Duration) -> Pin<Box<dyn Future<Output = ()> + '_>> {
         Box::pin(async move {
             let promise = js_sys::Promise::new(&mut |resolve, reject| {

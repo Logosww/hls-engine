@@ -298,6 +298,19 @@ def reference_tracks(playlist):
             for kind, rows in packets(playlist).items()}
 
 
+def normalize_target_duration(playlist):
+    # FFmpeg can emit 2 for a 2.5 s VFR segment. Engine checks HLS rounding.
+    import math
+    import re
+    text = playlist.read_text()
+    target = max(math.ceil(float(line.split(':')[1].rstrip(',')))
+                 for line in text.splitlines() if line.startswith('#EXTINF:'))
+    old = int(re.search(r'#EXT-X-TARGETDURATION:(\d+)', text).group(1))
+    if target > old:
+        playlist.write_text(re.sub(r'#EXT-X-TARGETDURATION:\d+',
+                                  f'#EXT-X-TARGETDURATION:{target}', text))
+
+
 def generate_corpus():
     CORPUS.mkdir(parents=True, exist_ok=True)
     manifest = {'schema_version': 1, 'ffmpeg': run('ffmpeg', '-version').splitlines()[0],
@@ -331,6 +344,7 @@ def generate_corpus():
                    *fragment_options, '-hls_segment_filename', str(folder / ('seg%d.ts' if mode == 'ts' else 'seg%d.m4s')),
                    str(playlist)]
         run(*command)
+        normalize_target_duration(playlist)
         if scenario in ('nal1_multirun', 'nal2_multirun'):
             rewrite_nal2_and_runs(playlist, 1 if scenario == 'nal1_multirun' else 2)
         # Portable commands and hashes preserve provenance, not encoder bit identity.
@@ -415,8 +429,8 @@ def main():
     manifest = json.loads((CORPUS / 'manifest.json').read_text())
     assert manifest['schema_version'] == 1
     assert [(c['mode'], c['codec'], c['scenario']) for c in manifest['cases']] == CASES
-    run('cargo', 'build', '--offline', '--example', 'transmux_demo')
-    demo = str(ROOT / 'target/debug/examples/transmux_demo')
+    run('cargo', 'build', '--offline', '--example', 'engine_export')
+    demo = str(ROOT / 'target/debug/examples/engine_export')
     passed = rejected = 0
     with tempfile.TemporaryDirectory(prefix='hls-engine-media-') as directory:
         folder = pathlib.Path(directory)

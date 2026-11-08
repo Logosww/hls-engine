@@ -1,5 +1,5 @@
 //! Test-only binding of the production parser and validated snapshot archive.
-use hls_engine::legacy::{
+use hls_engine::{
     SourceLocation, TextResource, parse_playlist_snapshot,
     playlist::{InputId, PlaylistContext, PlaylistSnapshot},
 };

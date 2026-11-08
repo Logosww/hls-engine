@@ -1,4 +1,4 @@
-use hls_engine::legacy::{
+use hls_engine::{
     MemorySource, SourceLocation, TextResource,
     crypto::{key::*, resource::*},
     parse_playlist_snapshot,
@@ -109,7 +109,7 @@ pub fn input(
     id: &str,
     encrypted: bool,
     ranges: bool,
-) -> (hls_engine::legacy::HlsInput, hls_engine::legacy::KeyedInput) {
+) -> (hls_engine::EngineInput, PlaylistSnapshot) {
     let case = prepared_cases()
         .into_iter()
         .find(|case| case.name == name)
@@ -157,8 +157,8 @@ pub fn input(
     .unwrap();
     let source = Arc::new(source);
     (
-        hls_engine::legacy::HlsInput::custom(source.clone(), location),
-        hls_engine::legacy::KeyedInput::new(snapshot, source),
+        hls_engine::EngineInput::new(snapshot.context().input_id().clone(), source),
+        snapshot,
     )
 }
 /// Same production corpus runs in native, Node/WASM and Chrome/WASM.

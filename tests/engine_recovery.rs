@@ -1154,19 +1154,18 @@ async fn split_ledger_corruption_preserves_active_partial() {
 fn native_recovery_capabilities_require_files_and_persistence() {
     use hls_engine::capabilities::*;
     for output in [
-        KeyedOutput::FragmentedFile,
-        KeyedOutput::Mp4File,
-        KeyedOutput::NativeStreamingFile,
-        KeyedOutput::FragmentedWriter,
-        KeyedOutput::Mp4Bytes,
-        KeyedOutput::FfmpegStreamingFile,
+        OutputTarget::FragmentedFile,
+        OutputTarget::Mp4File,
+        OutputTarget::NativeStreamingFile,
+        OutputTarget::FragmentedWriter,
+        OutputTarget::Mp4Bytes,
     ] {
         let query = CapabilityQuery::new(
             id("primary"),
-            KeyedInputCapability::new(
-                KeyedContainer::FragmentedMp4,
-                KeyedEncryption::Aes128,
-                vec![KeyedCodec::Avc],
+            InputCapability::new(
+                InputContainer::FragmentedMp4,
+                InputEncryption::Aes128,
+                vec![InputCodec::Avc],
             ),
             output,
             EmbeddedAudio::Exclude,
@@ -1176,7 +1175,9 @@ fn native_recovery_capabilities_require_files_and_persistence() {
         let decision = query_capability(&query);
         let native = matches!(
             output,
-            KeyedOutput::FragmentedFile | KeyedOutput::Mp4File | KeyedOutput::NativeStreamingFile
+            OutputTarget::FragmentedFile
+                | OutputTarget::Mp4File
+                | OutputTarget::NativeStreamingFile
         );
         assert_eq!(decision.container_supported(), native, "{output:?}");
         if native {
@@ -1616,4 +1617,64 @@ async fn fresh_acquisition_never_truncates_a_competing_partial() {
             }
         }
     }
+}
+
+#[test]
+fn frozen_v1_engine_schema3_roundtrips() {
+    let bytes = include_bytes!("fixtures/checkpoint/engine-schema3.bin");
+    let checkpoint = EngineCheckpoint::from_bytes(bytes).unwrap();
+    assert_eq!(checkpoint.schema_version(), 3);
+    assert!(checkpoint.has_subtitle_files());
+    assert_eq!(checkpoint.to_bytes(), bytes);
+}
+
+#[path = "support/frozen_checkpoint.rs"]
+mod frozen_checkpoint;
+#[tokio::test]
+async fn frozen_v1_schema2_execution_state_restores() {
+    let temp = Temp::new();
+    let saved = Arc::new(Mutex::new(None));
+    let capture = saved.clone();
+    create(None, true, true)
+        .write_recoverable_to_file(
+            temp.output(),
+            RecoveryOptions::new(Arc::new(move |cp| {
+                *capture.lock().unwrap() = Some(cp);
+                Err(EngineError::output(Error::invalid("initial checkpoint")))
+            })),
+        )
+        .await
+        .unwrap_err();
+    let cp = frozen_checkpoint::at_destination(
+        include_bytes!("fixtures/checkpoint/engine-schema2-start.bin"),
+        saved.lock().unwrap().as_ref().unwrap(),
+    );
+    let resumed = create(Some(cp), true, true)
+        .write_recoverable_to_file(temp.output(), RecoveryOptions::new(Arc::new(|_| Ok(()))))
+        .await
+        .unwrap();
+    let reference = Temp::new();
+    let uninterrupted = create(None, true, true)
+        .write_recoverable_to_file(
+            reference.output(),
+            RecoveryOptions::new(Arc::new(|_| Ok(()))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sample::canonical(std::fs::read(temp.output()).unwrap()),
+        sample::canonical(std::fs::read(reference.output()).unwrap())
+    );
+    assert_eq!(
+        resumed
+            .tracks()
+            .iter()
+            .map(|t| t.sample_count())
+            .collect::<Vec<_>>(),
+        uninterrupted
+            .tracks()
+            .iter()
+            .map(|t| t.sample_count())
+            .collect::<Vec<_>>()
+    );
 }

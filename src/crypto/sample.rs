@@ -110,16 +110,6 @@ impl fmt::Display for SampleError {
 }
 impl std::error::Error for SampleError {}
 
-pub(crate) async fn demux(
-    session: &ResourceSession,
-    request: &ResourceRequest,
-    init: Option<&[u8]>,
-    bytes: &[u8],
-    check: &crate::raw_sample::SampleCheck<'_>,
-) -> Result<DemuxOutput, SampleError> {
-    demux_selected(session, request, init, bytes, check, false).await
-}
-
 pub(crate) async fn demux_selected(
     session: &ResourceSession,
     request: &ResourceRequest,

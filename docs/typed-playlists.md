@@ -2,15 +2,14 @@
 
 `parse_playlist_snapshot` parses a selected media playlist without fetching any
 resource. The immutable result preserves encryption and timeline metadata for
-inspection and future execution. Existing legacy/prepared entry points still use
-their original parser and still reject encryption, including `METHOD=NONE`.
+inspection and Engine execution. Native source prefetch uses the same parser.
 For execution, combine [key sessions](key-sessions.md) with the
-[keyed prepared entry](keyed-sessions.md). Parsing metadata alone does not fetch
+[Engine session](engine.md). Parsing metadata alone does not fetch
 keys or decrypt resources.
 
 ```rust
-use hls_engine::legacy::{parse_playlist_snapshot, SourceLocation, TextResource};
-use hls_engine::legacy::playlist::{InputId, PlaylistContext};
+use hls_engine::{parse_playlist_snapshot, SourceLocation, TextResource};
+use hls_engine::playlist::{InputId, PlaylistContext};
 
 let resource = TextResource {
     content: "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.5,\na.ts\n#EXT-X-ENDLIST\n".into(),
@@ -48,13 +47,13 @@ assert!(snapshot.validate_finite_vod().is_ok());
 - An implicit byte offset needs the immediately preceding media segment's range
   on the same resolved URI. MAP declarations do not advance that cursor. An
   implicit MAP range without such a predecessor fails; specify `length@offset`.
-  This stricter new parser does not change legacy MAP behavior.
+
 - Durations use checked u64 ticks and u32 timescales, with up to nine meaningful
   fractional decimal places. Excess trailing zeros are accepted. Negative,
   exponential, overflowing or higher-precision values fail without rounding.
   Sequences, range ends and epoch increments also use checked arithmetic.
 
-`validate_finite_vod` is a manifest preflight for the planned finite profile:
+`validate_finite_vod` is a manifest preflight for standalone finite resource reads:
 ENDLIST is required; EVENT, empty input, missing target duration, duration rounding
 above target, GAP, discontinuity, I-frame-only input, unvalidated tags/attributes,
 sample/unknown encryption, conflicting candidate methods and encrypted MAPs
@@ -92,7 +91,7 @@ fields even when their values would fit JavaScript's exact integer range.
 
 ```rust,ignore
 let archive = serde_json::to_string(&snapshot)?;
-let restored: hls_engine::legacy::playlist::PlaylistSnapshot = serde_json::from_str(&archive)?;
+let restored: hls_engine::playlist::PlaylistSnapshot = serde_json::from_str(&archive)?;
 assert_eq!(restored, snapshot);
 ```
 
@@ -122,10 +121,10 @@ impose a total memory limit; bound manifest size before parsing untrusted input.
 
 `cargo test --features serde --test typed_playlist` covers metadata, numeric and
 range boundaries, key/MAP transitions, preflight, identity and archive validation.
-CI covers prepared-session compatibility, retained checkpoint fixtures and
+CI covers Engine playlist compatibility, retained checkpoint fixtures and
 exhaustive role/phase matching.
 
 [Runtime regression](runtime-tests.md) compares native Rust with
 actual WASM in Node, performs a JavaScript JSON round trip, and rejects numeric
-coercion and modified projections. CI also runs its production provider, resource and prepared contracts in real
+coercion and modified projections. CI also runs its production provider, resource and Engine contracts in real
 Chrome. It adds no production dependencies.

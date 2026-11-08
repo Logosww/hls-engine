@@ -1,5 +1,5 @@
 //! Sample-path requested allocation and first-write measurements (not total RSS).
-use hls_engine::legacy::*;
+use hls_engine::*;
 use std::{
     pin::Pin,
     sync::Arc,
@@ -48,12 +48,10 @@ impl tokio::io::AsyncWrite for Sink {
         panic!("caller owns writer")
     }
 }
-pub async fn run(
-    provider: Arc<dyn hls_engine::legacy::crypto::key::KeyProvider>,
-) -> serde_json::Value {
+pub async fn run(provider: Arc<dyn hls_engine::crypto::key::KeyProvider>) -> serde_json::Value {
     let mut rows = Vec::new();
     for name in ["fmp4_avc_cenc", "fmp4_hevc_cbcs", "ts_avc_sample"] {
-        let inputs = KeyedInputs::new(crate::sample_corpus::input(name, "primary"));
+        let input = crate::sample_corpus::input(name, "primary");
         let (live, total) = crate::allocation::reset();
         let start = now();
         let mut sink = Sink {
@@ -62,16 +60,11 @@ pub async fn run(
             bytes: 0,
             pending: false,
         };
-        let session = prepare_hls_timeline(
-            inputs,
-            crate::sample_corpus::keys(provider.clone()),
-            TimelinePrepareOptions::default(),
-        )
-        .await
-        .unwrap();
+        let session =
+            crate::sample_corpus::session(input, provider.clone(), EngineOptions::default());
         let report = session.write_to(&mut sink).await.unwrap();
         let (end, peak, allocated) = crate::allocation::snapshot();
-        rows.push(serde_json::json!({"name":name,"raw_payload_peak_bytes":report.peak_raw_sample_bytes(),"replay_payload_peak_bytes":report.peak_replay_sample_bytes(),"peak_increment_bytes":peak.saturating_sub(live),"retained_increment_bytes":end.saturating_sub(live),"allocated_bytes":allocated.wrapping_sub(total),"first_write_ms":sink.first,"elapsed_ms":now()-start,"output_bytes":sink.bytes}));
+        rows.push(serde_json::json!({"name":name,"sample_bytes":report.media().peaks().sample_bytes(),"peak_increment_bytes":peak.saturating_sub(live),"retained_increment_bytes":end.saturating_sub(live),"allocated_bytes":allocated.wrapping_sub(total),"first_write_ms":sink.first,"elapsed_ms":now()-start,"output_bytes":sink.bytes}));
     }
     serde_json::json!({"measurements":rows})
 }

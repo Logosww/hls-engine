@@ -127,7 +127,7 @@
       ],
       "derivation": null,
       "sha256": {
-        "input.m3u8": "4f89a79a55d96a140735f865dbcd8c5fd9bda2db02a61b5dce1f2682e853a6c5",
+        "input.m3u8": "7eba4f62c9762ff45cb43c7042f3cefbcc7d923f32ecb9df9dbe7eaad1457ad5",
         "seg0.ts": "d9ee6b988a5022ae5738b2246fff503f5e95ab4b35b27e1f1f527d8da7d21dd9",
         "seg1.ts": "84ec9fffd2d05ebc429e1e3b85d03cd51ded2a0ce45b060ba93d813dd57abe50",
         "seg2.ts": "ac19fd00f8b2cd25be4e6550b6ea4e4668e6fa1971e2ace0c6e0a166323906c4"
@@ -149,7 +149,8 @@
           "first_pts": 127080,
           "last_dts": 668520
         }
-      }
+      },
+      "playlist_derivation": "TARGETDURATION raised to ceil(max EXTINF); media bytes unchanged"
     },
     {
       "name": "ts_hevc_regular",
@@ -197,7 +198,7 @@
       ],
       "derivation": null,
       "sha256": {
-        "input.m3u8": "3ade08d924ff9b1062b8cf5d3de0a8e0cf16569f84054bf0a05fd3b5f673ffe9",
+        "input.m3u8": "d2af0d55377b563c8c7428a099bfab02c9098c5122b284d6f2e963afcca88965",
         "seg0.ts": "db300f3b88da02e99af6a38072d490d164c610a0c50ef895f95680942585f18c",
         "seg1.ts": "0e6dc1a22956a11728cace6fde70df283da19b577dcf2032169ad697291cd4b8",
         "seg2.ts": "f877ded3ba3f31efab72cfe5f8375284b00826418670fb091aa6b250826bf946"
@@ -219,7 +220,8 @@
           "first_pts": 130080,
           "last_dts": 671520
         }
-      }
+      },
+      "playlist_derivation": "TARGETDURATION raised to ceil(max EXTINF); media bytes unchanged"
     },
     {
       "name": "fmp4_avc_regular",
@@ -428,7 +430,7 @@
       "derivation": null,
       "sha256": {
         "init.fmp4": "b7274de5c616267717c283a41a6cbf557c26b750d3669bcc09d902ed8d655f37",
-        "input.m3u8": "d9ce7f6d8a7cb92bcb1af4f1c624de2a967737fd1e14b2c4961a9c292e56b0f4",
+        "input.m3u8": "98743db7b7de1d9cb2d71fa9ec5aca8991920dfd025decf37960d270b4beb104",
         "seg0.m4s": "574d70d61c678dc41ad871afe2f43877aec722a4c2b95f3ccdaa47a1fbe5abc3",
         "seg1.m4s": "d9406de1cabe31f7f05f3c500206eae3ea723925f8efd6146551ea5e18271015",
         "seg2.m4s": "6989a94f26a6310a3ae3a406421c3431c2bcd1ac151d2b4ea83fa35ee74bcba4"
@@ -450,7 +452,8 @@
           "first_pts": 576,
           "last_dts": 289344
         }
-      }
+      },
+      "playlist_derivation": "TARGETDURATION raised to ceil(max EXTINF); media bytes unchanged"
     },
     {
       "name": "fmp4_avc_offset",
@@ -728,7 +731,7 @@
       "derivation": null,
       "sha256": {
         "init.fmp4": "99e7620a9327e1c53447c0bc79c2a6cfc620c892295746ce421d4e27b8d9b07b",
-        "input.m3u8": "6c62e57b07f9a5b9d698ca14208f35c5a669ba91dc0b8197efb89af609da768e",
+        "input.m3u8": "dc29162072d0ebcbbf0a210359f3582edddbc0e99f0c3ee5880380bdbb6bd1ba",
         "seg0.m4s": "06d6982929b26a990071b27e2ec5efe4f7204eb34de8991b5d2537a07da802d1",
         "seg1.m4s": "778dca2ca4d741b5b977e7777758936aad569314c78385e4bb42a04cc9229957",
         "seg2.m4s": "b5d18d6cff92a53792bca7dcf0cd9b7481aeecc45150150e394d0961a46cb8a2"
@@ -750,7 +753,8 @@
           "first_pts": 2176,
           "last_dts": 290944
         }
-      }
+      },
+      "playlist_derivation": "TARGETDURATION raised to ceil(max EXTINF); media bytes unchanged"
     },
     {
       "name": "ts_aac_audio_only",
@@ -786,7 +790,7 @@
       ],
       "derivation": null,
       "sha256": {
-        "input.m3u8": "78115cd0b8e46dad6597c93f96b8f919193e32254eb50cdbdca7141ef0131f75",
+        "input.m3u8": "a6cc33016150144bff7b50dbd8dcb46d2197f5a374306741020a545c2fa193e3",
         "seg0.ts": "256f5201d850ff3d5123b65215766093bf1c04dbdbad1a90fafdeb421099c772",
         "seg1.ts": "039fe4b44f50fb00a4fa12a5e6525012c0726e2d5598cfb8dc26aa451f3891e2",
         "seg2.ts": "1051bac5fd15d5dedd0ffc9de241d36a3a54baf19f4070737d1d21181ac0def0",
@@ -801,7 +805,8 @@
           "first_pts": 126000,
           "last_dts": 667440
         }
-      }
+      },
+      "playlist_derivation": "TARGETDURATION raised to ceil(max EXTINF); media bytes unchanged"
     },
     {
       "name": "ts_avc_video_only",
@@ -900,7 +905,7 @@
       "derivation": null,
       "sha256": {
         "init.fmp4": "777c61454114733fd49d10bbfeb42c5cd441a72c4dd20055d29cf2392a62bf72",
-        "input.m3u8": "0d33c7c034f6a1b4b9b0014c9737e09f8e3f75161b2082ad6725376b597a664a",
+        "input.m3u8": "333e1d8f571e5953b3dfbca3f960248462c658b04f95713f9f105013da15164c",
         "seg0.m4s": "7fc071fd8b715db720744ccbfb8dc9906dcf624dc6025ae45aeeef875d513e93",
         "seg1.m4s": "0ff91eec5c9f88bd4e47423850758e53d7024ab66689857dbe17d004266c1f39",
         "seg2.m4s": "2d079b57cc4819f2f5bf5726d76fe014b37f9f2cc4a7fcb30500d4c3808a9942",
@@ -915,7 +920,8 @@
           "first_pts": 0,
           "last_dts": 288768
         }
-      }
+      },
+      "playlist_derivation": "TARGETDURATION raised to ceil(max EXTINF); media bytes unchanged"
     },
     {
       "name": "fmp4_avc_video_only",

@@ -13,5 +13,5 @@ await recorder.accept(text,'https://example.test/input.m3u8','9007199254740993')
 let size=0,calls=0;
 const sink=new WritableStream({async write(bytes){calls++;size+=bytes.length;await new Promise(r=>setTimeout(r,0));recorder.stop();}}).getWriter();
 const report=JSON.parse(await recorder.run(bytes=>sink.write(bytes)));await sink.close();
-if(report.end_reason!=='Stop'||BigInt(report.bytes_written)!==BigInt(size)||calls<2)throw new Error('continuous example failed');
+if(report.media.end_reason!=='Stop'||BigInt(report.media.bytes_written)!==BigInt(size)||calls<2)throw new Error('continuous example failed');
 recorder.free();console.log(JSON.stringify({status:'PASS',bytes:size,writes:calls}));

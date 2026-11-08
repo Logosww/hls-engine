@@ -44,8 +44,8 @@ rejection reason before presenting a combination to users.
 Native recoverable fMP4/classic outputs require a filesystem supporting
 same-directory hard links. The caller persists checkpoints and directory entries,
 rebuilds source/key providers and replays the required bounded window. Generic
-borrowed writers, collected bytes, WASM filesystem recovery and FFmpeg multi-track
-recovery are not supported persistence targets.
+borrowed writers, collected bytes and WASM filesystem recovery are not supported
+persistence targets.
 
 DRM/CDM, license exchange, LL-HLS partial segments, transcoding and dynamic track
 replacement are outside the supported profile.

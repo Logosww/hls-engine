@@ -5,9 +5,7 @@
 Use `EngineSession::new(EngineInputs, KeySession, EngineOptions)`. `EngineInputs`
 selects the primary input, embedded-audio policy, additional audio and subtitle
 tracks. The handle accepts typed snapshots and cues, ends individual inputs, and
-controls pause, stop and cancellation. The implementation uses the existing
-multi-track scheduler rather than a second media pipeline. Public `Engine*`
-names currently re-export that implementation.
+controls pause, stop and cancellation. The Engine owns a single scheduler and shared media core; finite and open input use the same implementation.
 The executable [Engine example](../examples/engine_demo.rs) demonstrates finite
 snapshot admission, independent EOF and bounded byte output.
 
@@ -65,14 +63,13 @@ Fixed subtitle files opt into schema 3, which preserves the original envelope
 fields and adds a joint file ledger and receipt state; both versions are readable.
 See [joint subtitle recovery](subtitle-sidecars.md#joint-native-fixed-file-recovery)
 for adapter obligations and the explicit no-in-place-migration boundary.
-Schema-v1 tasks continue through `legacy`.
+Schema 1 is unsupported. Existing Engine schema 2/3 checkpoints remain readable in Strict mode.
 
 Public configuration structures keep private fields and builders, with read-only
 accessors for options, budgets and recovery settings. New report/error/event
-variants remain non-exhaustive where extension is supported. Root `Engine*`
-aliases include event callbacks, input progress, mappings, output reports, media
-reports and peaks so callers can name the complete stable API without importing
-legacy names. GCM remains an explicitly enabled experimental draft-22 profile;
+variants remain non-exhaustive where extension is supported. Public `Engine*`
+types include event callbacks, input progress, mappings, output reports, media
+reports and peaks so callers can name the complete stable API through the root API. GCM remains an explicitly enabled experimental draft-22 profile;
 its status does not weaken the stable clear/AES/sample-encryption contracts.
 
 Split policies use the supplied path for output 0, followed by
@@ -101,8 +98,8 @@ per-input collapse intervals return `TimelineAmbiguous` before output acquisitio
 
 Native file capability queries accept supported recovery combinations and list
 caller checkpoint persistence, identity replay and stable key versions as explicit
-requirements. Borrowed writers, collected bytes, WASM filesystem recovery and the
-FFmpeg multi-track file backend remain rejected by the recovery query.
+requirements. Borrowed writers, collected bytes and WASM filesystem recovery
+remain rejected by the recovery query.
 
 Normal rolling manifests may evict committed segments while retaining required
 lookahead. Restored progress includes newly admitted segments and retained revision,
@@ -121,7 +118,7 @@ authentication tag. KEY must not include IV. The provider returns
 Authentication precedes demux, clear-resource observation and output. Complete
 encrypted byte ranges require explicit attestation; arbitrary ciphertext slices
 and I-frame playlists remain rejected. GCM never becomes a stable-standard claim
-merely because the crate reaches 1.0.
+merely because the crate has a stable major version.
 
 `EngineError::cause()` preserves resource, sample and media causes. Context accessors
 expose input, generation, epoch, source track and sample when available; authentication
@@ -129,16 +126,9 @@ failure has its own kind. Capability decisions distinguish `container_supported(
 from `playback_supported()` and retain explicit player rejection reasons. Recovery
 queries distinguish the native file persistence contract from ordinary writer output.
 
-## Compatibility
+## Migration
 
-Change the Cargo dependency to `hls-engine`; move historical Rust imports from
-`hls_transmux::...` to `hls_engine::legacy::...`. Adopt the root `Engine*` interface
-for new sessions. Source and key-provider implementations remain reusable.
-The legacy `with_audio()` replacement behavior remains unchanged. New
-`EngineInputs::with_audio()` adds a selected audio input.
-
-Keep schema-v1 records on `legacy` file APIs. There is no implicit v1-to-v2
-checkpoint conversion, and a failed prepared partial is not a checkpoint. Historical digest domains remain unchanged.
+See [1.1 migration](migration-1.1.md) for removed entrypoints and checkpoint rules.
 
 ## Recording costs
 
@@ -153,3 +143,51 @@ Fresh output acquisition uses exclusive creation, including split children: a fi
 created by another writer after intent persistence is preserved and produces an
 output error. Reopening an existing partial is reserved for explicit recovery of
 the same output checkpoint.
+
+## Optional AAC overlap repair
+
+```rust
+use hls_engine::{AacTimestampPolicy, EngineOptions};
+use std::time::Duration;
+let options = EngineOptions::default().with_aac_timestamp_policy(
+    AacTimestampPolicy::RepairOverlaps { max_shift: Duration::from_millis(50) }
+);
+```
+
+Strict is the default. The caller must provide a nonzero, representable limit;
+50 ms above is an example, not a recommended universal threshold. Repair applies
+only to selected MPEG-TS AAC-LC tracks, after decryption and timestamp unwrapping.
+It keeps sample contents and order, extends overlapping clocks to the preceding
+sample end and preserves forward gaps. It never drops frames or synthesizes audio.
+Each corrected frame's shift from its original timestamp must fit the limit,
+including accumulated corrections. Excess returns `AacTimestampRepairLimitExceeded`;
+`aac_timestamp_error()` exposes the slot, original/expected times and limit.
+
+When Strict rejects a recognized MPEG-TS AAC-LC overlap, it returns
+`EngineErrorKind::AacTimestampOverlap`. `aac_overlap_error()` exposes an
+`AacTimestampOverlapError` containing the input/segment slot, unwrapped source
+time (`original`), required next-frame time (`expected`) and their difference
+(`overlap`). This includes equal/backward timestamps and increasing timestamps
+that still overlap the preceding frame. Existing rounding tolerance is unchanged.
+Other timeline problems remain `TimelineAmbiguous`; fMP4 and Packed AAC errors
+are not classified as repairable TS overlaps. The diagnostic describes the local
+failure, not a guarantee that a complete retry will fit a repair limit. A caller
+may explicitly create a new repair session; neither automatic fallback nor
+cross-policy checkpoint restore is implied.
+
+Exact sample clocks avoid accumulating 44.1 kHz rounding error. State continues
+across segments and resets at discontinuity, generation/configuration changes and
+missing segments. Video, fMP4 and Packed AAC retain their existing validation.
+Excluded audio does not participate. A valid output timeline does not establish
+that a damaged source's original audiovisual synchronization was recovered.
+
+`EngineReport::media().aac_repairs()` returns bounded per-input counters, maximum
+shift and first/last positions. At most one `AacTimestampRepaired` event is emitted
+per repaired segment. Reports describe processed samples, including lookahead;
+commit events separately identify durable output. Strict JSON omits `aac_repairs`.
+
+Repair sessions write schema 4 checkpoints, including sidecar sessions. Strategy,
+limit and algorithm version are bound to configuration identity. Restore requires
+identical options and preserves pending repaired samples without applying repair
+a second time. Strict retains the frozen schema 2/3 encoding and identity. A
+schema 2/3 checkpoint cannot be resumed with repair enabled.

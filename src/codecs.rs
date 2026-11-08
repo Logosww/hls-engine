@@ -82,6 +82,11 @@ pub(crate) mod aac {
             return Err(Error::bitstream("missing ADTS syncword"));
         }
 
+        if data[6] & 3 != 0 {
+            return Err(Error::unsupported(
+                "multiple ADTS raw data blocks are unsupported",
+            ));
+        }
         let protection_absent = data[1] & 0x01 != 0;
         let profile = (data[2] & 0xc0) >> 6;
         let audio_object_type = profile + 1;

@@ -2,7 +2,7 @@
 //! cargo run --example multitrack_demo -- video.m3u8 en.m3u8 ja.m3u8 output.mp4
 #[cfg(all(not(target_arch = "wasm32"), feature = "default-source"))]
 mod native {
-    use hls_engine::legacy::{crypto::key::*, playlist::*, *};
+    use hls_engine::{crypto::key::*, playlist::*, *};
     use std::sync::Arc;
     struct Keys;
     impl KeyProvider for Keys {
@@ -17,7 +17,7 @@ mod native {
         }
     }
     struct Wait;
-    impl ContinuousWait for Wait {
+    impl EngineWait for Wait {
         fn wait(
             &self,
             d: std::time::Duration,
@@ -41,16 +41,16 @@ mod native {
             Arc::new(Clock),
             KeySessionOptions::default(),
         )?;
-        let inputs = MultiTrackInputs::new(
-            ContinuousInput::new(id("primary"), source.clone()),
+        let inputs = EngineInputs::new(
+            EngineInput::new(id("primary"), source.clone()),
             EmbeddedAudio::Exclude,
         )
         .with_audio(
-            ContinuousInput::new(id("en"), source.clone()),
+            EngineInput::new(id("en"), source.clone()),
             TrackMetadata::new("en", "English").with_default(true),
         )
         .with_audio(
-            ContinuousInput::new(id("ja"), source.clone()),
+            EngineInput::new(id("ja"), source.clone()),
             TrackMetadata::new("ja", "Japanese"),
         )
         .with_subtitle(SubtitleTrack::new(
@@ -58,11 +58,11 @@ mod native {
             id("primary"),
             TrackMetadata::new("en", "Captions"),
         ));
-        let s = MultiTrackSession::new(
+        let s = EngineSession::new(
             inputs,
             keys,
-            ContinuousOptions::default()
-                .with_mode(ContinuousMode::Vod)
+            EngineOptions::default()
+                .with_mode(EngineMode::Vod)
                 .with_waiter(Arc::new(Wait), std::time::Duration::from_secs(30)),
         )?;
         let h = s.handle();

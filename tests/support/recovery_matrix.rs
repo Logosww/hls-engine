@@ -1,7 +1,7 @@
 //! Replay the shared media corpus through every persisted file checkpoint.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 use super::*;
-use hls_engine::legacy::{MultiTrackHandle as CoreHandle, MultiTrackSession as CoreSession};
+use hls_engine::{EngineHandle as CoreHandle, EngineSession as CoreSession};
 
 #[derive(Clone)]
 enum Command {
@@ -20,7 +20,7 @@ impl Handle {
         &self,
         id: &InputId,
         snapshot: &PlaylistSnapshot,
-    ) -> ContinuousResult<SnapshotAcceptance> {
+    ) -> EngineResult<SnapshotAcceptance> {
         let result = self.core.accept_snapshot(id, snapshot)?;
         self.commands
             .lock()
@@ -35,7 +35,7 @@ impl Handle {
         &self,
         track: OutputTrackId,
         cues: &[SubtitleCue],
-    ) -> ContinuousResult<SubtitleAcceptance> {
+    ) -> EngineResult<SubtitleAcceptance> {
         let result = self.core.accept_cues(track, cues)?;
         self.commands
             .lock()
@@ -43,7 +43,7 @@ impl Handle {
             .push(Command::Cues(track, cues.to_vec()));
         Ok(result)
     }
-    pub fn end_subtitles(&self, track: OutputTrackId) -> ContinuousResult<()> {
+    pub fn end_subtitles(&self, track: OutputTrackId) -> EngineResult<()> {
         self.core.end_subtitles(track)?;
         self.commands.lock().unwrap().push(Command::End(track));
         Ok(())
@@ -55,17 +55,17 @@ impl Handle {
 }
 pub struct Session {
     core: CoreSession,
-    inputs: MultiTrackInputs,
+    inputs: EngineInputs,
     provider: Arc<dyn KeyProvider>,
-    options: ContinuousOptions,
+    options: EngineOptions,
     commands: Arc<Mutex<Vec<Command>>>,
 }
 impl Session {
     pub fn new(
-        inputs: MultiTrackInputs,
+        inputs: EngineInputs,
         provider: Arc<dyn KeyProvider>,
-        options: ContinuousOptions,
-    ) -> ContinuousResult<Self> {
+        options: EngineOptions,
+    ) -> EngineResult<Self> {
         let core = CoreSession::new(
             inputs.clone(),
             sample::keys(provider.clone()),
@@ -89,7 +89,7 @@ impl Session {
         self,
         capacity: usize,
         format: OutputFormat,
-    ) -> ContinuousResult<(Vec<u8>, MultiTrackReport)> {
+    ) -> EngineResult<(Vec<u8>, EngineReport)> {
         let result = self.core.into_bytes(capacity, format).await?;
         #[cfg(not(target_arch = "wasm32"))]
         if std::env::var_os("HLS_ENGINE_RECOVERY_MATRIX").is_some() {
@@ -108,13 +108,13 @@ impl Session {
     pub async fn write_to<W: tokio::io::AsyncWrite + Unpin>(
         self,
         writer: &mut W,
-    ) -> ContinuousResult<MultiTrackReport> {
+    ) -> EngineResult<EngineReport> {
         self.core.write_to(writer).await
     }
-    pub async fn write_to_outputs<P: ContinuousWriterProvider>(
+    pub async fn write_to_outputs<P: EngineWriterProvider>(
         self,
         provider: &mut P,
-    ) -> ContinuousResult<MultiTrackReport> {
+    ) -> EngineResult<EngineReport> {
         let result = self.core.write_to_outputs(provider).await?;
         #[cfg(not(target_arch = "wasm32"))]
         if std::env::var_os("HLS_ENGINE_RECOVERY_MATRIX").is_some() {
@@ -134,9 +134,9 @@ impl Session {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn validate(
-    inputs: MultiTrackInputs,
+    inputs: EngineInputs,
     provider: Arc<dyn KeyProvider>,
-    options: ContinuousOptions,
+    options: EngineOptions,
     commands: Arc<Mutex<Vec<Command>>>,
     format: OutputFormat,
     expected: Option<&Vec<u8>>,
@@ -227,7 +227,7 @@ async fn validate(
                 RecoveryOptions::new(Arc::new(move |cp| {
                     *copy.lock().unwrap() = Some(cp);
                     if calls.fetch_add(1, Ordering::Relaxed) + 1 == stop {
-                        return Err(ContinuousError::output(
+                        return Err(EngineError::output(
                             std::io::Error::other("matrix interruption").into(),
                         ));
                     }

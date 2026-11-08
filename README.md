@@ -11,7 +11,7 @@ parsing belong to the application. The engine does not transcode media.
 
 ```toml
 [dependencies]
-hls-engine = "1.0"
+hls-engine = "1.1"
 ```
 
 Disable `default-source` with `default-features = false` to provide your own
@@ -21,7 +21,6 @@ Disable `default-source` with `default-features = false` to provide your own
 | -------------------------- | ----------------------------------------------------------------------------- |
 | `default-source` (default) | Native reqwest HTTP source                                                    |
 | `serde`                    | Lossless playlist, report and checkpoint serialization                        |
-| `ffmpeg-finalize`          | Optional FFmpeg 9 finalizer for compatible legacy file APIs                   |
 | `experimental-gcm`         | Fixed HLS draft-22 AES-256-GCM resource profile; runtime opt-in also required |
 
 ## Start a session
@@ -102,8 +101,7 @@ writers.
 
 The [documentation index](docs/README.md) covers Engine sessions, encryption,
 playlists, WASM bridges, memory limits and compatibility APIs.
-`hls_engine::legacy` retains existing entry points and schema-1 tasks. New sessions
-use the root `Engine*` API; checkpoint schemas are never silently converted.
+The root `Engine*` API is the only execution path. See the [1.1 migration guide](docs/migration-1.1.md). Strict sessions preserve Engine checkpoint schemas 2/3; AAC repair uses schema 4. Schema 1 is unsupported.
 
 ## Development
 

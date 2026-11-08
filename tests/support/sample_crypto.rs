@@ -1,5 +1,5 @@
 //! Independent Shaka media, shared by native and actual WASM tests.
-use hls_engine::legacy::{crypto::key::*, playlist::*, *};
+use hls_engine::{crypto::key::*, playlist::*, *};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 pub const KEY: [u8; 16] = [
@@ -132,7 +132,7 @@ pub fn canonical(mut bytes: Vec<u8>) -> Vec<u8> {
     walk(&mut bytes);
     bytes
 }
-pub fn input(name: &str, id: &str) -> KeyedInput {
+pub fn input(name: &str, id: &str) -> (EngineInput, PlaylistSnapshot) {
     let case = cases().into_iter().find(|c| c.name == name).unwrap();
     input_modified(&case, id, case.playlist.to_string(), None)
 }
@@ -141,7 +141,7 @@ pub fn input_modified(
     id: &str,
     playlist: String,
     override_file: Option<(&str, Vec<u8>)>,
-) -> KeyedInput {
+) -> (EngineInput, PlaylistSnapshot) {
     let base = format!("https://sample.test/{id}/{}/", case.name);
     let mut source = MemorySource::new();
     for (name, bytes) in case.files {
@@ -162,7 +162,27 @@ pub fn input_modified(
         PlaylistContext::new(InputId::new(id).unwrap(), 0),
     )
     .unwrap();
-    KeyedInput::new(snapshot, Arc::new(source))
+    (
+        EngineInput::new(snapshot.context().input_id().clone(), Arc::new(source)),
+        snapshot,
+    )
+}
+pub fn session(
+    input: (EngineInput, PlaylistSnapshot),
+    provider: Arc<dyn KeyProvider>,
+    options: EngineOptions,
+) -> EngineSession {
+    let (input, snapshot) = input;
+    let id = input.input_id().clone();
+    let session = EngineSession::new(
+        EngineInputs::new(input, EmbeddedAudio::Keep),
+        keys(provider),
+        options,
+    )
+    .unwrap();
+    session.handle().accept_snapshot(&id, &snapshot).unwrap();
+    session.handle().end_input(&id).unwrap();
+    session
 }
 pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
     let mut reports = Vec::new();
@@ -182,52 +202,31 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
         for timeline in [false, true] {
             let mut outputs = Vec::new();
             for case in [&clear, name] {
-                let inputs = KeyedInputs::new(input(case, "primary"));
-                let output = if timeline {
-                    let options = TimelinePrepareOptions::default().with_range(
+                let mut options = EngineOptions::default();
+                if timeline {
+                    options = options.with_range(
                         PresentationRange::new(
                             MediaTime::new(250, 1000).unwrap(),
                             MediaTime::new(3100, 1000).unwrap(),
                         )
                         .unwrap(),
                     );
-                    prepare_hls_timeline(inputs, keys(provider.clone()), options)
-                        .await
-                        .unwrap()
-                        .into_mp4_bytes()
-                        .await
-                        .map(|v| v.0)
-                        .unwrap_or_else(|e| panic!("{case}: {e:?}"))
-                } else {
-                    prepare_hls_with_keys(
-                        inputs,
-                        keys(provider.clone()),
-                        KeyedPrepareOptions::default(),
-                    )
+                }
+                let (bytes, _) = session(input(case, "primary"), provider.clone(), options)
+                    .into_bytes(64 * 1024 * 1024, OutputFormat::Mp4)
                     .await
-                    .unwrap_or_else(|e| panic!("prepare {case}: {e:?} {:?}", e.sample_error()))
-                    .into_mp4_bytes()
-                    .await
-                    .map(|v| v.0)
-                    .unwrap_or_else(|e| panic!("{case}: {e:?} {:?}", e.sample_error()))
-                };
-                outputs.push(canonical(output));
+                    .unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                outputs.push(canonical(bytes));
             }
-            assert!(
-                outputs[0] == outputs[1],
-                "sample output differs for {name}, timeline={timeline}; lengths {} {}",
-                outputs[0].len(),
-                outputs[1].len()
-            );
+            assert_eq!(outputs[0], outputs[1], "{name} range={timeline}");
             #[cfg(not(target_arch = "wasm32"))]
-            if let Ok(directory) = std::env::var("HLS_SAMPLE_OUTPUT") {
-                std::fs::create_dir_all(&directory).unwrap();
-                std::fs::write(format!("{directory}/{name}-{timeline}.mp4"), &outputs[1]).unwrap();
+            if let Ok(dir) = std::env::var("HLS_SAMPLE_OUTPUT") {
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(format!("{dir}/{name}-{timeline}.mp4"), &outputs[1]).unwrap();
             }
             reports.push(serde_json::json!({"name":name,"timeline":timeline,"sha256":format!("{:x}",Sha256::digest(&outputs[1]))}));
         }
     }
-    // Exercise fragment-local multi-KID resolution through every runtime's real provider.
     let case = cases()
         .into_iter()
         .find(|c| c.name == "fmp4_avc_cenc")
@@ -238,24 +237,16 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
         .find(|(name, _)| *name == "seg1.m4s")
         .unwrap()
         .1;
-    let changed = with_fragment_kid(original, 0x42);
     let modified = input_modified(
         &case,
         "primary",
         case.playlist.into(),
-        Some(("seg1.m4s", changed)),
+        Some(("seg1.m4s", with_fragment_kid(original, 0x42))),
     );
-    let bytes = prepare_hls_with_keys(
-        KeyedInputs::new(modified),
-        keys(provider.clone()),
-        KeyedPrepareOptions::default(),
-    )
-    .await
-    .unwrap()
-    .into_mp4_bytes()
-    .await
-    .unwrap()
-    .0;
+    let (bytes, _) = session(modified, provider, EngineOptions::default())
+        .into_bytes(64 * 1024 * 1024, OutputFormat::Mp4)
+        .await
+        .unwrap();
     let hash = format!("{:x}", Sha256::digest(canonical(bytes)));
     assert_eq!(hash, reports[0]["sha256"].as_str().unwrap());
     reports

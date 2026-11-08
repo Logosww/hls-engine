@@ -629,6 +629,7 @@ struct Trun {
     samples: Vec<TrunSample>,
 }
 
+#[cfg(test)]
 pub(crate) fn demux_isobmff(init: &[u8], segment: &[u8]) -> Result<DemuxOutput> {
     demux_isobmff_checked(init, segment, &|| Ok(()))
 }
@@ -1583,8 +1584,6 @@ mod tests {
 
 #[path = "file_scan.rs"]
 mod file_scan;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use file_scan::FileIndex;
 pub(crate) use file_scan::scan as scan_file;
 
 pub(crate) fn file_tracks(init: &[u8]) -> Result<Vec<crate::mp4::FragmentedTrack>> {

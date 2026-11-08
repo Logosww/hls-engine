@@ -26,7 +26,6 @@ cargo run --locked --release --features serde --example engine_budget
 HLS_ENGINE_BUDGET_GCM=1 cargo run --locked --release --features serde,experimental-gcm --example engine_budget
 cargo run --locked --release --features serde --example multitrack_budget
 cargo run --locked --release --features serde --example continuous_budget
-cargo run --locked --release --example timeline_budget
 ```
 
 The Engine harness measures 64/512/4096 segments with one or three selected
@@ -39,8 +38,3 @@ WASM and Chrome. Rust allocator peaks, WASM linear memory and JavaScript heap
 measure different layers and must not be added or compared as equivalent values.
 Read the per-run JSON under `target/` for actual measurements on the current host.
 CI uploads these artifacts; elapsed time and allocator overhead are platform dependent.
-
-Legacy timeline planning retains bounded live sample records and per-resource
-summaries. It can replay a long GOP from its source without buffering all of its
-samples. Planning may read several resources before its first output write; this
-is distinct from bounded continuous recording.

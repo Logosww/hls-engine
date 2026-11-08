@@ -8,7 +8,6 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-ffmpeg-finalize = ["hls-engine/ffmpeg-finalize"]
 
 [dependencies]
 hls-engine = { path = "../..", default-features = false, features = ["serde", "experimental-gcm"] }

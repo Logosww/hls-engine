@@ -59,8 +59,7 @@ def main():
         frames=decode(output)
         assert frames==decode(reference),f'AES decode mismatch: {name}/{mode}'
         evidence.append({'name':output.stem,'decodedFrames':sum(map(len,frames.values())),'clearReferenceEqual':True,'sha256':hashlib.sha256(output.read_bytes()).hexdigest()})
-    native_args=['cargo','test','--offline','--test','continuous_session','native_continuous_finalize_backends']
-    if os.environ.get('HLS_CONTINUOUS_FFMPEG')=='1': native_args+=['--all-features']
+    native_args=['cargo','test','--offline','--test','continuous_session','native_continuous_finalizer']
     subprocess.run(native_args,cwd=ROOT,env={**os.environ,'HLS_CONTINUOUS_OUTPUT':str(OUT)},check=True)
     for output in sorted(OUT.glob('native-*.mp4')):
         name,backend=output.stem[7:].rsplit('-',1)

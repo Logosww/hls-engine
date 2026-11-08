@@ -28,6 +28,7 @@ struct PesHeader {
 pub(crate) fn demux_ts_checked(data: &[u8], check: &dyn Fn() -> Result<()>) -> Result<DemuxOutput> {
     demux_ts_stage(data, &mut RawStage::Clear, check, false)
 }
+#[cfg(test)]
 pub(crate) fn demux_ts(data: &[u8]) -> Result<DemuxOutput> {
     demux_ts_stage(data, &mut RawStage::Clear, &|| Ok(()), false)
 }
@@ -464,6 +465,9 @@ fn flush_pes(
             });
         }
         StreamKind::Aac => {
+            if header.pts_90k != header.dts_90k {
+                return Err(Error::unsupported("AAC PTS/DTS offsets are unsupported"));
+            }
             let mut offset = 0;
             let mut frame_index = 0_u64;
             while offset < payload.len() {

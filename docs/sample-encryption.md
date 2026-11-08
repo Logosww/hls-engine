@@ -1,12 +1,10 @@
 # Sample encryption
 
-Engine, keyed and timeline entry points select the
-sample path automatically. Legacy and public resource-only APIs keep their
-previous clear/AES-128 contracts.
+Engine sessions select the sample path automatically. Public resource-only APIs
+retain their clear/AES-128 contracts.
 
 The same protection profiles apply to selected Live/EVENT through
-[continuous sessions](continuous-sessions.md); finite entry points retain their
-finite-input semantics.
+[Engine sessions](engine.md), with explicit VOD or open-input mode.
 
 | Container | KEY method | Scheme | Codec | IV |
 | --- | --- | --- | --- | --- |
@@ -14,8 +12,8 @@ finite-input semantics.
 | fMP4 | SAMPLE-AES | cbcs | AVC, HEVC, AAC-LC | 16-byte sample or constant IV |
 | fMP4 | SAMPLE-AES-CTR | cenc | AVC, HEVC, AAC-LC | 8/16-byte sample IV |
 
-`PlaylistSnapshot::validate_finite_sample_vod` and `validate_timeline_sample_vod`
-provide sample-profile preflight. The original resource-only validators retain
+`PlaylistSnapshot::validate_engine(false)`
+provides sample-profile preflight. The original resource-only validators retain
 their clear/AES-128 meaning.
 
 Keys are 16 bytes. Use `AvailableKey::sample_aes` / `sample_aes_ctr`, binding
@@ -55,7 +53,7 @@ payload capacities per resource; they exclude metadata, temporary copies and
 allocator overhead. These host-memory observations are outside the stable timeline
 JSON wire representation.
 
-`SampleError` is available through keyed/timeline error accessors. It retains
+`SampleError` is available through `EngineError::sample_error()`. It retains
 resource identity, a sample/track when known, scheme, selected key reference and
 version, and explicit underlying error access. Default formatting is redacted.
 A parser failure before sample identification can have no sample/track context.

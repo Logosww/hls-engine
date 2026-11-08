@@ -52,10 +52,10 @@ fn shift_ts_by(mut bytes: Vec<u8>, video_ticks: u64, audio_ticks: u64) -> Vec<u8
     }
     bytes
 }
-pub fn segment_index(location: &hls_engine::legacy::SourceLocation) -> usize {
+pub fn segment_index(location: &hls_engine::SourceLocation) -> usize {
     let path = match location {
-        hls_engine::legacy::SourceLocation::File(p) => p.to_string_lossy().into_owned(),
-        hls_engine::legacy::SourceLocation::Url(u) => u.path().to_owned(),
+        hls_engine::SourceLocation::File(p) => p.to_string_lossy().into_owned(),
+        hls_engine::SourceLocation::Url(u) => u.path().to_owned(),
     };
     path.rsplit('/')
         .next()
@@ -121,4 +121,41 @@ fn walk_and_zero_timestamps(data: &mut [u8], start: usize, end: usize) {
         }
         offset = box_end;
     }
+}
+
+pub async fn selected_session(
+    source: std::sync::Arc<dyn hls_engine::Source>,
+    location: hls_engine::SourceLocation,
+) -> Result<hls_engine::EngineSession, Box<dyn std::error::Error>> {
+    use hls_engine::{crypto::key::*, playlist::*, *};
+    struct Clock;
+    impl KeyClock for Clock {
+        fn now(&self) -> u64 {
+            0
+        }
+    }
+    struct NoKeys;
+    impl KeyProvider for NoKeys {
+        fn resolve(&self, _: KeyRequest) -> KeyFuture<KeyResolution> {
+            Box::pin(async { KeyResolution::Unavailable })
+        }
+    }
+    let text = source.read_text(&location).await?;
+    let id = InputId::new("primary")?;
+    let snapshot = parse_playlist_snapshot(&text, PlaylistContext::new(id.clone(), 0))?;
+    let keys = KeySession::new(
+        "test",
+        "auth",
+        std::sync::Arc::new(NoKeys),
+        std::sync::Arc::new(Clock),
+        KeySessionOptions::default(),
+    )?;
+    let session = EngineSession::new(
+        EngineInputs::new(EngineInput::new(id.clone(), source), EmbeddedAudio::Keep),
+        keys,
+        EngineOptions::default(),
+    )?;
+    session.handle().accept_snapshot(&id, &snapshot)?;
+    session.handle().end_input(&id)?;
+    Ok(session)
 }

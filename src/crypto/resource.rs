@@ -170,7 +170,7 @@ impl ResourceRequest {
     }
     fn webvtt(snapshot: &PlaylistSnapshot, index: usize, map: bool) -> ResourceResult<Self> {
         snapshot
-            .validate_continuous()
+            .validate_engine(false)
             .map_err(|rejection| ResourceError {
                 rejection: Some(rejection),
                 ..ResourceError::new(ResourceErrorKind::UnsupportedPlaylist)
@@ -198,7 +198,7 @@ impl ResourceRequest {
             })?;
         Self::from_validated(snapshot, index, map)
     }
-    // The prepared entry validates each immutable snapshot once before any I/O.
+    // Engine validates each immutable snapshot once before any I/O.
     pub(crate) fn from_validated(
         snapshot: &PlaylistSnapshot,
         index: usize,
@@ -314,30 +314,7 @@ impl ResourceOptions {
     pub fn encrypted_ranges(&self) -> EncryptedRangePolicy {
         self.ranges
     }
-    pub(crate) fn preflight(
-        &self,
-        keys: &KeySession,
-        request: &ResourceRequest,
-    ) -> ResourceResult<()> {
-        (|| {
-            self.request_size(request)?;
-            if request.segment.map().is_none()
-                && request
-                    .resource
-                    .keys()
-                    .candidates()
-                    .first()
-                    .is_some_and(|k| {
-                        matches!(k.method(), crate::playlist::EncryptionMethod::SampleAesCtr)
-                    })
-            {
-                return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist));
-            }
-            keys.validate_resource(&request.resource)
-                .map_err(ResourceError::from_key)
-        })()
-        .map_err(|e| e.at(request))
-    }
+
     fn request_size(&self, request: &ResourceRequest) -> ResourceResult<u64> {
         if gcm_method(request) && !self.experimental_gcm() {
             return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist));
@@ -481,30 +458,12 @@ impl Drop for SourceLease {
         }
     }
 }
-#[derive(Clone, Copy)]
-pub(crate) enum ResourceStage {
-    Downloaded,
-    Decrypted,
-    Ready,
-    MapReused,
-}
-pub(crate) struct ResourceObservation<'a> {
-    pub resource: &'a KeyResource,
-    pub stage: ResourceStage,
-    pub bytes: u64,
-}
-#[cfg(not(target_arch = "wasm32"))]
-type ResourceObserver = Arc<dyn Fn(ResourceObservation<'_>) -> ResourceResult<()> + Send + Sync>;
-#[cfg(target_arch = "wasm32")]
-type ResourceObserver = Arc<dyn Fn(ResourceObservation<'_>) -> ResourceResult<()>>;
-/// Owns key lifecycle and resource admission for a single operation, shared by its inputs.
 pub struct ResourceSession {
     provenance: Arc<()>,
     keys: KeySession,
     options: ResourceOptions,
     state: Arc<Mutex<ResourceStats>>,
     cancel: RequestCancellation,
-    observer: Option<ResourceObserver>,
     recovery: Mutex<Option<RecoveryKeys>>,
 }
 impl ResourceSession {
@@ -522,30 +481,10 @@ impl ResourceSession {
                 peak_replay_sample_bytes: 0,
             })),
             cancel: RequestCancellation::new(),
-            observer: None,
             recovery: Mutex::new(None),
         })
     }
-    pub(crate) fn with_observer(mut self, observer: ResourceObserver) -> Self {
-        self.observer = Some(observer);
-        self
-    }
-    fn observe(
-        &self,
-        request: &ResourceRequest,
-        stage: ResourceStage,
-        bytes: u64,
-    ) -> ResourceResult<()> {
-        self.check()?;
-        if let Some(observer) = &self.observer {
-            observer(ResourceObservation {
-                resource: &request.resource,
-                stage,
-                bytes,
-            })?;
-        }
-        self.check()
-    }
+
     pub(crate) fn provenance(&self) -> &Arc<()> {
         &self.provenance
     }
@@ -613,7 +552,7 @@ impl ResourceSession {
                 && old.request.resource.slot().epoch() == request.resource.slot().epoch());
             let mut resolved = None;
             if same_context {
-                if request.resource.keys().is_clear() { return self.observe(&request, ResourceStage::MapReused, 0); }
+                if request.resource.keys().is_clear() { return self.check(); }
                 let waiter = self.keys.try_resolve(request.resource.clone()).map_err(ResourceError::from_key)?;
                 let key = tokio::select! {
                     biased;
@@ -628,7 +567,7 @@ impl ResourceSession {
                 if old.key_reference.as_ref() == Some(key.reference())
                     && old.key_version.as_ref() == Some(key.version())
                     && old.resolve_revision == Some(key.resolve_revision()) {
-                    return self.observe(&request, ResourceStage::MapReused, 0);
+                    return self.check();
                 }
                 resolved = Some(key);
             }
@@ -679,7 +618,7 @@ impl ResourceSession {
         if bytes.len() as u64 > reserved {
             return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));
         }
-        self.observe(request, ResourceStage::Downloaded, bytes.len() as u64)?;
+        self.check()?;
         if range.is_some_and(|r| bytes.len() as u64 != r.length) {
             return Err(ResourceError::new(ResourceErrorKind::InvalidRange));
         }
@@ -739,7 +678,7 @@ impl ResourceSession {
             } else {
                 decrypt(&mut bytes, key.secret().expose(), &iv).map_err(|e| e.with_key(key))?;
             }
-            self.observe(request, ResourceStage::Decrypted, bytes.len() as u64)?;
+            self.check()?;
         }
         self.check()?;
         let container = validate_container(&bytes, request).map_err(|e| {
@@ -751,7 +690,7 @@ impl ResourceSession {
             }
         })?;
         self.check()?;
-        self.observe(request, ResourceStage::Ready, bytes.len() as u64)?;
+        self.check()?;
         Ok(ClearResource {
             provenance: self.provenance.clone(),
             bytes,
@@ -926,12 +865,12 @@ impl ResourceSession {
             self.check()?;
             if bytes.len() as u64 > reserved {return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));}
             if range.is_some_and(|r|r.length!=bytes.len() as u64){return Err(ResourceError::new(ResourceErrorKind::InvalidRange));}
-            self.observe(&request,ResourceStage::Downloaded,bytes.len() as u64)?;
+            self.check()?;
             if request.resource.kind()==KeyResourceKind::Map || request.segment.map().is_some() {
                 crate::isobmff::validate_sample_envelope(&bytes,request.resource.kind()==KeyResourceKind::Map)
             }else {validate_container(&bytes,&request).map(|_|())}
                 .map_err(|e|ResourceError::from_cause(ResourceErrorKind::MediaValidation,e))?;
-            self.observe(&request,ResourceStage::Ready,bytes.len() as u64)?;
+            self.check()?;
             Ok(bytes)
         }.await.map_err(|e:ResourceError|e.at(&request))?;
         Ok(EncodedResource::Samples {
@@ -954,7 +893,7 @@ impl ResourceSession {
                         == request.resource.slot().generation()
                     && v.request().resource.slot().epoch() == request.resource.slot().epoch()
             }) {
-                return self.observe(&request, ResourceStage::MapReused, 0);
+                return self.check();
             }
             *cached = Some(self.read_encoded(source, request).await?);
             return Ok(());
@@ -966,17 +905,6 @@ impl ResourceSession {
         let result = self.read_map_cached(source, request, &mut clear).await;
         *cached = clear.map(|v| EncodedResource::Clear(Box::new(v)));
         result
-    }
-    pub(crate) fn sample_decrypted(
-        &self,
-        request: &ResourceRequest,
-        bytes: u64,
-    ) -> ResourceResult<()> {
-        if sample_method(request) {
-            self.observe(request, ResourceStage::Decrypted, bytes)
-        } else {
-            Ok(())
-        }
     }
 }
 

@@ -2,7 +2,7 @@
 //! cargo run --example continuous_demo -- input.m3u8 output.fmp4
 #[cfg(all(not(target_arch = "wasm32"), feature = "default-source"))]
 mod native {
-    use hls_engine::legacy::{crypto::key::*, playlist::*, *};
+    use hls_engine::{crypto::key::*, playlist::*, *};
     use std::sync::Arc;
     struct Keys;
     impl KeyProvider for Keys {
@@ -31,10 +31,13 @@ mod native {
             Arc::new(Clock),
             KeySessionOptions::default(),
         )?;
-        let session = ContinuousSession::new(
-            ContinuousInputs::new(ContinuousInput::new(id.clone(), source.clone())),
+        let session = EngineSession::new(
+            EngineInputs::new(
+                EngineInput::new(id.clone(), source.clone()),
+                EmbeddedAudio::Keep,
+            ),
             keys,
-            ContinuousOptions::default(),
+            EngineOptions::default(),
         )?;
         let handle = session.handle();
         let producer = async {
@@ -67,8 +70,8 @@ mod native {
         let (_, report) = tokio::try_join!(producer, consumer)?;
         println!(
             "{:?}: {} bytes",
-            report.end_reason(),
-            report.bytes_written()
+            report.media().end_reason(),
+            report.media().bytes_written()
         );
         Ok(())
     }

@@ -101,6 +101,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Fetch locked Rust dependencies for offline media checks
+        run: cargo fetch --locked
       - name: Install independent decoder
         run: brew install ffmpeg
       - name: Verify retained media corpus with FFprobe and FFmpeg

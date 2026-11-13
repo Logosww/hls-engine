@@ -13,6 +13,50 @@ snapshot admission, independent EOF and bounded byte output.
 available. Borrowed writers are flushed but never closed by the engine. Finite
 snapshots/ENDLIST and explicit per-input EOF use the same core as open input.
 
+## Concurrent downloads
+
+Use `EngineOptions::with_download_concurrency(n)` to configure concurrent media
+reads for built-in and custom sources, on native and WASM. The default is four.
+`n` bounds the combined number of in-flight and ready, unconsumed downloads
+across the operation. Set the separate download window byte budget through
+`EngineLimits::with_download_buffer_bytes` (default 64 MiB). This accommodates
+four downloads at the default 16 MiB per-resource reservation. Set concurrency
+to one for serial reads.
+
+```rust
+use hls_engine::{EngineLimits, EngineOptions};
+
+let options = EngineOptions::default()
+    .with_download_concurrency(4)
+    .with_limits(EngineLimits::default().with_download_buffer_bytes(64 * 1024 * 1024));
+```
+
+Each download reserves its declared byte-range length or the configured
+`ResourceOptions::max_resource_bytes` before starting. The window retains that
+reservation until consumption, including completed downloads and errors.
+Effective concurrency is reduced when the byte budget fills. With concurrency
+above one, the window must hold at least one maximum-size resource. Zero
+concurrency or a zero window is invalid. Resource decryption/admission and
+sample buffers retain their existing, separate budgets. `ResourceOptions` and
+`ReqwestSource::with_concurrency` alone do not configure Engine scheduling.
+
+The Engine peeks only at admitted descriptors and downloads raw resource bytes.
+It consumes them in timeline order, resolving keys, decrypting and committing
+progress at consumption. A later download failure is reported when that
+segment is consumed. MAP reads continue through the existing context-aware
+cache. Demanded reads take priority over another input's speculative window.
+
+The writer future owns all speculative futures and buffers. Output backpressure
+and pause stop refilling and polling the window. Cancellation, failure and
+writer-future drop release it without detached download workers. Sources must
+honor the demand-driven session and per-resource byte-cap contract.
+
+Prefetched descriptors remain in the admission queue. Checkpoints retain their
+existing queued identities and committed watermarks, with no downloaded bytes
+or speculative key state. Recovery validates replay through the existing serial
+path before opening the download window. Concurrency and window size may change
+when resuming an existing checkpoint.
+
 ## Native file recovery
 
 `write_recoverable_to_file(path, RecoveryOptions)` writes a persistent

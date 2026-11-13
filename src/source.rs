@@ -155,6 +155,11 @@ pub trait Source: Send + Sync + std::fmt::Debug {
 ///
 /// # Concurrent segment downloads
 ///
+/// Engine sessions configure scheduling through
+/// [`crate::EngineOptions::with_download_concurrency`] and
+/// [`crate::EngineLimits::with_download_buffer_bytes`]. Their demand-driven
+/// source sessions disable the standalone prefetch described below.
+///
 /// By default `ReqwestSource` downloads segments sequentially. To enable
 /// bounded concurrent prefetch, use [`ReqwestSource::with_concurrency`] (or
 /// [`ReqwestSource::with_client_and_concurrency`]) with `concurrency > 1`.

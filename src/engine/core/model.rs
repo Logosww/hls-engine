@@ -196,6 +196,7 @@ pub type EngineEventCallback = dyn Fn(EngineEvent);
 /// finalization indexes are separate costs, not a process RSS guarantee.
 #[derive(Debug, Clone)]
 pub struct EngineLimits {
+    pub(super) download_bytes: u64,
     pub(super) descriptors: usize,
     pub(super) metadata: usize,
     pub(super) history: usize,
@@ -207,6 +208,7 @@ pub struct EngineLimits {
 impl Default for EngineLimits {
     fn default() -> Self {
         Self {
+            download_bytes: 64 * 1024 * 1024,
             descriptors: 128,
             metadata: 4 * 1024 * 1024,
             history: 128,
@@ -221,6 +223,15 @@ impl Default for EngineLimits {
     }
 }
 impl EngineLimits {
+    /// Maximum reserved bytes for in-flight and ready, unconsumed media downloads.
+    pub fn download_buffer_bytes(&self) -> u64 {
+        self.download_bytes
+    }
+    pub fn with_download_buffer_bytes(mut self, bytes: u64) -> Self {
+        self.download_bytes = bytes;
+        self
+    }
+
     pub fn queued_descriptors(&self) -> usize {
         self.descriptors
     }
@@ -268,6 +279,7 @@ impl EngineLimits {
 }
 #[derive(Clone)]
 pub struct EngineOptions {
+    pub(super) download_concurrency: usize,
     pub(super) aac: AacTimestampPolicy,
     pub(super) mode: EngineMode,
     pub(super) limits: EngineLimits,
@@ -286,6 +298,7 @@ pub struct EngineOptions {
 impl Default for EngineOptions {
     fn default() -> Self {
         Self {
+            download_concurrency: 4,
             aac: AacTimestampPolicy::Strict,
             mode: EngineMode::Open,
             limits: EngineLimits::default(),
@@ -304,6 +317,16 @@ impl Default for EngineOptions {
     }
 }
 impl EngineOptions {
+    /// Maximum in-flight plus ready media downloads across this operation.
+    /// Defaults to four. The download byte budget can reduce effective concurrency.
+    pub fn with_download_concurrency(mut self, concurrency: usize) -> Self {
+        self.download_concurrency = concurrency;
+        self
+    }
+    pub fn download_concurrency(&self) -> usize {
+        self.download_concurrency
+    }
+
     pub fn with_aac_timestamp_policy(mut self, policy: AacTimestampPolicy) -> Self {
         self.aac = policy;
         self
@@ -406,7 +429,11 @@ impl EngineOptions {
     }
     pub(super) fn validate(&self, inputs: usize) -> EngineResult<()> {
         let b = &self.limits;
-        if b.descriptors == 0
+        if self.download_concurrency == 0
+            || b.download_bytes == 0
+            || (self.download_concurrency > 1
+                && b.download_bytes < self.resources.max_resource_bytes())
+            || b.descriptors == 0
             || b.metadata == 0
             || b.history == 0
             || b.samples == 0

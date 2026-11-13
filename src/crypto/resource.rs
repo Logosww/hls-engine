@@ -315,7 +315,7 @@ impl ResourceOptions {
         self.ranges
     }
 
-    fn request_size(&self, request: &ResourceRequest) -> ResourceResult<u64> {
+    pub(crate) fn request_size(&self, request: &ResourceRequest) -> ResourceResult<u64> {
         if gcm_method(request) && !self.experimental_gcm() {
             return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist));
         }
@@ -531,7 +531,7 @@ impl ResourceSession {
         if sample_method(&request) {
             return Err(ResourceError::new(ResourceErrorKind::UnsupportedPlaylist).at(&request));
         }
-        self.read_inner(source, &request, None)
+        self.read_inner(source, &request, None, None)
             .await
             .map_err(|e| e.at(&request))
     }
@@ -572,16 +572,56 @@ impl ResourceSession {
                 resolved = Some(key);
             }
             *cached = None;
-            *cached = Some(self.read_inner(source, &request, resolved).await?);
+            *cached = Some(self.read_inner(source, &request, resolved, None).await?);
             Ok(())
         }.await;
         result.map_err(|e: ResourceError| e.at(&request))
+    }
+    /// Transport only. The Engine reserves its download window before calling this.
+    /// Decryption and key/recovery bookkeeping happen when the bytes are consumed.
+    pub(crate) async fn download(
+        &self,
+        source: Arc<dyn Source>,
+        request: &ResourceRequest,
+    ) -> ResourceResult<Zeroizing<Vec<u8>>> {
+        let result = async {
+            self.check()?;
+            let reserved = self.options.request_size(request)?;
+            let range = request.resource.range().map(|r| r.byte_range());
+            let options = SourceSessionOptions {
+                demand_driven: true,
+                max_resource_bytes: Some(reserved),
+            };
+            let isolated = source.create_session_with_options(&options);
+            let lease = SourceLease {
+                isolated: isolated.is_some(),
+                source: isolated.unwrap_or(source),
+            };
+            let data = tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => return Err(ResourceError::new(ResourceErrorKind::Cancelled)),
+                data = lease.source.read_bytes(request.resource.location().location(), range.as_ref()) => data,
+            }.map_err(|e| ResourceError::from_cause(
+                if crate::source::is_resource_limit(&e) { ResourceErrorKind::ResourceTooLarge }
+                else { ResourceErrorKind::Read }, e))?;
+            let bytes = Zeroizing::new(data);
+            self.check()?;
+            if bytes.len() as u64 > reserved {
+                return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));
+            }
+            if range.is_some_and(|r| bytes.len() as u64 != r.length) {
+                return Err(ResourceError::new(ResourceErrorKind::InvalidRange));
+            }
+            Ok(bytes)
+        }.await;
+        result.map_err(|e: ResourceError| e.at(request))
     }
     async fn read_inner(
         &self,
         source: Arc<dyn Source>,
         request: &ResourceRequest,
         resolved: Option<Arc<ResolvedKey>>,
+        downloaded: Option<Zeroizing<Vec<u8>>>,
     ) -> ResourceResult<ClearResource> {
         self.check()?;
         let encrypted = !request.resource.keys().is_clear();
@@ -598,22 +638,10 @@ impl ResourceSession {
         } else {
             None
         };
-        let options = SourceSessionOptions {
-            demand_driven: true,
-            max_resource_bytes: Some(reserved),
+        let mut bytes = match downloaded {
+            Some(bytes) => bytes,
+            None => self.download(source, request).await?,
         };
-        let isolated = source.create_session_with_options(&options);
-        let lease = SourceLease {
-            isolated: isolated.is_some(),
-            source: isolated.unwrap_or(source),
-        };
-        self.check()?;
-        let data=tokio::select! {
-            biased;
-            _=self.cancel.cancelled()=>return Err(ResourceError::new(ResourceErrorKind::Cancelled)),
-            data=async { lease.source.read_bytes(request.resource.location().location(),range.as_ref()).await }=>data,
-        }.map_err(|e|ResourceError::from_cause(if crate::source::is_resource_limit(&e) { ResourceErrorKind::ResourceTooLarge } else { ResourceErrorKind::Read },e))?;
-        let mut bytes = Zeroizing::new(data);
         self.check()?;
         if bytes.len() as u64 > reserved {
             return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));
@@ -846,33 +874,52 @@ impl ResourceSession {
         source: Arc<dyn Source>,
         request: ResourceRequest,
     ) -> ResourceResult<EncodedResource> {
+        self.read_encoded_downloaded(source, request, None).await
+    }
+    pub(crate) async fn read_encoded_downloaded(
+        &self,
+        source: Arc<dyn Source>,
+        request: ResourceRequest,
+        downloaded: Option<Zeroizing<Vec<u8>>>,
+    ) -> ResourceResult<EncodedResource> {
         if !sample_method(&request) {
             return self
-                .read(source, request)
+                .read_inner(source, &request, None, downloaded)
                 .await
-                .map(|v| EncodedResource::Clear(Box::new(v)));
+                .map(|v| EncodedResource::Clear(Box::new(v)))
+                .map_err(|e| e.at(&request));
         }
-        let result=async {
+        let result = async {
             self.check()?;
-            let reserved=self.options.request_size(&request)?;let _permit=self.reserve(reserved)?;
-            let settings=SourceSessionOptions{demand_driven:true,max_resource_bytes:Some(reserved)};
-            let isolated=source.create_session_with_options(&settings);
-            let lease=SourceLease{isolated:isolated.is_some(),source:isolated.unwrap_or(source)};
-            let range=request.resource.range().map(|r|r.byte_range());
-            let bytes=tokio::select!{biased;_=self.cancel.cancelled()=>return Err(ResourceError::new(ResourceErrorKind::Cancelled)),v=lease.source.read_bytes(request.resource.location().location(),range.as_ref())=>v}
-                .map_err(|e|ResourceError::from_cause(if crate::source::is_resource_limit(&e){ResourceErrorKind::ResourceTooLarge}else{ResourceErrorKind::Read},e))?;
-            let bytes=Zeroizing::new(bytes);
+            let reserved = self.options.request_size(&request)?;
+            let _permit = self.reserve(reserved)?;
+            let range = request.resource.range().map(|r| r.byte_range());
+            let bytes = match downloaded {
+                Some(bytes) => bytes,
+                None => self.download(source, &request).await?,
+            };
             self.check()?;
-            if bytes.len() as u64 > reserved {return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));}
-            if range.is_some_and(|r|r.length!=bytes.len() as u64){return Err(ResourceError::new(ResourceErrorKind::InvalidRange));}
+            if bytes.len() as u64 > reserved {
+                return Err(ResourceError::new(ResourceErrorKind::ResourceTooLarge));
+            }
+            if range.is_some_and(|r| r.length != bytes.len() as u64) {
+                return Err(ResourceError::new(ResourceErrorKind::InvalidRange));
+            }
             self.check()?;
-            if request.resource.kind()==KeyResourceKind::Map || request.segment.map().is_some() {
-                crate::isobmff::validate_sample_envelope(&bytes,request.resource.kind()==KeyResourceKind::Map)
-            }else {validate_container(&bytes,&request).map(|_|())}
-                .map_err(|e|ResourceError::from_cause(ResourceErrorKind::MediaValidation,e))?;
+            if request.resource.kind() == KeyResourceKind::Map || request.segment.map().is_some() {
+                crate::isobmff::validate_sample_envelope(
+                    &bytes,
+                    request.resource.kind() == KeyResourceKind::Map,
+                )
+            } else {
+                validate_container(&bytes, &request).map(|_| ())
+            }
+            .map_err(|e| ResourceError::from_cause(ResourceErrorKind::MediaValidation, e))?;
             self.check()?;
             Ok(bytes)
-        }.await.map_err(|e:ResourceError|e.at(&request))?;
+        }
+        .await
+        .map_err(|e: ResourceError| e.at(&request))?;
         Ok(EncodedResource::Samples {
             bytes: result,
             request: Box::new(request),

@@ -66,6 +66,7 @@ struct TrackKey {
     kind: OutputTrackKind,
 }
 pub(super) struct Engine {
+    downloads: Downloads,
     lanes: Vec<Lane>,
     pub tracks: Vec<FragmentedTrack>,
     track_keys: Vec<TrackKey>,
@@ -136,6 +137,7 @@ impl SessionCore {
         input: usize,
         map: &mut Option<EncodedResource>,
         descriptor: &SegmentDescriptor,
+        downloads: Option<&mut Downloads>,
     ) -> EngineResult<DemuxOutput> {
         let result = self
             .wait(async {
@@ -153,9 +155,15 @@ impl SessionCore {
                 let request = ResourceRequest::from_descriptor(descriptor.clone(), false)
                     .map_err(resource_error)?
                     .with_packed(self.multi.is_some());
+                let downloaded = match downloads {
+                    Some(downloads) if self.options.download_concurrency > 1 => {
+                        Some(downloads.read(self, input, descriptor).await?)
+                    }
+                    _ => None,
+                };
                 let bytes = self
                     .resources
-                    .read_encoded(source, request.clone())
+                    .read_encoded_downloaded(source, request.clone(), downloaded)
                     .await
                     .map_err(resource_error)?;
                 self.shared.inner.lock().unwrap().lanes[input]
@@ -256,6 +264,7 @@ impl Engine {
     }
     pub async fn prepare(session: &SessionCore) -> EngineResult<Self> {
         let mut engine = Self {
+            downloads: Downloads::default(),
             lanes: (0..session.sources.len()).map(|_| Lane::new()).collect(),
             tracks: vec![],
             track_keys: vec![],
@@ -290,7 +299,12 @@ impl Engine {
                     return Err(at(EngineErrorKind::MissingRandomAccess, &descriptor));
                 }
                 let mut data = session
-                    .load(input, &mut engine.lanes[input].map, &descriptor)
+                    .load(
+                        input,
+                        &mut engine.lanes[input].map,
+                        &descriptor,
+                        Some(&mut engine.downloads),
+                    )
                     .await?;
                 merge_probe_config(&mut engine.lanes[input].config, &mut data)
                     .map_err(media_error)?;
@@ -880,7 +894,12 @@ impl Engine {
                 self.tail(session, input)?;
             }
             let data = session
-                .load(input, &mut self.lanes[input].map, &descriptor)
+                .load(
+                    input,
+                    &mut self.lanes[input].map,
+                    &descriptor,
+                    Some(&mut self.downloads),
+                )
                 .await?;
             self.push(session, input, descriptor, data)?;
         }
@@ -1238,7 +1257,14 @@ impl Engine {
             if descriptor.gap() {
                 return Err(at(EngineErrorKind::MissingSegment, &descriptor));
             }
-            let data = session.load(0, &mut self.lanes[0].map, &descriptor).await?;
+            let data = session
+                .load(
+                    0,
+                    &mut self.lanes[0].map,
+                    &descriptor,
+                    Some(&mut self.downloads),
+                )
+                .await?;
             self.push(session, 0, descriptor, data)?;
         }
         for input in 1..self.lanes.len() {
@@ -1560,6 +1586,7 @@ impl Engine {
         }
         let mut engine = (|| -> DecodeResult<Self> {
             Ok(Self {
+                downloads: Downloads::default(),
                 tracks: StateCodec::get(&mut r)?,
                 track_keys: StateCodec::get(&mut r)?,
                 offsets: StateCodec::get(&mut r)?,
@@ -1686,7 +1713,7 @@ impl Engine {
                     DemuxOutput::default()
                 } else {
                     session
-                        .load(input, &mut lane.map, &batch.descriptor)
+                        .load(input, &mut lane.map, &batch.descriptor, None)
                         .await?
                 };
                 if batch.descriptor.map().is_none() && !batch.new_epoch {

@@ -10,7 +10,9 @@ pub use aac::{
     AacTimestampRepairError,
 };
 mod control;
+mod download;
 mod engine;
+use download::Downloads;
 mod model;
 mod multitrack;
 mod sidecar;

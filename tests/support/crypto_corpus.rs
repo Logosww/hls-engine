@@ -215,7 +215,7 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
                 hash.update(output.bytes());
             }
             let mut revisions = Vec::new();
-            for i in 0..3 {
+            for (i, clear) in case.clear.iter().enumerate() {
                 let output = session
                     .read(
                         source.clone(),
@@ -223,7 +223,7 @@ pub async fn run(provider: Arc<dyn KeyProvider>) -> serde_json::Value {
                     )
                     .await
                     .unwrap();
-                assert_eq!(output.bytes(), case.clear[i]);
+                assert_eq!(output.bytes(), *clear);
                 if i == 0 {
                     assert_eq!(output.iv(), Some(sequence_iv(SEQUENCE)));
                 }

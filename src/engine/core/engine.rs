@@ -919,11 +919,11 @@ impl Engine {
             }
         }
         if let Some((inputs, start, _)) = &self.common_gap {
-            for input in 0..self.lanes.len() {
+            for (input, lane) in self.lanes.iter().enumerate() {
                 if inputs.contains(&input) {
                     continue;
                 }
-                if let Some(other) = self.lanes[input].pending.front() {
+                if let Some(other) = lane.pending.front() {
                     for packet in &other.data.packets {
                         let t = packet.timing.unwrap();
                         let end = add(

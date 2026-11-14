@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -23,6 +23,8 @@ struct Observed {
     started: Mutex<Vec<String>>,
     finished: Mutex<Vec<String>>,
     changed: tokio::sync::Notify,
+    finished_changed: tokio::sync::Notify,
+    first_after_successor: AtomicBool,
 }
 struct Active(Arc<Observed>);
 impl Drop for Active {
@@ -70,7 +72,8 @@ impl Source for Probe {
             if self.stall {
                 std::future::pending::<()>().await;
             }
-            // The first TS segment finishes after its successors.
+            // Delays keep reads in flight; explicit notification below enforces
+            // ordering when a test requires the first segment to finish later.
             tokio::time::sleep(Duration::from_millis(if name == "/seg0.ts" {
                 40
             } else {
@@ -80,8 +83,18 @@ impl Source for Probe {
             if self.fail.as_ref() == Some(&name) {
                 return Err(Error::invalid("injected read failure"));
             }
+            if name == "/seg0.ts" && self.observed.first_after_successor.load(Ordering::SeqCst) {
+                loop {
+                    let wake = self.observed.finished_changed.notified();
+                    if !self.observed.finished.lock().unwrap().is_empty() {
+                        break;
+                    }
+                    wake.await;
+                }
+            }
             let bytes = self.memory.read_bytes(location, range).await?;
             self.observed.finished.lock().unwrap().push(name);
+            self.observed.finished_changed.notify_one();
             Ok(bytes)
         })
     }
@@ -184,6 +197,9 @@ async fn downloads_overlap_but_output_and_commits_keep_order() {
     for (concurrency, buffers, peak) in [(2, 2, 2), (4, 4, 4), (8, 2, 2), (4, 1, 1)] {
         let (probe, snapshot) = fixture();
         let observed = probe.observed.clone();
+        observed
+            .first_after_successor
+            .store(peak > 1, Ordering::SeqCst);
         let commits = Arc::new(Mutex::new(Vec::new()));
         let log = commits.clone();
         let options = options(concurrency, buffers).with_on_event(Arc::new(move |event| {
@@ -191,7 +207,12 @@ async fn downloads_overlap_but_output_and_commits_keep_order() {
                 log.lock().unwrap().push(input.committed());
             }
         }));
-        let bytes = output(session(Arc::new(probe), &snapshot, options, None)).await;
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            output(session(Arc::new(probe), &snapshot, options, None)),
+        )
+        .await
+        .expect("parallel reads must release the first segment");
         assert_eq!(observed.peak.load(Ordering::SeqCst), peak);
         assert_eq!(observed.active.load(Ordering::SeqCst), 0);
         assert_eq!(observed.started.lock().unwrap().len(), 6);

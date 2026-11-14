@@ -57,6 +57,76 @@ or speculative key state. Recovery validates replay through the existing serial
 path before opening the download window. Concurrency and window size may change
 when resuming an existing checkpoint.
 
+## Native file finalization
+
+Native `write_to_file` and `write_to_files` accept an optional classic MP4
+finalization strategy:
+
+```rust
+use hls_engine::{FileFinalizationStrategy, FileOutputOptions, OutputFormat};
+
+let options = FileOutputOptions::default()
+    .with_format(OutputFormat::StreamingMp4)
+    .with_finalization_strategy(FileFinalizationStrategy::InPlace)
+    .with_header_reserve_bytes(1024 * 1024); // Optional; 1 MiB is the default.
+
+// Pass these options to session.write_to_file(path, options).await
+// or session.write_to_files(provider, options).await.
+```
+
+| Strategy | Finalization | Successful output |
+| --- | --- | --- |
+| `Copy` (default) | Copy samples into a second temporary file, then publish it | Compact faststart MP4 |
+| `InPlace`, reservation fits | Write the complete index into the reserved header area | Faststart MP4 in the same temporary file |
+| `InPlace`, reservation too small | Move the media region towards the end of the same file, then write the index at the front | Faststart MP4; no fallback to a tail index |
+
+`Copy` remains the default: it copies samples into a compact, faststart file.
+`InPlace` also always produces faststart: `ftyp + moov + [free] + mdat`.
+It reserves 1 MiB before the intermediate fMP4. At finalization it writes the
+complete index into this space. If space is insufficient, it shifts the media
+region towards the end of the same file, copying blocks from end to beginning
+with a 1 MiB buffer. It recalculates offsets and any `stco` to `co64` growth before
+modifying the file. It never falls back to a tail index or creates a second full
+media file. The old initialization and fragment headers remain as unreferenced
+bytes inside `mdat`, so the result is not byte-identical to the compact copy output.
+
+Use `with_header_reserve_bytes(n)` to tune the reservation: zero disables it and
+forces same-file relocation; nonzero values must be at least eight bytes. Values
+1–7 return `InvalidOptions` when the in-place strategy is active. Excess space
+remains a `free` box. If the final index leaves only 1–7 bytes, the file is expanded
+and relocated as needed to maintain valid box boundaries. The reservation is a
+performance hint, not an index size limit. Enough space avoids media copying; insufficient space requires one
+full read/write pass over the moved region. Index memory still scales with sample
+count. Filesystem allocation and copy-on-write behavior can affect disk usage.
+Both `Mp4` and `StreamingMp4` file output support this option. `Copy` and
+`FragmentedMp4` ignore the header reservation; `FragmentedMp4` also ignores the
+finalization strategy. Split files reserve and finalize independently. The
+strategy changes the engine-owned temporary file, not an existing input file or
+a previously published destination.
+
+The strategy and reservation methods are Native-only. WASM, borrowed writers and
+`into_bytes` keep their interfaces and output layouts. Recoverable output still
+uses `RecoveryOptions`, the copy strategy and existing checkpoint schemas.
+In-place finalization is not a crash-recovery protocol. Failures and cancellation
+before publication do not publish a destination; the private temporary file may
+have been partially modified. Publication retains the existing no-clobber rule.
+
+Choose `InPlace` when avoiding a second full media file matters. It is not a
+promise of faster finalization when the reservation is insufficient. In the
+[local benchmark](benchmarks.md#local-result-2026-11-14), 8 GiB inputs showed no
+stable speed advantage: median finalization was 13.72 seconds for Copy and
+14.01 seconds for InPlace with the default 1 MiB reservation. These are local
+synthetic I/O measurements, not production-player validation. Keep Copy as the
+default until representative production workloads justify a change.
+
+The repository exporter accepts the same opt-in strategy:
+
+```sh
+cargo run --locked --example engine_export -- input.m3u8 output.mp4 --in-place
+# Force the insufficient-reservation path while still producing faststart:
+cargo run --locked --example engine_export -- input.m3u8 output.mp4 --in-place --header-reserve-bytes 0
+```
+
 ## Native file recovery
 
 `write_recoverable_to_file(path, RecoveryOptions)` writes a persistent

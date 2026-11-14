@@ -1,6 +1,10 @@
+#[cfg(not(target_arch = "wasm32"))]
+mod in_place;
 use crate::codecs::avc;
 use crate::error::{Error, Result};
 use crate::types::{Codec, TrackInfo, TrackType};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use in_place::ReservedReader;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Mp4Sample {
@@ -187,12 +191,7 @@ impl Mp4Muxer {
         })
     }
 
-    fn write_to<W: std::io::Write>(
-        mut self,
-        output: &mut W,
-        check: &dyn Fn() -> Result<()>,
-        mut payload: impl FnMut(&Mp4Sample, &mut W) -> Result<()>,
-    ) -> Result<(u64, Vec<TrackInfo>)> {
+    fn prepare_classic(&mut self, check: &dyn Fn() -> Result<()>) -> Result<()> {
         check()?;
         if self.tracks.is_empty() {
             return Err(Error::muxing("MP4 output requires at least one track"));
@@ -234,6 +233,16 @@ impl Mp4Muxer {
                 .checked_add(start_offset(track.samples()))
                 .ok_or_else(|| Error::muxing("track duration overflow"))?;
         }
+        Ok(())
+    }
+
+    fn write_to<W: std::io::Write>(
+        mut self,
+        output: &mut W,
+        check: &dyn Fn() -> Result<()>,
+        mut payload: impl FnMut(&Mp4Sample, &mut W) -> Result<()>,
+    ) -> Result<(u64, Vec<TrackInfo>)> {
+        self.prepare_classic(check)?;
         let ftyp = ftyp_box(&self.tracks);
         let chunks: Vec<_> = self.tracks.iter().map(split_chunks).collect();
         let mut placed = Vec::new();

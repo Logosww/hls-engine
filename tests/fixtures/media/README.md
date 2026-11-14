@@ -37,7 +37,7 @@ first packet of the pure AAC playlist in the recorded environment.
 From the repository root:
 
 ```sh
-# No FFmpeg required: validate fixture hashes and all 42 API combinations.
+# No FFmpeg required: validate fixture hashes and all output combinations.
 cargo test --offline --test media_corpus
 cargo test --offline --no-default-features --test media_corpus
 
@@ -51,8 +51,10 @@ python3 scripts/verify_media.py --generate
 The external check asserts segment uniqueness, monotonic input DTS, track types,
 codec selection, B-frame/VFR/signed-offset/audio-delay properties; compares packet
 counts, DTS/PTS and duration within one output tick and normalized NAL/AAC content;
-checks faststart or fragmented top-level layouts; decodes and seeks every present
-track. The current suite expects 42 successful outputs.
+checks faststart or fragmented top-level layouts; exercises both reserved and
+relocating in-place finalization, including decoding through a forward-only pipe;
+decodes and seeks every present track. The current suite expects 70 successful
+outputs (including reserved and relocating Native in-place faststart).
 The FFmpeg CI job runs this retained corpus through the existing script entry.
 No target player is required or invoked.
 

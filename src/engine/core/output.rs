@@ -35,6 +35,9 @@ pub trait EngineFileProvider {
     ) -> Pin<Box<dyn Future<Output = EngineResult<std::path::PathBuf>> + 'a>>;
 }
 trait Target {
+    fn prefix_bytes(&self) -> u64 {
+        0
+    }
     fn recoverable(&self) -> bool {
         false
     }
@@ -291,8 +294,8 @@ impl SessionCore {
                 .write_header_with_offsets(&offsets)
                 .map_err(output_error)?;
             self.write(&mut writer, &header).await?;
-            engine.bytes += header.len() as u64;
-            engine.part_bytes += header.len() as u64;
+            engine.bytes += header.len() as u64 + target.prefix_bytes();
+            engine.part_bytes += header.len() as u64 + target.prefix_bytes();
             mux
         };
         let terminal = self.recovery.as_ref().is_some_and(|c| c.finalizing);
@@ -360,8 +363,8 @@ impl SessionCore {
                         .write_header_with_offsets(&offsets)
                         .map_err(output_error)?;
                     self.write(&mut writer, &header).await?;
-                    engine.bytes += header.len() as u64;
-                    engine.part_bytes += header.len() as u64;
+                    engine.bytes += header.len() as u64 + target.prefix_bytes();
+                    engine.part_bytes += header.len() as u64 + target.prefix_bytes();
                     continue;
                 }
                 let previous = engine.output_report();
@@ -390,8 +393,8 @@ impl SessionCore {
                     .write_header_with_offsets(&offsets)
                     .map_err(output_error)?;
                 self.write(&mut writer, &header).await?;
-                engine.bytes += header.len() as u64;
-                engine.part_bytes += header.len() as u64;
+                engine.bytes += header.len() as u64 + target.prefix_bytes();
+                engine.part_bytes += header.len() as u64 + target.prefix_bytes();
                 continue;
             }
             let mapping_count = engine.mappings.len();
@@ -572,12 +575,25 @@ mod native {
         shared: Arc<Shared>,
     }
     impl<P: EngineFileProvider> Target for Files<'_, P> {
+        fn prefix_bytes(&self) -> u64 {
+            if self.options.format != OutputFormat::FragmentedMp4
+                && self.options.finalization == FileFinalizationStrategy::InPlace
+            {
+                u64::from(self.options.header_reserve)
+            } else {
+                0
+            }
+        }
         type Writer = Lease;
         fn acquire<'a>(
             &'a mut self,
             request: EngineOutputRequest,
         ) -> Pin<Box<dyn Future<Output = EngineResult<Self::Writer>> + 'a>> {
             Box::pin(async move {
+                let reserve = self.prefix_bytes();
+                if reserve > 0 && reserve < 8 {
+                    return Err(fail(EngineErrorKind::InvalidOptions));
+                }
                 let target = self.provider.acquire(request).await?;
                 // Do not overwrite an earlier split or an existing consumer file.
                 if tokio::fs::try_exists(&target)
@@ -586,7 +602,17 @@ mod native {
                 {
                     return Err(fail(EngineErrorKind::Output));
                 }
-                let (temp, file) = temporary_file(&target).map_err(output_error)?;
+                let (temp, mut file) = temporary_file(&target).map_err(output_error)?;
+                if reserve > 0 {
+                    use std::io::{Seek, SeekFrom, Write};
+                    file.write_all(&(reserve as u32).to_be_bytes())
+                        .map_err(|e| output_error(e.into()))?;
+                    file.write_all(b"free")
+                        .map_err(|e| output_error(e.into()))?;
+                    file.set_len(reserve).map_err(|e| output_error(e.into()))?;
+                    file.seek(SeekFrom::Start(reserve))
+                        .map_err(|e| output_error(e.into()))?;
+                }
                 Ok(Lease {
                     file: Some(tokio::fs::File::from_std(file)),
                     temp,
@@ -618,7 +644,13 @@ mod native {
                         .iter()
                         .map(|t| t.sample_count as u64)
                         .sum();
-                    let source = writer.temp.0.clone();
+                    // The worker owns cleanup even if the awaiting future is dropped.
+                    let source_temp = std::mem::replace(
+                        &mut writer.temp,
+                        TemporaryFile(std::path::PathBuf::new()),
+                    );
+                    let strategy = self.options.finalization;
+                    let reserve = self.prefix_bytes();
                     let destination = writer.target.clone();
                     let signal = self.shared.signal.clone();
                     let (temp, bytes, tracks, sample_count) =
@@ -631,22 +663,46 @@ mod native {
                                 }
                             };
                             check().map_err(media_error)?;
-                            let (temp, mut output) =
-                                temporary_file(&destination).map_err(output_error)?;
-                            let mut input =
-                                std::fs::File::open(&source).map_err(|e| output_error(e.into()))?;
+                            let mut input = std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(strategy == FileFinalizationStrategy::InPlace)
+                                .open(&source_temp.0)
+                                .map_err(|e| output_error(e.into()))?;
                             let size = input.metadata().map_err(|e| output_error(e.into()))?.len();
-                            let scan =
-                                crate::isobmff::scan_file(&mut input, size, true, false, &check)
-                                    .map_err(media_error)?;
+                            let scan = crate::isobmff::scan_file(
+                                &mut crate::mp4::ReservedReader::new(&mut input, reserve),
+                                size.checked_sub(reserve)
+                                    .ok_or_else(|| fail(EngineErrorKind::Output))?,
+                                true,
+                                false,
+                                &check,
+                            )
+                            .map_err(media_error)?;
                             let sample_count = scan.sample_counts.iter().sum::<usize>();
                             let tracks =
                                 crate::isobmff::file_tracks(&scan.init).map_err(media_error)?;
-                            let (bytes, reports) = Mp4Muxer::from_fragments(tracks, scan.samples)
-                                .write_file(&mut input, &mut output, &check)
-                                .map_err(output_error)?;
-                            std::io::Write::flush(&mut output)
-                                .map_err(|e| output_error(e.into()))?;
+                            let mux = Mp4Muxer::from_fragments(tracks, scan.samples);
+                            let (temp, bytes, reports) = match strategy {
+                                FileFinalizationStrategy::InPlace => {
+                                    let (bytes, reports) = mux
+                                        .finalize_in_place(
+                                            &mut input, &scan.init, size, reserve, &check,
+                                        )
+                                        .map_err(output_error)?;
+                                    drop(input);
+                                    (source_temp, bytes, reports)
+                                }
+                                FileFinalizationStrategy::Copy => {
+                                    let (temp, mut output) =
+                                        temporary_file(&destination).map_err(output_error)?;
+                                    let (bytes, reports) = mux
+                                        .write_file(&mut input, &mut output, &check)
+                                        .map_err(output_error)?;
+                                    std::io::Write::flush(&mut output)
+                                        .map_err(|e| output_error(e.into()))?;
+                                    (temp, bytes, reports)
+                                }
+                            };
                             check().map_err(media_error)?;
                             Ok((temp, bytes, reports, sample_count))
                         })

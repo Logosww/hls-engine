@@ -1037,3 +1037,92 @@ async fn native_continuous_finalizer() {
         }
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn native_in_place_split_children_and_finalizing_cancel() {
+    struct Files(std::path::PathBuf);
+    impl EngineFileProvider for Files {
+        fn acquire<'a>(
+            &'a mut self,
+            request: EngineOutputRequest,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = EngineResult<std::path::PathBuf>> + 'a>,
+        > {
+            Box::pin(async move { Ok(self.0.join(format!("{}.mp4", request.index()))) })
+        }
+    }
+    let root = std::env::temp_dir().join(format!("hls-in-place-splits-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    for reserve in [0, 1024 * 1024] {
+        let directory = root.join(reserve.to_string());
+        std::fs::create_dir(&directory).unwrap();
+        let media_source = MemorySource::new()
+            .segment(
+                "https://live.test/init",
+                include_bytes!("fixtures/media/fmp4_avc_video_only/init.fmp4"),
+            )
+            .segment(
+                "https://live.test/seg0",
+                include_bytes!("fixtures/media/fmp4_avc_video_only/seg0.m4s"),
+            )
+            .segment(
+                "https://live.test/seg2",
+                include_bytes!("fixtures/media/fmp4_avc_video_only/seg2.m4s"),
+            );
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init\"\n#EXTINF:2,\nseg0\n#EXT-X-GAP\n#EXTINF:2,\nmissing\n#EXTINF:2,\nseg2\n#EXT-X-ENDLIST\n";
+        let s = session(
+            Arc::new(media_source),
+            EngineOptions::default().with_missing_segments(MissingSegmentPolicy::Split),
+        );
+        s.handle()
+            .accept_snapshot(&id(), &snapshot(text, 1))
+            .unwrap();
+        let options = FileOutputOptions::default()
+            .with_finalization_strategy(FileFinalizationStrategy::InPlace)
+            .with_header_reserve_bytes(reserve);
+        let r = s
+            .write_to_files(&mut Files(directory.clone()), options.clone())
+            .await
+            .unwrap();
+        assert_eq!(r.media().outputs().len(), 2);
+        let mut total = 0;
+        for (i, report) in r.media().outputs().iter().enumerate() {
+            let bytes = std::fs::read(directory.join(format!("{i}.mp4"))).unwrap();
+            let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+            assert_eq!(&bytes[ftyp + 4..ftyp + 8], b"moov");
+            assert_eq!(report.media().bytes_written, bytes.len() as u64);
+            total += bytes.len() as u64;
+        }
+        assert_eq!(r.media().bytes_written(), total);
+        let holder = Arc::new(Mutex::new(None::<EngineHandle>));
+        let callback = holder.clone();
+        let case = sample::cases()
+            .into_iter()
+            .find(|c| c.name == "fmp4_aac_clear")
+            .unwrap();
+        let s = session(
+            source(&case),
+            EngineOptions::default().with_on_event(Arc::new(move |event| {
+                if matches!(event, EngineEvent::State(EngineState::Finalizing)) {
+                    callback.lock().unwrap().as_ref().unwrap().cancel();
+                }
+            })),
+        );
+        *holder.lock().unwrap() = Some(s.handle());
+        s.handle()
+            .accept_snapshot(&id(), &snapshot(case.playlist, 1))
+            .unwrap();
+        let cancelled = directory.join("cancelled.mp4");
+        assert_eq!(
+            s.write_to_file(&cancelled, options)
+                .await
+                .unwrap_err()
+                .kind(),
+            EngineErrorKind::Cancelled
+        );
+        assert!(!cancelled.exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

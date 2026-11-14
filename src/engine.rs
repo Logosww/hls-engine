@@ -17,18 +17,68 @@ pub(crate) enum InputRole {
     Primary,
     Audio,
 }
+/// Native classic MP4 finalization. Does not apply to fragmented output or recovery.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FileFinalizationStrategy {
+    /// Copy samples to a compact file with a front-loaded moov (faststart).
+    #[default]
+    Copy,
+    /// Write a faststart moov into reserved header space in the temporary file.
+    /// If necessary, move media towards the end, copying from back to front.
+    /// Avoids a second full file; interrupted finalization is not recoverable.
+    InPlace,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileOutputOptions {
     format: OutputFormat,
+    #[cfg(not(target_arch = "wasm32"))]
+    finalization: FileFinalizationStrategy,
+    #[cfg(not(target_arch = "wasm32"))]
+    header_reserve: u32,
 }
 impl Default for FileOutputOptions {
     fn default() -> Self {
         Self {
             format: OutputFormat::StreamingMp4,
+            #[cfg(not(target_arch = "wasm32"))]
+            finalization: FileFinalizationStrategy::Copy,
+            #[cfg(not(target_arch = "wasm32"))]
+            header_reserve: 1024 * 1024,
         }
     }
 }
 impl FileOutputOptions {
+    /// Select Native classic file finalization. Ignored for FragmentedMp4.
+    /// Recoverable output uses RecoveryOptions and retains its copy strategy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_finalization_strategy(mut self, strategy: FileFinalizationStrategy) -> Self {
+        self.finalization = strategy;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn finalization_strategy(&self) -> FileFinalizationStrategy {
+        self.finalization
+    }
+
+    /// Bytes reserved for the faststart index with InPlace (default 1 MiB).
+    /// Must be zero or at least eight. Zero always uses same-file relocation.
+    /// Ignored by Copy and FragmentedMp4. Insufficient space never downgrades
+    /// to a tail index: media is shifted within the same file instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_header_reserve_bytes(mut self, bytes: u32) -> Self {
+        self.header_reserve = bytes;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn header_reserve_bytes(&self) -> u32 {
+        self.header_reserve
+    }
+
     pub fn with_format(mut self, format: OutputFormat) -> Self {
         self.format = format;
         self
@@ -684,9 +734,10 @@ pub enum OutputFormat {
     FragmentedMp4,
     /// Standard non-fragmented MP4 via the streaming fragmented pipeline.
     /// Each segment is demuxed and written to a temp fMP4 file, then
-    /// defragged into a single `ftyp` + `moov` + `mdat`. Output uses the same
-    /// classic MP4 muxer as [`Mp4`](Self::Mp4). Downloading is streamed, but
-    /// Native finalization retains a sample index and copies media in fixed-size blocks. The
+    /// finalized into faststart MP4. Output uses the same classic sample tables
+    /// as [`Mp4`](Self::Mp4). Native file output defaults to copying media into
+    /// a compact file; optional InPlace finalization fills reserved header space
+    /// or moves media within the temporary file. Both retain a sample index. The
     /// temp file (`<output>.partial.<ext>`) is a playable fMP4 if the
     /// process is interrupted before finalization.
     StreamingMp4,

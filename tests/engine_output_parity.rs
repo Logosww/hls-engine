@@ -129,12 +129,32 @@ async fn classic_and_fragmented_preserve_decoded_payloads_across_gaps() {
         .await
         .unwrap();
     std::fs::write(&fragmented_path, bytes).unwrap();
-    for format in [OutputFormat::Mp4, OutputFormat::StreamingMp4] {
-        let classic_path = directory.join(format!("{format:?}.mp4"));
+    for (format, strategy, reserve) in [
+        (OutputFormat::Mp4, FileFinalizationStrategy::Copy, 0),
+        (
+            OutputFormat::StreamingMp4,
+            FileFinalizationStrategy::Copy,
+            0,
+        ),
+        (
+            OutputFormat::StreamingMp4,
+            FileFinalizationStrategy::InPlace,
+            1024 * 1024,
+        ),
+        (
+            OutputFormat::StreamingMp4,
+            FileFinalizationStrategy::InPlace,
+            0,
+        ),
+    ] {
+        let classic_path = directory.join(format!("{format:?}-{strategy:?}-{reserve}.mp4"));
         let classic_report = session()
             .write_to_file(
                 &classic_path,
-                FileOutputOptions::default().with_format(format),
+                FileOutputOptions::default()
+                    .with_format(format)
+                    .with_finalization_strategy(strategy)
+                    .with_header_reserve_bytes(reserve),
             )
             .await
             .unwrap();

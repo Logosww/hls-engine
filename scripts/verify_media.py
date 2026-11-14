@@ -45,7 +45,7 @@ def packets(path):
     return grouped
 
 
-def verify(source, output):
+def verify(source, output, in_place=False):
     a, b = packets(source), packets(output)
     assert a.keys() == b.keys()
     for kind in a:
@@ -55,10 +55,10 @@ def verify(source, output):
             for field in ('dts', 'pts', 'duration', 'size', 'data_hash'):
                 assert before.get(field) == after.get(field), (kind, field, before.get(field), after.get(field))
         print(f'{kind}: {len(a[kind])} samples, matching DTS/PTS/duration/payload')
-    verify_layout(output, fragmented=False)
+    verify_layout(output, fragmented=False, in_place=in_place)
 
 
-def verify_layout(output, fragmented):
+def verify_layout(output, fragmented, in_place=False):
     with output.open('rb') as f:
         types = []
         while header := f.read(8):
@@ -76,6 +76,8 @@ def verify_layout(output, fragmented):
         tail = types[2:-1] if types[-1] == b'mfra' else types[2:]
         assert len(tail) >= 9 and len(tail) % 3 == 0, types
         assert all(tail[i:i+3] == [b'styp', b'moof', b'mdat'] for i in range(0, len(tail), 3)), types
+    elif in_place:
+        assert types in ([b'ftyp', b'moov', b'mdat'], [b'ftyp', b'moov', b'free', b'mdat']), types
     else:
         assert types == [b'ftyp', b'moov', b'mdat'], types
 
@@ -442,7 +444,7 @@ def main():
             print(f'Input: {name}', flush=True)
             verify_source(case, playlist)
             outputs = []
-            for flag in ('--fragmented', '--streaming', '--batch'):
+            for flag in ('--fragmented', '--streaming', '--batch', '--in-place', '--in-place-shift'):
                 output = folder / f'{name}_{flag[2:]}.mp4'
                 failure = expected_failure(case, flag)
                 if failure:
@@ -453,13 +455,17 @@ def main():
                     rejected += 1
                     print(f'{flag}: expected rejection ({failure})')
                     continue
-                run(demo, str(playlist), str(output), flag)
+                extra = ['--in-place', '--header-reserve-bytes', '0'] if flag == '--in-place-shift' else [flag]
+                run(demo, str(playlist), str(output), *extra)
                 verify_input(playlist, output, case['mode'])
                 decode_and_seek(output)
-                verify_layout(output, fragmented=flag == '--fragmented')
+                if flag.startswith('--in-place'):
+                    # Verify progressive decoding through a genuinely non-seekable input.
+                    subprocess.run(['ffmpeg', '-v', 'error', '-xerror', '-i', 'pipe:0', '-f', 'null', '-'], input=output.read_bytes(), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                verify_layout(output, fragmented=flag == '--fragmented', in_place=flag.startswith('--in-place'))
                 outputs.append(output)
                 if flag != '--fragmented':
-                    verify(outputs[0], output)
+                    verify(outputs[0], output, in_place=flag.startswith('--in-place'))
                 passed += 1
     print(f'Verified {len(CASES)} inputs: {passed} successful outputs, {rejected} expected rejections; no player validation.')
 

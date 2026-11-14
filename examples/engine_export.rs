@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() < 2 {
-        return Err("engine_export <selected-playlist> <output> [--fragmented|--batch|--streaming] [--aac-shift-ms N]".into());
+        return Err("engine_export <selected-playlist> <output> [--fragmented|--batch|--streaming|--in-place] [--header-reserve-bytes N] [--aac-shift-ms N]".into());
     }
     let location = if args[0].starts_with("http") {
         SourceLocation::Url(url::Url::parse(&args[0])?)
@@ -76,10 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         OutputFormat::StreamingMp4
     };
-    match session
-        .write_to_file(&args[1], FileOutputOptions::default().with_format(format))
-        .await
-    {
+    let mut file_options = FileOutputOptions::default().with_format(format);
+    if args.iter().any(|s| s == "--in-place") {
+        file_options = file_options.with_finalization_strategy(FileFinalizationStrategy::InPlace);
+    }
+    match session.write_to_file(&args[1], file_options).await {
         Ok(report) => {
             println!("{report:?}");
             Ok(())

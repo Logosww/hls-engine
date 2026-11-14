@@ -347,56 +347,69 @@ async fn subtitle_admission_is_atomic_and_unknown_epoch_fails_before_finalize() 
 
 #[tokio::test]
 async fn native_classic_preserves_all_tracks_and_metadata() {
-    let cases = sample::cases();
-    let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
-    let inputs = EngineInputs::new(
-        EngineInput::new(id("main"), source(audio)),
-        EmbeddedAudio::Keep,
-    )
-    .with_primary_audio(TrackMetadata::new("en", "Primary").with_default(true))
-    .with_audio(
-        EngineInput::new(id("second"), source(audio)),
-        TrackMetadata::new("ja", "Second"),
-    )
-    .with_subtitle(SubtitleTrack::new(
-        id("cc"),
-        id("main"),
-        TrackMetadata::new("zh", "字幕"),
-    ));
-    let s =
-        EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options()).unwrap();
-    let h = s.handle();
-    for name in ["main", "second"] {
-        h.accept_snapshot(&id(name), &snapshot(name, audio.playlist))
-            .unwrap();
-    }
-    let cc = h.subtitle_track_id(&id("cc")).unwrap();
-    h.accept_cues(cc, &[SubtitleCue::new(1, 0, time(0), time(1000), "你好")])
-        .unwrap();
-    let path =
-        std::env::temp_dir().join(format!("hls-multitrack-native-{}.mp4", std::process::id()));
-    let report = s
-        .write_to_file(
-            &path,
-            FileOutputOptions::default().with_format(OutputFormat::StreamingMp4),
+    for (strategy, reserve) in [
+        (FileFinalizationStrategy::Copy, 0),
+        (FileFinalizationStrategy::InPlace, 0),
+        (FileFinalizationStrategy::InPlace, 1024 * 1024),
+    ] {
+        let cases = sample::cases();
+        let audio = cases.iter().find(|c| c.name == "fmp4_aac_clear").unwrap();
+        let inputs = EngineInputs::new(
+            EngineInput::new(id("main"), source(audio)),
+            EmbeddedAudio::Keep,
         )
-        .await
-        .unwrap();
-    let bytes = std::fs::read(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
-    assert_eq!(report.tracks().len(), 3);
-    assert!(bytes.windows(6).any(|v| v == "你好".as_bytes()));
-    assert!(bytes.windows(6).any(|v| v == b"Second"));
-    assert!(
-        report.media().outputs()[0].classic_index_samples()
-            > report.media().outputs()[0]
-                .media()
-                .tracks
-                .iter()
-                .map(|t| t.sample_count as u64)
-                .sum()
-    );
-    write_fixture("native-multitrack-classic.mp4", &bytes);
+        .with_primary_audio(TrackMetadata::new("en", "Primary").with_default(true))
+        .with_audio(
+            EngineInput::new(id("second"), source(audio)),
+            TrackMetadata::new("ja", "Second"),
+        )
+        .with_subtitle(SubtitleTrack::new(
+            id("cc"),
+            id("main"),
+            TrackMetadata::new("zh", "字幕"),
+        ));
+        let s = EngineSession::new(inputs, sample::keys(Arc::new(sample::Provider)), options())
+            .unwrap();
+        let h = s.handle();
+        for name in ["main", "second"] {
+            h.accept_snapshot(&id(name), &snapshot(name, audio.playlist))
+                .unwrap();
+        }
+        let cc = h.subtitle_track_id(&id("cc")).unwrap();
+        h.accept_cues(cc, &[SubtitleCue::new(1, 0, time(0), time(1000), "你好")])
+            .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "hls-multitrack-native-{}-{strategy:?}-{reserve}.mp4",
+            std::process::id()
+        ));
+        let report = s
+            .write_to_file(
+                &path,
+                FileOutputOptions::default()
+                    .with_format(OutputFormat::StreamingMp4)
+                    .with_finalization_strategy(strategy)
+                    .with_header_reserve_bytes(reserve),
+            )
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(report.tracks().len(), 3);
+        assert!(bytes.windows(6).any(|v| v == "你好".as_bytes()));
+        assert!(bytes.windows(6).any(|v| v == b"Second"));
+        assert!(
+            report.media().outputs()[0].classic_index_samples()
+                > report.media().outputs()[0]
+                    .media()
+                    .tracks
+                    .iter()
+                    .map(|t| t.sample_count as u64)
+                    .sum()
+        );
+        if strategy == FileFinalizationStrategy::Copy {
+            write_fixture("native-multitrack-classic.mp4", &bytes);
+        }
+    }
 }
 
 #[test]

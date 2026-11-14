@@ -11,7 +11,7 @@ parsing belong to the application. The engine does not transcode media.
 
 ```toml
 [dependencies]
-hls-engine = "1.1"
+hls-engine = "1.3"
 ```
 
 Disable `default-source` with `default-features = false` to provide your own
@@ -74,6 +74,15 @@ available. `stop` drains accepted work; `cancel` aborts it.
 - Fragmented MP4 output supports bounded recording. Native classic MP4 uses disk
   staging and a sample index whose size grows with the recording.
 
+Native `write_to_file` and `write_to_files` default to `FileFinalizationStrategy::Copy`.
+Opt into `FileFinalizationStrategy::InPlace` to finalize the same temporary file:
+it reserves header space and, if necessary, moves media within that file so the
+result always remains faststart MP4. This avoids a second full media file but
+does not guarantee faster finalization. WASM and recoverable output are unchanged.
+See [Native file finalization](docs/engine.md#native-file-finalization) for the
+options, scope and usage examples, and [measurements](docs/benchmarks.md#native-finalization-with-insufficient-header-reservation)
+for the performance comparison.
+
 Container support and player support are separate decisions. Consult
 [capabilities and player limits](docs/support.md) before enabling a combination.
 DRM/CDM, license exchange, LL-HLS partial segments, dynamic track replacement and
@@ -114,8 +123,8 @@ python3 -m unittest discover -s scripts -p 'test_verify_*.py'
 
 [CI](https://github.com/Logosww/hls-engine/blob/main/.github/workflows/ci.yml) runs the feature matrix on Linux, macOS and Windows,
 real Node/Chrome WASM contracts, independent FFmpeg inspection, recovery and
-package checks. Repository scripts are limited to that workflow and its
-transitive dependencies; they are excluded from the published crate.
+package checks. Repository scripts support that workflow and manual benchmarks;
+they are excluded from the published crate.
 The compressed crate has a 1 MiB CI budget. Full media/encryption corpora,
 integration tests, exporters and benchmarks stay in Git; the crate includes
 public examples and the small fixture subset needed by its unit tests.

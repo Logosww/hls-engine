@@ -206,7 +206,6 @@ impl Mp4Muxer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct Scratch(std::path::PathBuf);
@@ -432,6 +431,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn sparse_large_file_needs_no_media_copy_when_reserved_space_fits() {
+        use std::io::Read;
+
         let (_path, mut file) = scratch();
         let reserve = 4096;
         let track = FragmentedTrack::audio(1, 48000, 2, vec![0x11, 0x90]);

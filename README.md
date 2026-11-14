@@ -11,7 +11,7 @@ parsing belong to the application. The engine does not transcode media.
 
 ```toml
 [dependencies]
-hls-engine = "1.3"
+hls-engine = "1.4"
 ```
 
 Disable `default-source` with `default-features = false` to provide your own
@@ -78,7 +78,7 @@ Native `write_to_file` and `write_to_files` default to `FileFinalizationStrategy
 Opt into `FileFinalizationStrategy::InPlace` to finalize the same temporary file:
 it reserves header space and, if necessary, moves media within that file so the
 result always remains faststart MP4. This avoids a second full media file but
-does not guarantee faster finalization. WASM and recoverable output are unchanged.
+does not guarantee faster finalization. WASM output is unchanged.
 See [Native file finalization](docs/engine.md#native-file-finalization) for the
 options, scope and usage examples, and [measurements](docs/benchmarks.md#native-finalization-with-insufficient-header-reservation)
 for the performance comparison.
@@ -95,6 +95,11 @@ independent fallible callback: schema 2 for media-only output, schema 3 for
 [joint fixed-file subtitle recovery](docs/subtitle-sidecars.md#joint-native-fixed-file-recovery). Persist them atomically. Restoration verifies
 resource identities, key versions, committed file prefixes and completed split
 children before appending. A fresh output never overwrites a competing file.
+
+`RecoveryOptions` also supports opt-in `InPlace` classic finalization. Downloading
+remains recoverable, but once the persistent finalization marker is created,
+incomplete checkpoints are refused. Copy remains the default with full
+finalization recovery. See [in-place recovery output](docs/engine.md#optional-in-place-recovery-output).
 
 `Flush` and `SyncAll` describe file durability. The caller still owns checkpoint
 and directory persistence, source/provider reconstruction and bounded replay of

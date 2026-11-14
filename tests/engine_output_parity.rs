@@ -129,98 +129,117 @@ async fn classic_and_fragmented_preserve_decoded_payloads_across_gaps() {
         .await
         .unwrap();
     std::fs::write(&fragmented_path, bytes).unwrap();
-    for (format, strategy, reserve) in [
-        (OutputFormat::Mp4, FileFinalizationStrategy::Copy, 0),
-        (
-            OutputFormat::StreamingMp4,
-            FileFinalizationStrategy::Copy,
-            0,
-        ),
-        (
-            OutputFormat::StreamingMp4,
-            FileFinalizationStrategy::InPlace,
-            1024 * 1024,
-        ),
-        (
-            OutputFormat::StreamingMp4,
-            FileFinalizationStrategy::InPlace,
-            0,
-        ),
-    ] {
-        let classic_path = directory.join(format!("{format:?}-{strategy:?}-{reserve}.mp4"));
-        let classic_report = session()
-            .write_to_file(
-                &classic_path,
-                FileOutputOptions::default()
-                    .with_format(format)
-                    .with_finalization_strategy(strategy)
-                    .with_header_reserve_bytes(reserve),
-            )
-            .await
-            .unwrap();
-        assert_eq!(classic_report.tracks().len(), 2);
-        for (a, b) in classic_report
-            .tracks()
-            .iter()
-            .zip(fragmented_report.tracks())
-        {
-            assert_eq!(a.kind(), b.kind());
-            assert_eq!(a.timescale(), b.timescale());
-            assert_eq!(a.duration(), b.duration());
-            assert_eq!(a.sample_count(), b.sample_count());
-            match a.kind() {
-                OutputTrackKind::Audio => {
-                    assert_eq!(a.sample_count(), 62);
-                    assert_eq!(a.duration(), 192512);
-                }
-                OutputTrackKind::Video => assert_eq!(a.sample_count(), 60),
-                _ => panic!("unexpected track kind"),
-            }
-        }
-        for (stream, expected) in [("0:a:0", 62), ("0:v:0", 60)] {
-            let classic = hashes(&classic_path, stream);
-            let fragmented = hashes(&fragmented_path, stream);
-            assert_eq!(fragmented.len(), expected, "{stream}: fixture frame count");
-            assert_eq!(
-                classic.len(),
-                fragmented.len(),
-                "{stream}: decoded frame count; outputs in {}",
-                directory.display()
-            );
-            assert_eq!(classic, fragmented, "{stream}: decoded payloads");
-            let classic = packets(&classic_path, &stream[2..]);
-            let fragmented = packets(&fragmented_path, &stream[2..]);
-            assert_eq!(
-                classic["streams"][0]["time_base"],
-                fragmented["streams"][0]["time_base"]
-            );
-            let actual = classic["packets"].as_array().unwrap();
-            let expected = fragmented["packets"].as_array().unwrap();
-            assert_eq!(
-                actual.len(),
-                expected.len(),
-                "{stream}: packet count including discard packets"
-            );
-            for (a, b) in actual.iter().zip(expected) {
-                for field in ["pts", "duration", "data_hash"] {
-                    assert_eq!(a[field], b[field], "{stream}: packet {field}");
-                }
-                if stream == "0:v:0" {
-                    assert_eq!(a["dts"], b["dts"], "video decode timestamp");
+    for recoverable in [false, true] {
+        for (format, strategy, reserve) in [
+            (OutputFormat::Mp4, FileFinalizationStrategy::Copy, 0),
+            (OutputFormat::Mp4, FileFinalizationStrategy::InPlace, 0),
+            (
+                OutputFormat::StreamingMp4,
+                FileFinalizationStrategy::Copy,
+                0,
+            ),
+            (
+                OutputFormat::StreamingMp4,
+                FileFinalizationStrategy::InPlace,
+                1024 * 1024,
+            ),
+            (
+                OutputFormat::StreamingMp4,
+                FileFinalizationStrategy::InPlace,
+                0,
+            ),
+        ] {
+            let classic_path = directory.join(format!(
+                "{format:?}-{strategy:?}-{reserve}-{recoverable}.mp4"
+            ));
+            let classic_report = if recoverable {
+                session()
+                    .write_recoverable_to_file(
+                        &classic_path,
+                        RecoveryOptions::new(Arc::new(|_| Ok(())))
+                            .with_output_format(format)
+                            .with_finalization_strategy(strategy)
+                            .with_header_reserve_bytes(reserve),
+                    )
+                    .await
+                    .unwrap()
+            } else {
+                session()
+                    .write_to_file(
+                        &classic_path,
+                        FileOutputOptions::default()
+                            .with_format(format)
+                            .with_finalization_strategy(strategy)
+                            .with_header_reserve_bytes(reserve),
+                    )
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(classic_report.tracks().len(), 2);
+            for (a, b) in classic_report
+                .tracks()
+                .iter()
+                .zip(fragmented_report.tracks())
+            {
+                assert_eq!(a.kind(), b.kind());
+                assert_eq!(a.timescale(), b.timescale());
+                assert_eq!(a.duration(), b.duration());
+                assert_eq!(a.sample_count(), b.sample_count());
+                match a.kind() {
+                    OutputTrackKind::Audio => {
+                        assert_eq!(a.sample_count(), 62);
+                        assert_eq!(a.duration(), 192512);
+                    }
+                    OutputTrackKind::Video => assert_eq!(a.sample_count(), 60),
+                    _ => panic!("unexpected track kind"),
                 }
             }
-            if stream == "0:a:0" {
-                assert!(
-                    expected.windows(2).any(|p| p[1]["pts"].as_i64().unwrap()
-                        > p[0]["pts"].as_i64().unwrap() + p[0]["duration"].as_i64().unwrap()),
-                    "fixture must contain a real presentation gap"
+            for (stream, expected) in [("0:a:0", 62), ("0:v:0", 60)] {
+                let classic = hashes(&classic_path, stream);
+                let fragmented = hashes(&fragmented_path, stream);
+                assert_eq!(fragmented.len(), expected, "{stream}: fixture frame count");
+                assert_eq!(
+                    classic.len(),
+                    fragmented.len(),
+                    "{stream}: decoded frame count; outputs in {}",
+                    directory.display()
                 );
-                for pair in actual.windows(2) {
-                    assert_eq!(
-                        pair[1]["dts"].as_i64().unwrap(),
-                        pair[0]["dts"].as_i64().unwrap() + pair[0]["duration"].as_i64().unwrap(),
-                        "AAC decode run stays contiguous"
+                assert_eq!(classic, fragmented, "{stream}: decoded payloads");
+                let classic = packets(&classic_path, &stream[2..]);
+                let fragmented = packets(&fragmented_path, &stream[2..]);
+                assert_eq!(
+                    classic["streams"][0]["time_base"],
+                    fragmented["streams"][0]["time_base"]
+                );
+                let actual = classic["packets"].as_array().unwrap();
+                let expected = fragmented["packets"].as_array().unwrap();
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "{stream}: packet count including discard packets"
+                );
+                for (a, b) in actual.iter().zip(expected) {
+                    for field in ["pts", "duration", "data_hash"] {
+                        assert_eq!(a[field], b[field], "{stream}: packet {field}");
+                    }
+                    if stream == "0:v:0" {
+                        assert_eq!(a["dts"], b["dts"], "video decode timestamp");
+                    }
+                }
+                if stream == "0:a:0" {
+                    assert!(
+                        expected.windows(2).any(|p| p[1]["pts"].as_i64().unwrap()
+                            > p[0]["pts"].as_i64().unwrap() + p[0]["duration"].as_i64().unwrap()),
+                        "fixture must contain a real presentation gap"
                     );
+                    for pair in actual.windows(2) {
+                        assert_eq!(
+                            pair[1]["dts"].as_i64().unwrap(),
+                            pair[0]["dts"].as_i64().unwrap()
+                                + pair[0]["duration"].as_i64().unwrap(),
+                            "AAC decode run stays contiguous"
+                        );
+                    }
                 }
             }
         }

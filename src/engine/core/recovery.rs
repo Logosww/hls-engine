@@ -250,9 +250,35 @@ pub struct RecoveryOptions {
     pub(super) durability: CheckpointDurability,
     pub(super) callback: Arc<CheckpointCallback>,
     pub(super) format: OutputFormat,
+    pub(super) finalization: FileFinalizationStrategy,
+    pub(super) header_reserve: u32,
 }
 #[cfg(not(target_arch = "wasm32"))]
 impl RecoveryOptions {
+    /// InPlace preserves download recovery only. Once finalization starts,
+    /// incomplete checkpoints cannot resume; retain the partial and its marker
+    /// until abandoning the recording or persisting a Completed checkpoint.
+    /// Ignored for fragmented output. Copy remains the default.
+    pub fn with_finalization_strategy(mut self, strategy: FileFinalizationStrategy) -> Self {
+        self.finalization = strategy;
+        self
+    }
+    pub fn finalization_strategy(&self) -> FileFinalizationStrategy {
+        self.finalization
+    }
+    /// Faststart header reservation, default 1 MiB; zero or at least eight bytes.
+    /// Must match when resuming InPlace classic output. Ignored otherwise.
+    pub fn with_header_reserve_bytes(mut self, bytes: u32) -> Self {
+        self.header_reserve = bytes;
+        self
+    }
+    pub fn header_reserve_bytes(&self) -> u32 {
+        self.header_reserve
+    }
+    pub(super) fn in_place(&self) -> bool {
+        self.format != OutputFormat::FragmentedMp4
+            && self.finalization == FileFinalizationStrategy::InPlace
+    }
     pub fn output_format(&self) -> OutputFormat {
         self.format
     }
@@ -264,6 +290,8 @@ impl RecoveryOptions {
             durability: CheckpointDurability::Flush,
             callback,
             format: OutputFormat::FragmentedMp4,
+            finalization: FileFinalizationStrategy::Copy,
+            header_reserve: 1024 * 1024,
         }
     }
     pub fn with_output_format(mut self, format: OutputFormat) -> Self {

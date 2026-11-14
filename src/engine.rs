@@ -17,7 +17,7 @@ pub(crate) enum InputRole {
     Primary,
     Audio,
 }
-/// Native classic MP4 finalization. Does not apply to fragmented output or recovery.
+/// Native classic MP4 finalization. Does not apply to fragmented output.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -52,7 +52,7 @@ impl Default for FileOutputOptions {
 }
 impl FileOutputOptions {
     /// Select Native classic file finalization. Ignored for FragmentedMp4.
-    /// Recoverable output uses RecoveryOptions and retains its copy strategy.
+    /// Recoverable output selects its strategy separately through RecoveryOptions.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_finalization_strategy(mut self, strategy: FileFinalizationStrategy) -> Self {
         self.finalization = strategy;

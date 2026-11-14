@@ -141,11 +141,25 @@ fn filesystem_fault_child() {
     }))
     .with_output_format(format)
     .with_durability(CheckpointDurability::SyncAll);
+    let recovery = if let Ok(reserve) = std::env::var("HLS_FAULT_IN_PLACE") {
+        recovery
+            .with_finalization_strategy(FileFinalizationStrategy::InPlace)
+            .with_header_reserve_bytes(reserve.parse().unwrap())
+    } else {
+        recovery
+    };
     let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(session(checkpoint).write_recoverable_to_file(&dir.join("output.mp4"), recovery));
+    if std::env::var_os("HLS_FAULT_EXPECT_CONFLICT").is_some() {
+        assert!(matches!(
+            result.unwrap_err().kind(),
+            EngineErrorKind::ResumeConflict
+        ));
+        return;
+    }
     if std::env::var_os("HLS_FAULT_POINT").is_some() {
         assert!(matches!(
             result.unwrap_err().kind(),
@@ -304,4 +318,96 @@ impl RecoverableSubtitleSink for Files {
             Ok(())
         })
     }
+}
+
+#[test]
+fn in_place_process_exit_blocks_old_checkpoints_and_preserves_split_outputs() {
+    let root = std::env::temp_dir().join(format!("engine-in-place-faults-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    for reserve in [0, 1048576] {
+        for point in [
+            "write.before:3",
+            "in_place.marked:1",
+            "classic.write.after:1",
+            "publish.after:1",
+            "in_place.marked:2",
+        ] {
+            let dir = root.join(format!("{reserve}-{}", point.replace(':', "-")));
+            std::fs::create_dir(&dir).unwrap();
+            let command = || {
+                let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+                cmd.args(["filesystem_fault_child", "--ignored", "--nocapture"])
+                    .env("HLS_FAULT_CHILD", &dir)
+                    .env("HLS_FAULT_CLASSIC", "1")
+                    .env("HLS_FAULT_IN_PLACE", reserve.to_string())
+                    .env("HLS_FAULT_SIDECAR", "1")
+                    .env("HLS_FAULT_ACTION", "exit");
+                cmd
+            };
+            let result = command().env("HLS_FAULT_POINT", point).output().unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(83),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let snapshot = || {
+                let mut files: Vec<_> = std::fs::read_dir(&dir)
+                    .unwrap()
+                    .map(|e| {
+                        let p = e.unwrap().path();
+                        (
+                            p.file_name().unwrap().to_os_string(),
+                            std::fs::read(p).unwrap(),
+                        )
+                    })
+                    .collect();
+                files.sort();
+                files
+            };
+            if point == "write.before:3" {
+                let cp =
+                    EngineCheckpoint::from_bytes(&std::fs::read(dir.join("checkpoint")).unwrap())
+                        .unwrap();
+                assert_eq!(cp.output_index(), 1);
+                let result = command().env_remove("HLS_FAULT_POINT").output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert!(dir.join("output.mp4.part-000001.mp4").exists());
+                continue;
+            }
+            if point == "in_place.marked:1" {
+                // A torn/mid-relocation partial must be refused by the barrier,
+                // without attempting to scan or truncate it using an old prefix.
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(dir.join("output.mp4.hls-partial"))
+                    .unwrap()
+                    .set_len(16)
+                    .unwrap();
+            }
+            let before = snapshot();
+            let result = command()
+                .env_remove("HLS_FAULT_POINT")
+                .env("HLS_FAULT_EXPECT_CONFLICT", "1")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(before, snapshot());
+            if point.ends_with(":2") {
+                assert!(dir.join("output.mp4").exists());
+                assert!(dir.join("captions.vtt").exists());
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -1678,3 +1678,141 @@ async fn frozen_v1_schema2_execution_state_restores() {
             .collect::<Vec<_>>()
     );
 }
+
+fn in_place(options: RecoveryOptions, reserve: u32) -> RecoveryOptions {
+    options
+        .with_output_format(OutputFormat::StreamingMp4)
+        .with_finalization_strategy(FileFinalizationStrategy::InPlace)
+        .with_header_reserve_bytes(reserve)
+}
+
+#[tokio::test]
+async fn in_place_download_resume_faststart_and_completed_validation() {
+    for reserve in [0, 8, 1024 * 1024] {
+        for durability in [CheckpointDurability::Flush, CheckpointDurability::SyncAll] {
+            let temp = Temp::new();
+            let path = temp.output();
+            let (options, latest) = capture(true);
+            assert!(
+                create(None, true, true)
+                    .write_recoverable_to_file(
+                        &path,
+                        in_place(options, reserve).with_durability(durability)
+                    )
+                    .await
+                    .is_err()
+            );
+            let download = latest.lock().unwrap().clone().unwrap();
+            assert!(!download.is_finalizing());
+            let before = std::fs::read(partial(&path)).unwrap();
+            for wrong in [
+                RecoveryOptions::new(Arc::new(|_| Ok(()))).with_output_format(OutputFormat::Mp4),
+                in_place(RecoveryOptions::new(Arc::new(|_| Ok(()))), reserve + 8),
+            ] {
+                let error = create(Some(download.clone()), true, true)
+                    .write_recoverable_to_file(&path, wrong)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error.kind(), EngineErrorKind::ResumeConflict));
+                assert_eq!(std::fs::read(partial(&path)).unwrap(), before);
+            }
+            let (options, latest) = capture(false);
+            let report = create(Some(download.clone()), true, true)
+                .write_recoverable_to_file(
+                    &path,
+                    in_place(options, reserve).with_durability(durability),
+                )
+                .await
+                .unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let ftyp = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+            assert_eq!(&bytes[4..8], b"ftyp");
+            assert_eq!(&bytes[ftyp + 4..ftyp + 8], b"moov");
+            assert_eq!(report.media().bytes_written(), bytes.len() as u64);
+            let completed = latest.lock().unwrap().clone().unwrap();
+            assert!(completed.is_completed());
+            let error = create(Some(download), true, true)
+                .write_recoverable_to_file(
+                    &path,
+                    in_place(RecoveryOptions::new(Arc::new(|_| Ok(()))), reserve),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error.kind(), EngineErrorKind::ResumeConflict));
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            for entry in std::fs::read_dir(&temp.0).unwrap() {
+                let entry = entry.unwrap().path();
+                if entry != path {
+                    std::fs::remove_file(entry).unwrap();
+                }
+            }
+            create(Some(completed), false, true)
+                .write_recoverable_to_file(
+                    &path,
+                    in_place(RecoveryOptions::new(Arc::new(|_| Ok(()))), reserve),
+                )
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn in_place_finalizing_checkpoint_before_marker_can_resume() {
+    let temp = Temp::new();
+    let path = temp.output();
+    let saved = Arc::new(Mutex::new(None));
+    let copy = saved.clone();
+    let options = RecoveryOptions::new(Arc::new(move |cp| {
+        if cp.is_finalizing() {
+            *copy.lock().unwrap() = Some(cp);
+            return Err(EngineError::output(
+                std::io::Error::other("before marker").into(),
+            ));
+        }
+        Ok(())
+    }));
+    assert!(
+        create(None, true, true)
+            .write_recoverable_to_file(&path, in_place(options, 0))
+            .await
+            .is_err()
+    );
+    let cp = saved.lock().unwrap().clone().unwrap();
+    create(Some(cp), false, true)
+        .write_recoverable_to_file(
+            &path,
+            in_place(RecoveryOptions::new(Arc::new(|_| Ok(()))), 0),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn recovery_in_place_options_validate_only_when_active() {
+    assert_eq!(
+        RecoveryOptions::new(Arc::new(|_| Ok(()))).finalization_strategy(),
+        FileFinalizationStrategy::Copy
+    );
+    for n in 1..8 {
+        let temp = Temp::new();
+        let error = create(None, true, true)
+            .write_recoverable_to_file(
+                &temp.output(),
+                in_place(RecoveryOptions::new(Arc::new(|_| Ok(()))), n),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error.kind(), EngineErrorKind::InvalidOptions));
+        assert_eq!(std::fs::read_dir(&temp.0).unwrap().count(), 0);
+    }
+    let temp = Temp::new();
+    create(None, true, true)
+        .write_recoverable_to_file(
+            &temp.output(),
+            in_place(RecoveryOptions::new(Arc::new(|_| Ok(()))), 1)
+                .with_output_format(OutputFormat::FragmentedMp4),
+        )
+        .await
+        .unwrap();
+}

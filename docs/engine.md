@@ -105,8 +105,8 @@ strategy changes the engine-owned temporary file, not an existing input file or
 a previously published destination.
 
 The strategy and reservation methods are Native-only. WASM, borrowed writers and
-`into_bytes` keep their interfaces and output layouts. Recoverable output still
-uses `RecoveryOptions`, the copy strategy and existing checkpoint schemas.
+`into_bytes` keep their interfaces and output layouts. Recoverable output selects
+its strategy separately through `RecoveryOptions`; see the recovery section below.
 In-place finalization is not a crash-recovery protocol. Failures and cancellation
 before publication do not publish a destination; the private temporary file may
 have been partially modified. Publication retains the existing no-clobber rule.
@@ -134,6 +134,55 @@ cargo run --locked --example engine_export -- input.m3u8 output.mp4 --in-place -
 fallible callback. The default is fragmented MP4 and Flush. Use
 `with_output_format(OutputFormat::StreamingMp4)` for Native classic finalization
 and `with_durability(CheckpointDurability::SyncAll)` for file synchronization.
+
+### Optional in-place recovery output
+
+Native recoverable classic output also supports the opt-in strategy:
+
+```rust
+use hls_engine::{CheckpointCallback, FileFinalizationStrategy, OutputFormat, RecoveryOptions};
+use std::sync::Arc;
+
+fn recovery_options(persist: Arc<CheckpointCallback>) -> RecoveryOptions {
+    RecoveryOptions::new(persist)
+        .with_output_format(OutputFormat::StreamingMp4)
+        .with_finalization_strategy(FileFinalizationStrategy::InPlace)
+        .with_header_reserve_bytes(1024 * 1024)
+}
+```
+
+With `InPlace`, **only downloading is recoverable**. The same reservation rules
+apply: zero or at least eight bytes, default 1 MiB, same-file relocation when
+insufficient, and successful output always faststart. Strategy and reservation
+must match when restoring a recording. Fragmented output ignores both options.
+Existing checkpoint schemas remain unchanged; Copy remains the default and keeps
+its existing finalization recovery guarantees.
+
+Before modifying a partial, the engine creates and synchronizes
+`<output>.hls-partial.in-place`. This persistent marker makes restoration from
+any incomplete checkpoint for that child fail with `ResumeConflict`, including
+older download snapshots. A Finalizing checkpoint can still resume if the marker
+has not been created. Once created, the marker is conservative: cancellation,
+I/O errors or process termination require abandoning that child even if its
+media has not yet changed. There is no relocation journal or rollback.
+
+Keep the marker alongside its partial. Do not delete it to force a retry.
+After an interruption, start a new recording at a new destination, or explicitly
+abandon and clean the old recording and checkpoints. After a Completed checkpoint
+is durably saved, intermediate files and markers can be removed; restoring that
+Completed checkpoint validates the final output without needing intermediates.
+If publication succeeds but the Completed callback fails, the output may exist,
+but an incomplete checkpoint still cannot resume the in-place operation.
+
+Split children reserve and finalize independently. A checkpoint for the next
+child can resume downloading despite markers on previously completed children;
+an older checkpoint for a finalized child is refused. Fixed subtitle sidecars
+retain their existing coordinated publication, but in-place finalization does
+not promise recovery of an interrupted joint publication. Marker synchronization
+does not add stronger power-loss guarantees than the existing platform and
+checkpoint-persistence contract (the parent directory is also synced on Unix).
+
+### Default copy recovery guarantees
 
 Persist callbacks atomically. Flush does not guarantee survival of power loss;
 SyncAll does not persist the caller's checkpoint or directory entries. Keep the

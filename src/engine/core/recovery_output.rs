@@ -77,6 +77,55 @@ fn partial_path(path: &Path) -> std::path::PathBuf {
     name.push(".hls-partial");
     name.into()
 }
+// Kept independently of caller-owned checkpoints, including older snapshots.
+// Its presence is a conservative barrier: even an untouched partial is refused.
+fn in_place_marker(path: &Path) -> std::path::PathBuf {
+    let mut name = partial_path(path).into_os_string();
+    name.push(".in-place");
+    name.into()
+}
+fn reject_in_place_marker(path: &Path) -> EngineResult<()> {
+    match std::fs::symlink_metadata(in_place_marker(path)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(conflict()),
+        Err(e) => Err(output_error(e.into())),
+    }
+}
+fn mark_in_place(path: &Path) -> EngineResult<()> {
+    let marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(in_place_marker(path))
+        .map_err(|e| output_error(e.into()))?;
+    marker.sync_all().map_err(|e| output_error(e.into()))?;
+    #[cfg(unix)]
+    std::fs::File::open(path.parent().ok_or_else(conflict)?)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| output_error(e.into()))?;
+    Ok(())
+}
+fn reserve_header(file: &mut std::fs::File, reserve: u64, hash: &mut Sha256) -> EngineResult<()> {
+    use std::io::Write;
+    if reserve == 0 {
+        return Ok(());
+    }
+    let mut header = (reserve as u32).to_be_bytes().to_vec();
+    header.extend_from_slice(b"free");
+    file.write_all(&header)
+        .map_err(|e| output_error(e.into()))?;
+    file.set_len(reserve).map_err(|e| output_error(e.into()))?;
+    hash.update(&header);
+    let zero = [0u8; 8192];
+    let mut left = reserve - 8;
+    while left > 0 {
+        let n = left.min(zero.len() as u64) as usize;
+        hash.update(&zero[..n]);
+        left -= n as u64;
+    }
+    file.seek(SeekFrom::Start(reserve))
+        .map_err(|e| output_error(e.into()))?;
+    Ok(())
+}
 fn verify_outputs(root: &Path, outputs: &[(u64, [u8; 32])], signal: &Signal) -> EngineResult<()> {
     for (index, (size, digest)) in outputs.iter().enumerate() {
         let mut file = std::fs::File::open(child_path(root, index as u64))
@@ -117,6 +166,13 @@ fn prefix(file: &mut std::fs::File, size: u64, signal: &Signal) -> EngineResult<
     Ok(hash)
 }
 impl Target for RecoverableFile {
+    fn prefix_bytes(&self) -> u64 {
+        if self.recovery.in_place() {
+            u64::from(self.recovery.header_reserve)
+        } else {
+            0
+        }
+    }
     type Writer = FileWriter;
     fn recoverable(&self) -> bool {
         true
@@ -184,6 +240,8 @@ impl Target for RecoverableFile {
         Box::pin(async move {
             self.path = child_path(&self.root, request.index());
             self.partial = partial_path(&self.path);
+            reject_in_place_marker(&self.path)?;
+            let reserve = self.prefix_bytes();
             // A freshly persisted acquisition intent does not own an existing
             // file. Only restoration of this output may reopen its partial.
             let resuming = self
@@ -233,7 +291,7 @@ impl Target for RecoverableFile {
                         return Err(corruption());
                     }
                     let mut file = existing;
-                    let hash = if let Some(file) = &mut file {
+                    let mut hash = if let Some(file) = &mut file {
                         prefix(file, cp.bytes, &signal)?
                     } else {
                         Sha256::new()
@@ -251,8 +309,11 @@ impl Target for RecoverableFile {
                     };
                     if cp.bytes != 0 {
                         let scan = crate::isobmff::scan_file(
-                            file.as_mut().ok_or_else(corruption)?,
-                            cp.bytes,
+                            &mut crate::mp4::ReservedReader::new(
+                                file.as_mut().ok_or_else(corruption)?,
+                                reserve,
+                            ),
+                            cp.bytes.checked_sub(reserve).ok_or_else(corruption)?,
                             false,
                             false,
                             &check,
@@ -334,6 +395,9 @@ impl Target for RecoverableFile {
                     file.set_len(cp.bytes).map_err(|e| output_error(e.into()))?;
                     file.seek(SeekFrom::Start(cp.bytes))
                         .map_err(|e| output_error(e.into()))?;
+                    if cp.bytes == 0 {
+                        reserve_header(&mut file, reserve, &mut hash)?;
+                    }
                     Ok((file, hash))
                 })
                 .await
@@ -341,7 +405,11 @@ impl Target for RecoverableFile {
                 Ok(FileWriter {
                     file: tokio::fs::File::from_std(file),
                     hash,
-                    bytes: checkpoint.bytes,
+                    bytes: if checkpoint.bytes == 0 {
+                        reserve
+                    } else {
+                        checkpoint.bytes
+                    },
                 })
             } else {
                 if self.path.exists() {
@@ -472,8 +540,10 @@ impl Target for RecoverableFile {
                 let source = self.partial.clone();
                 let target = self.path.clone();
                 let signal = self.shared.signal.clone();
+                let in_place = self.recovery.in_place();
+                let reserve = self.prefix_bytes();
                 let sync = self.recovery.durability == CheckpointDurability::SyncAll;
-                let (mut temporary, size, digest, tracks, samples) =
+                let (mut temporary, ready_path, size, digest, tracks, samples) =
                     tokio::task::spawn_blocking(move || -> EngineResult<_> {
                         let check = || {
                             if signal.is_cancelled() {
@@ -482,20 +552,41 @@ impl Target for RecoverableFile {
                                 Ok(())
                             }
                         };
-                        let mut input =
-                            std::fs::File::open(&source).map_err(|e| output_error(e.into()))?;
+                        let mut input = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(in_place)
+                            .open(&source)
+                            .map_err(|e| output_error(e.into()))?;
                         let limit = input.metadata().map_err(|e| output_error(e.into()))?.len();
-                        let scan =
-                            crate::isobmff::scan_file(&mut input, limit, true, false, &check)
-                                .map_err(media_error)?;
+                        let scan = crate::isobmff::scan_file(
+                            &mut crate::mp4::ReservedReader::new(&mut input, reserve),
+                            limit.checked_sub(reserve).ok_or_else(corruption)?,
+                            true,
+                            false,
+                            &check,
+                        )
+                        .map_err(media_error)?;
                         let tracks =
                             crate::isobmff::file_tracks(&scan.init).map_err(media_error)?;
                         let samples = scan.sample_counts.iter().sum::<usize>();
-                        let (temp, mut file) = temporary_file(&target).map_err(output_error)?;
+                        let mux = Mp4Muxer::from_fragments(tracks, scan.samples);
                         fault!("classic.write.before");
-                        let (size, tracks) = Mp4Muxer::from_fragments(tracks, scan.samples)
-                            .write_file(&mut input, &mut file, &check)
-                            .map_err(output_error)?;
+                        let (temp, ready_path, mut file, size, tracks) = if in_place {
+                            check().map_err(output_error)?;
+                            mark_in_place(&target)?;
+                            fault!("in_place.marked");
+                            let (size, tracks) = mux
+                                .finalize_in_place(&mut input, &scan.init, limit, reserve, &check)
+                                .map_err(output_error)?;
+                            (None, source, input, size, tracks)
+                        } else {
+                            let (temp, mut file) = temporary_file(&target).map_err(output_error)?;
+                            let (size, tracks) = mux
+                                .write_file(&mut input, &mut file, &check)
+                                .map_err(output_error)?;
+                            let ready_path = temp.0.clone();
+                            (Some(temp), ready_path, file, size, tracks)
+                        };
                         fault!("classic.write.after");
                         fault!("classic.flush.before");
                         std::io::Write::flush(&mut file).map_err(|e| output_error(e.into()))?;
@@ -507,22 +598,23 @@ impl Target for RecoverableFile {
                         fault!("classic.sync.after");
                         drop(file);
                         let mut read =
-                            std::fs::File::open(&temp.0).map_err(|e| output_error(e.into()))?;
+                            std::fs::File::open(&ready_path).map_err(|e| output_error(e.into()))?;
                         let digest: [u8; 32] = prefix(&mut read, size, &signal)?.finalize().into();
-                        Ok((temp, size, digest, tracks, samples))
+                        Ok((temp, ready_path, size, digest, tracks, samples))
                     })
                     .await
                     .map_err(|_| fail(EngineErrorKind::Output))??;
                 if self.shared.signal.is_cancelled() {
                     return Err(fail(EngineErrorKind::Cancelled));
                 }
-                let name = temporary
-                    .0
+                let name = ready_path
                     .to_str()
                     .ok_or_else(|| fail(EngineErrorKind::InvalidOptions))?
                     .to_owned();
                 // Transfer ownership before handing the checkpoint to external persistence.
-                let _retained = std::mem::take(&mut temporary.0);
+                if let Some(temp) = &mut temporary {
+                    let _retained = std::mem::take(&mut temp.0);
+                }
                 report.media.bytes_written = size;
                 report.media.tracks = tracks;
                 report.classic_index_samples = samples as u64;
@@ -594,8 +686,9 @@ impl Target for RecoverableFile {
                     .unwrap_or((writer.bytes, writer.hash.clone().finalize().into()));
                 self.outputs.push(identity);
             }
-            // The durable partial is retained so an older finalizing checkpoint can
-            // verify a publication interrupted before its final callback persisted.
+            // Copy retains the original partial for finalization recovery.
+            // InPlace retains the converted partial and barrier until the caller
+            // durably persists Completed or explicitly abandons this recording.
             Ok(())
         })
     }
@@ -680,6 +773,9 @@ impl SessionCore {
         if self.subtitle_sink.is_some() && !self.durable_subtitles() {
             return self.finish(Err(fail(EngineErrorKind::InvalidOptions)));
         }
+        if recovery.in_place() && (1..8).contains(&recovery.header_reserve) {
+            return self.finish(Err(fail(EngineErrorKind::InvalidOptions)));
+        }
         self.resources.enable_recovery();
         let parent = path
             .parent()
@@ -690,7 +786,20 @@ impl SessionCore {
             .file_name()
             .ok_or_else(|| fail(EngineErrorKind::InvalidOptions))?;
         let path = directory.join(name);
-        let identity = crate::resume::digest(path.as_os_str().as_encoded_bytes());
+        let mut identity_bytes = path.as_os_str().as_encoded_bytes().to_vec();
+        if recovery.in_place() {
+            identity_bytes.extend_from_slice(b"\0hls-in-place-v1\0");
+            identity_bytes.extend_from_slice(&recovery.header_reserve.to_be_bytes());
+        }
+        let identity = crate::resume::digest(&identity_bytes);
+        if !self.recovery.as_ref().is_some_and(|cp| cp.completed)
+            && let Err(error) = reject_in_place_marker(&child_path(
+                &path,
+                self.recovery.as_ref().map_or(0, |cp| cp.output),
+            ))
+        {
+            return self.finish(Err(error));
+        }
         let sidecars = match SidecarFiles::new(&self, &path) {
             Ok(sidecars) => sidecars,
             Err(error) => return self.finish(Err(error)),
